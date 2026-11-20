@@ -109,6 +109,8 @@ codeerratum review --diff HEAD~1 -o review.md
 
 Hand the resulting `review.md` to Claude Code / Cursor / Cline. Every run leaves traceable artifacts in `.codeerratum/runs/<run_id>/` (`input.diff`, `units.json`, `calls.json`, `findings.json`, `static_diags.json`); the feedback database sits in the same directory and never pollutes your working tree.
 
+A real artifact, without spending a token, is in [`examples/sample-review.md`](examples/sample-review.md) — the format is genuine, the content comes from the bundled fake endpoint.
+
 In dual mode the report splits into three sections: **unique findings** (reported by only one model — the most valuable part) / **conflicts** (models disagree, awaiting a human call) / **consensus**.
 
 ### Project rules (optional)
@@ -185,8 +187,19 @@ codeerratum mcp --repo /path/to/repo
 ```
 
 JSON-RPC over stdio, four tools: `review_diff`, `list_runs`, `get_finding`,
-`check_docs_drift`. Register it as a stdio server in Claude Code, Cursor or Cline and the
-agent can review its own output before handing it back — no shell round-trip, no copy-paste.
+`check_docs_drift`. Register it as a stdio server and the agent can review its own output
+before handing it back — no shell round-trip, no copy-paste:
+
+```json
+{
+  "mcpServers": {
+    "codeerratum": {
+      "command": "codeerratum",
+      "args": ["mcp", "--repo", "/absolute/path/to/repo"]
+    }
+  }
+}
+```
 
 ### Local models
 

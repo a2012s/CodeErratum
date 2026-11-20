@@ -109,6 +109,8 @@ codeerratum review --diff HEAD~1 -o review.md
 如果这段代码是某个模型写的，用 `--author-model <model_id>` 把它排除出审查席位（设计底线第 1 条）。
 
 产出 `review.md` 交给 Claude Code / Cursor / Cline 执行；每次运行的可追溯产物落在 `.codeerratum/runs/<run_id>/`（`input.diff` / `units.json` / `calls.json` / `findings.json` / `static_diags.json`），反馈数据库在同一目录，不会污染工作区。
+
+不花 token 就能看到真实格式的产物：[`examples/sample-review.md`](examples/sample-review.md)——格式是真的，内容来自仓库自带的假模型端点。
 双模型下报告分三区：**独有发现**（仅一家报出，最值得看）/ **冲突区**（意见相反，待人工裁决）/ **共识区**。
 审查后反馈：`codeerratum accept <finding_id>` / `codeerratum reject <finding_id> --reason "..."`，`codeerratum stats` 看采纳率，`codeerratum compare` 看各模型独有发现数与实测画像。这三个命令在仓库任意子目录执行都指向同一个数据库。
 
@@ -181,8 +183,19 @@ codeerratum mcp --repo /path/to/repo
 ```
 
 stdio 上的 JSON-RPC，暴露四个工具：`review_diff` / `list_runs` / `get_finding` /
-`check_docs_drift`。在 Claude Code、Cursor、Cline 里注册成 stdio server，agent 就能在
-交活之前先审一遍自己的输出，不用切终端、不用复制粘贴。
+`check_docs_drift`。注册成 stdio server，agent 就能在交活之前先审一遍自己的输出，
+不用切终端、不用复制粘贴：
+
+```json
+{
+  "mcpServers": {
+    "codeerratum": {
+      "command": "codeerratum",
+      "args": ["mcp", "--repo", "/absolute/path/to/repo"]
+    }
+  }
+}
+```
 
 ### 本地模型
 
