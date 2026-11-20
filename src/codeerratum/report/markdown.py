@@ -32,6 +32,13 @@ HEADER = """# Code Review 工单
 """
 
 
+def _spec_note(collection: FindingCollection) -> str:
+    """Level plus the reason it was assigned — a bare 'L1' reads as a measurement."""
+    if collection.spec_level_reason:
+        return f"{collection.spec_level}（{collection.spec_level_reason}）"
+    return collection.spec_level
+
+
 def _rules_note(collection: FindingCollection) -> str:
     """Name the project rules in the header — two runs over one diff can differ only here."""
     if not collection.house_rules_sha:
@@ -174,7 +181,7 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
             model=collection.model_id,
             reviewers=reviewers,
             ts=timestamp,
-            spec_level=collection.spec_level,
+            spec_level=_spec_note(collection),
             mode=collection.mode,
             total=len(ordered),
             shown=len(display),

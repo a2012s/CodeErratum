@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.4.0] — 四、五、六期
+
+第四期把结果送到 PR 上，第五期补文档与漂移，第六期接 MCP 与多语言。同时清掉三处
+「看起来是数字、其实是常量」的设计债。
+
+### Added
+
+- `codeerratum pr [--post]`：读 GitHub event，跑审查，行内评论上限 5 条 + 1 条摘要。
+  默认 dry-run 并把待发内容写入 `pr-comments.json`。
+- `action.yml` 与 `docs/github-action.yml` 示例；fork PR 拿不到 secrets 的坑已注明。
+- `codeerratum docs [--check] [--strict]`：从 AST 生成模块文档与签名基线，
+  漂移检测只看 API 形状变化，不看行号移动。
+- `codeerratum mcp`：stdio MCP server，四个工具 `review_diff` / `list_runs` /
+  `get_finding` / `check_docs_drift`。
+- Web UI 新增「文档」抽屉：模块树、公开符号数、签名漂移（`GET /api/docs`）。
+- `detect_language()`：按扩展名给单元打语言标签，非 Python 文件按文件级审查。
+- `spec.py`：规格等级真实探测（L4 契约 / L3 外部规格 / L2 自述 / L1 仅代码），
+  报告头同时给出判定依据。
+- `abstain_warning()`：证伪轮 `insufficient_context` 超过 30% 时进入 notices。
+- 模型画像回流：`save_run` 累计 `model_profile`（断言/独有/确认/反驳），
+  下次运行注入 `ModelSpec.measured_*`；`apply_measured_profiles()` 负责这一步。
+
+### Changed
+
+- `split_diff` 按文件扩展名推断语言，`language=` 参数变成强制覆盖。
+- prompt 的代码块标记改用单元的真实语言，而不是写死 `python`。
+- 报告头「规格等级」由 `L1` 变成 `L1（无规格来源，仅凭代码判断）` 这类可辩驳的表述。
+
+### Fixed
+
+- `annotation_coverage` 曾用绝对路径判断跳过目录，任何位于 dot 目录下的仓库
+  （临时目录、CI workspace）都会被整体跳过，覆盖率恒为 0。
+- `Store.model_profile_map()` 与既有 `model_profiles()` 重名，改为独立名称。
+
+### Security
+
+- PR 评论按 hunk 过滤锚点：GitHub 会因一行不在 diff 而拒掉整批，降级为摘要而非全丢。
+- 同一 commit 重跑不重复评论（隐藏 marker + 先查后发）。
+- MCP server 只读本地仓库，工具参数中的路径不接受 URL；stdout 只输出协议消息。
+
 ## [0.3.0] — 项目规范
 
 让审查知道「本项目的规矩」，降低噪音。形态是**追加**而非替换：把 system prompt 交给用户整段覆盖，会把静默失败引进来（锚点校验全挂 → 空报告 → 看起来像「没有 bug」）。

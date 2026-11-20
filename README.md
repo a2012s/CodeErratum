@@ -20,11 +20,11 @@ Success criterion: sample 10 findings at random; at least 7 must be executed cor
 
 ## Status
 
-- **Phases 1–3 implemented and tested** (73 tests + real-HTTP end-to-end + CI)
-- Commands: `review` (write the work order) / `accept` / `reject` / `stats` (feedback loop) / `compare` (cross-model comparison and model profiles) / `ui` (local web UI)
-- Written in Python ≥3.11; reviews Python; any OpenAI-compatible provider; `correctness` lens
+- **Phases 1–6 implemented and tested** (152 tests + real-HTTP end-to-end + CI)
+- Commands: `review` (write the work order) / `pr` (post to a pull request) / `docs` (module map + signature drift) / `mcp` (stdio server for coding agents) / `ui` (local web UI) / `accept` / `reject` / `stats` / `compare`
+- Written in Python ≥3.11; symbol-level review for Python, file-level for everything else; any OpenAI-compatible provider (cloud or local); `correctness` lens
 - Three review modes: `quick` (single model) / `dual` (two models + falsification) / `committee` (three models)
-- No Docker. Three environment variables get a single model running; multi-model uses one JSON config
+- No Docker. Three environment variables get a single model running — including a local Ollama endpoint; multi-model uses one JSON config
 
 ## Install
 
@@ -141,9 +141,62 @@ codeerratum ui --port 9000 --no-browser
 
 ![CodeErratum web UI](https://raw.githubusercontent.com/a2012s/CodeErratum/main/docs/ui.png)
 
+The docs drawer is the same server, one click away — module map and signature drift without a build step:
+
+![CodeErratum docs drawer](https://raw.githubusercontent.com/a2012s/CodeErratum/main/docs/docs.png)
+
 Standard library only — no FastAPI, no bundler, no `node_modules`. The install story stays "three environment variables and you're done", and the UI adds what a terminal can't show: the three zones side by side, evidence strength per finding, the falsification trail, and accept/reject buttons that write straight into `feedback.db`.
 
 Pick the diff range, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only and rejects cross-origin POSTs, so a random web page cannot trigger a paid review through your browser.
+
+### Posting to a pull request
+
+```bash
+codeerratum pr                        # dry run: prints exactly what would be posted
+GITHUB_TOKEN=... codeerratum pr --post
+```
+
+Inline comments cap at five, each on a line that is genuinely part of the diff. GitHub
+rejects the *entire* review when one comment points outside it, so a finding that cannot be
+placed goes into the summary table instead of taking the other four down with it. Re-running
+on the same commit does not repost — the summary carries a hidden marker and the poster
+checks before writing.
+
+In Actions, use the bundled [`action.yml`](action.yml); the example workflow is
+[`docs/github-action.yml`](docs/github-action.yml). Two things bite here: `fetch-depth: 0`
+is required (a shallow clone cannot see the merge base), and fork PRs have no secrets — the
+sample skips them explicitly rather than failing red on every outside contribution.
+
+### Module docs and signature drift
+
+```bash
+codeerratum docs                   # docs/api/*.md + .codeerratum/docs-index.json
+codeerratum docs --check --strict  # CI gate: exit 1 when a public signature changed
+```
+
+Generated from the AST, not by a model, so the docs cannot drift on their own. Drift means
+"the public API shape changed": line numbers are recorded for navigation but never compared,
+because a check that fires on every refactor is a check nobody keeps switched on.
+
+### MCP server
+
+```bash
+codeerratum mcp --repo /path/to/repo
+```
+
+JSON-RPC over stdio, four tools: `review_diff`, `list_runs`, `get_finding`,
+`check_docs_drift`. Register it as a stdio server in Claude Code, Cursor or Cline and the
+agent can review its own output before handing it back — no shell round-trip, no copy-paste.
+
+### Local models
+
+Any OpenAI-compatible endpoint works, and no API key is required:
+
+```bash
+export CODEERRATUM_BASE_URL=http://localhost:11434/v1   # Ollama
+export CODEERRATUM_MODEL=qwen2.5-coder:14b
+codeerratum review --diff HEAD~1
+```
 
 ## Design invariants
 
@@ -160,10 +213,15 @@ Pick the diff range, mode, unit cap and author model in the left panel; the run 
 | 1 | Executable work order: diff → a `review.md` an AI can follow | ✅ Done |
 | 2 | Trust: eliminate hallucinated locations and vacuous claims | ✅ Done |
 | 3 | Heterogeneous cross-check: two models + falsification, surfacing unique findings | ✅ Done |
-| 4 | Automation: GitHub Action, PR comments, rule library | Planned |
-| 5 | Doc generation: API docs / user manuals (separate milestone, cuttable) | Planned |
-| 6 | Extensions: sandbox reproduction, more languages, MCP (cuttable) | Planned |
-| UI | Local web UI: three-zone report, in-place verdicts | ✅ Done |
+| 4 | Automation: GitHub Action, PR comments, rule library | ✅ Done |
+| 5 | Doc generation: module map + signature drift | ✅ Done |
+| 6 | Extensions: MCP server, local models, language tags — **sandbox reproduction deliberately not built** | ✅ Done (partial by design) |
+| UI | Local web UI: three-zone report, in-place verdicts, docs drawer | ✅ Done |
+
+Sandbox reproduction was the one feature I refused to add: it means executing untrusted
+code from a pull request inside an unauthenticated local service. The risk/benefit is
+not close, and "we run your code to prove the bug" is a promise a side project cannot
+keep safely.
 
 Full scope and acceptance criteria: [开发计划.md](开发计划.md) (Chinese).
 

@@ -212,6 +212,10 @@ class FindingCollection(BaseModel):
     commit: str
     model_id: str
     spec_level: SpecLevel
+    spec_level_reason: str = Field(
+        default="",
+        description="Why this level was assigned; shown next to it so the judgement is arguable",
+    )
     mode: str = "quick"
     reviewer_models: list[str] = Field(default_factory=list)
     falsifier_model: str | None = None

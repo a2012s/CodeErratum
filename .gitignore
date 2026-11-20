@@ -29,3 +29,6 @@ build/
 
 # 锁文件要进仓库（依赖需可复现），抵消全局 gitignore 里的 *.lock
 !uv.lock
+
+# 生成物：codeerratum docs 的输出
+docs/api/

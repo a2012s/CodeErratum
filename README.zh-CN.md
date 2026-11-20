@@ -20,11 +20,11 @@
 
 ## 当前状态
 
-- **第一、二、三期已实现并通过测试**（73 tests + 真实 HTTP 端到端验证 + CI）
-- 可用命令：`review`（出工单）/ `accept` / `reject` / `stats`（反馈闭环）/ `compare`（交叉对照与模型画像）/ `ui`（本地图形界面）
-- 实现语言 Python ≥3.11；目标语言 Python；OpenAI 兼容 provider；correctness 视角
+- **第一至六期已实现并通过测试**（152 tests + 真实 HTTP 端到端验证 + CI）
+- 可用命令：`review`（出工单）/ `pr`（贴到 PR）/ `docs`（模块文档与签名漂移）/ `mcp`（给 agent 用的 stdio 服务）/ `ui`（本地图形界面）/ `accept` / `reject` / `stats` / `compare`
+- 实现语言 Python ≥3.11；Python 走符号级审查，其他语言走文件级；OpenAI 兼容 provider（云端或本地）；correctness 视角
 - 三种审查模式：`quick`（单模型）/ `dual`（双模型+证伪）/ `committee`（三模型）
-- 不依赖 Docker；单模型三环境变量即可跑通，多模型用 JSON 配置
+- 不依赖 Docker；单模型三环境变量即可跑通（含本地 Ollama），多模型用 JSON 配置
 
 ## 安装
 
@@ -140,9 +140,59 @@ codeerratum ui --port 9000 --no-browser
 
 ![CodeErratum 图形界面](https://raw.githubusercontent.com/a2012s/CodeErratum/main/docs/ui.png)
 
+文档抽屉用的是同一个服务，点一下就到——模块地图与签名漂移，不需要任何构建步骤：
+
+![CodeErratum 文档抽屉](https://raw.githubusercontent.com/a2012s/CodeErratum/main/docs/docs.png)
+
 纯标准库实现——没有 FastAPI、没有打包工具、没有 node_modules。装依赖的故事仍然只有"三个环境变量"，界面只是补上终端给不了的东西：三区分流并排、每条发现的证据强度、证伪轮各方意见，以及直接写回 `feedback.db` 的采纳/驳回按钮。
 
 左侧选 diff 范围、模式、单元上限和作者模型（写这段代码的模型不进入审查席位），下方是历史运行，点开任意一次即可。只绑本机回环地址，并拒绝跨站 POST——否则随便哪个网页都能替你烧 token。
+
+### 贴到 PR 上
+
+```bash
+codeerratum pr                        # dry-run：只打印将要发送的内容
+GITHUB_TOKEN=... codeerratum pr --post
+```
+
+行内评论上限 5 条，且每一行都必须真的在 diff 里。GitHub 会因为一条评论指到 diff 外而
+把**整个 review** 拒掉，所以放不进 diff 的发现会转到摘要表，而不是拖着另外四条一起失败。
+同一 commit 重跑不会重复刷评论（摘要带隐藏 marker，发之前先查）。
+
+在 Actions 里用仓库自带的 [`action.yml`](action.yml)，示例 workflow 见
+[`docs/github-action.yml`](docs/github-action.yml)。两个坑要提前知道：`fetch-depth: 0`
+是必须的（浅克隆看不到 merge base）；fork 的 PR 拿不到 secrets，示例里显式跳过，
+而不是让每个外部贡献都红一次。
+
+### 模块文档与签名漂移
+
+```bash
+codeerratum docs                   # 生成 docs/api/*.md 与 .codeerratum/docs-index.json
+codeerratum docs --check --strict  # CI 闸门：公开签名变了就 exit 1
+```
+
+文档由 AST 生成、不经模型，所以它自己不会漂。漂移的定义是「公开 API 的形状变了」：
+行号会记录但从不比较——每次重构都报警的检查，一周之内就会被人关掉。
+
+### MCP 服务
+
+```bash
+codeerratum mcp --repo /path/to/repo
+```
+
+stdio 上的 JSON-RPC，暴露四个工具：`review_diff` / `list_runs` / `get_finding` /
+`check_docs_drift`。在 Claude Code、Cursor、Cline 里注册成 stdio server，agent 就能在
+交活之前先审一遍自己的输出，不用切终端、不用复制粘贴。
+
+### 本地模型
+
+任何 OpenAI 兼容端点都能用，且不需要 API key：
+
+```bash
+export CODEERRATUM_BASE_URL=http://localhost:11434/v1   # Ollama
+export CODEERRATUM_MODEL=qwen2.5-coder:14b
+codeerratum review --diff HEAD~1
+```
 
 ## 设计底线
 
@@ -159,10 +209,13 @@ codeerratum ui --port 9000 --no-browser
 | 一 | 可执行工单：diff → AI 能照着改的 `review.md` | ✅ 已实现 |
 | 二 | 可信度：消除幻觉定位与空泛结论 | ✅ 已实现 |
 | 三 | 异构交叉：双模型 + 证伪，产出独有发现 | ✅ 已实现 |
-| 四 | 自动化接入：GitHub Action、PR 评论、规则库 | 待开发 |
-| 五 | 文档生成：API 文档 / 用户手册（独立里程碑，可砍） | 待开发 |
-| 六 | 扩展：沙箱复现、多语言、MCP（可砍） | 待开发 |
-| 旁支 | 本地 Web UI：三区分流、界面内裁决 | ✅ 已实现 |
+| 四 | 自动化接入：GitHub Action、PR 评论、规则库 | ✅ 已实现 |
+| 五 | 文档生成：模块地图 + 签名漂移 | ✅ 已实现 |
+| 六 | 扩展：MCP 服务、本地模型、语言标签（**沙箱复现明确不做**） | ✅ 已实现（按设计裁剪） |
+| 旁支 | 本地 Web UI：三区分流、界面内裁决、文档抽屉 | ✅ 已实现 |
+
+沙箱复现是唯一明确拒绝的功能：它意味着在无鉴权的本地服务里执行来自 PR 的不可信代码。
+风险收益不成比例，而且「我运行你的代码来证明 bug」这个承诺，个人项目兜不住。
 
 完整范围与验收见 [开发计划.md](开发计划.md)。
 

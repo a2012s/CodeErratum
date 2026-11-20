@@ -113,6 +113,7 @@ class ReviewStore:
                         created_at,
                     ),
                 )
+        self.update_profiles(collection)
 
     def save_comparison(self, collection: FindingCollection, created_at: str) -> None:
         """Phase-3: persist cross-model comparison data for the eval/resume narrative."""
@@ -193,6 +194,65 @@ class ReviewStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM model_profile ORDER BY n_assert DESC").fetchall()
             return [dict(r) for r in rows]
+
+    def update_profiles(self, collection: FindingCollection) -> None:
+        """Accumulate the per-model record that later feeds routing.
+
+        Assertions and uniqueness come from findings. Precision comes from the
+        falsification verdicts rather than human adjudication, because verdicts
+        accumulate on every run while accept/reject depends on someone remembering
+        to click — and a routing signal that needs manual input never gets enough
+        samples to clear the n>=30 threshold.
+        """
+        tally: dict[str, dict[str, int]] = {}
+
+        def bump(model_id: str, key: str) -> None:
+            if not model_id:
+                return
+            row = tally.setdefault(model_id, {"a": 0, "u": 0, "c": 0, "r": 0})
+            row[key] += 1
+
+        for f in collection.findings:
+            unique = f.agreement == "unique" and len(f.source_models) == 1
+            for model_id in f.source_models:
+                bump(model_id, "a")
+                if unique:
+                    bump(model_id, "u")
+            for verdict in f.verdicts:
+                if verdict.role == "confirm":
+                    bump(verdict.model_id, "c")
+                elif verdict.role == "refute":
+                    bump(verdict.model_id, "r")
+
+        if not tally:
+            return
+        with self._conn() as conn:
+            for model_id, row in tally.items():
+                conn.execute(
+                    "INSERT INTO model_profile (model_id, family) VALUES (?, '') "
+                    "ON CONFLICT(model_id) DO NOTHING",
+                    (model_id,),
+                )
+                conn.execute(
+                    "UPDATE model_profile SET n_assert = n_assert + ?, "
+                    "n_unique = n_unique + ?, n_confirmed = n_confirmed + ?, "
+                    "n_refuted = n_refuted + ? WHERE model_id = ?",
+                    (row["a"], row["u"], row["c"], row["r"], model_id),
+                )
+
+    def model_profile_map(self) -> dict[str, dict]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM model_profile").fetchall()
+        return {
+            r["model_id"]: {
+                "family": r["family"] or "",
+                "n_assert": r["n_assert"] or 0,
+                "n_unique": r["n_unique"] or 0,
+                "n_confirmed": r["n_confirmed"] or 0,
+                "n_refuted": r["n_refuted"] or 0,
+            }
+            for r in rows
+        }
 
     def set_status(self, finding_id: str, status: str, reason: str = "") -> bool:
         with self._conn() as conn:

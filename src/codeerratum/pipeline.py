@@ -22,6 +22,7 @@ from .ingest import DiffError, get_commit, get_diff, split_diff
 from .models import FindingCollection, ModelRegistry, ReviewUnit
 from .report import render_markdown
 from .review import MAX_HOUSE_RULES_CHARS, run_review, sanitize_house_rules, truncate_house_rules
+from .spec import detect as detect_spec_level
 from .store import ReviewStore
 
 STATE_DIR = ".codeerratum"
@@ -126,6 +127,46 @@ def resolve_mode(mode: str, config: Config) -> str:
     if resolved not in VALID_MODES:
         raise ConfigError(f"Invalid mode {resolved!r}; choose quick/dual/committee")
     return resolved
+
+
+def abstain_warning(findings: list) -> str:
+    """Return a notice when too many falsification verdicts were 'insufficient_context'.
+
+    A high abstain rate is a signal about *our* context, not about the code: the
+    falsifier keeps saying it cannot decide. Surfacing it turns a silent degradation
+    into a number the user can act on.
+    """
+    roles = [verdict.role for f in findings for verdict in f.verdicts]
+    if not roles:
+        return ""
+    abstained = sum(1 for role in roles if role == "abstain")
+    if abstained / len(roles) <= 0.3:
+        return ""
+    return (
+        f"证伪轮 {abstained}/{len(roles)} 判为证据不足（>30%），上下文构建可能不足，结论请谨慎采用"
+    )
+
+
+def apply_measured_profiles(registry: ModelRegistry, store: ReviewStore) -> int:
+    """Fold the accumulated per-model record back into routing scores.
+
+    Confidence is deliberately conservative: ``ModelSpec.score`` ignores the measured
+    value below 30 samples, and precision needs five decided verdicts before the
+    ratio means anything. A routing change driven by three data points is worse than
+    no routing change at all.
+    """
+    profiles = store.model_profile_map()
+    applied = 0
+    for spec in registry.models:
+        profile = profiles.get(spec.model_id)
+        if not profile or not profile["n_assert"]:
+            continue
+        spec.measured_n = int(profile["n_assert"])
+        spec.measured_unique_rate = profile["n_unique"] / profile["n_assert"]
+        decided = profile["n_confirmed"] + profile["n_refuted"]
+        spec.measured_precision = profile["n_confirmed"] / decided if decided >= 5 else None
+        applied += 1
+    return applied
 
 
 @dataclass
@@ -250,6 +291,16 @@ def execute_review(
         say(capped)
 
     say(f"Mode: {run_mode} | models: {len(config.registry.models)}")
+
+    store = store_for(repo_root)
+    profiled = apply_measured_profiles(config.registry, store)
+    if profiled:
+        say(f"Model profiles: {profiled} model(s) have accumulated history")
+
+    scan = (repo_root / "src") if (repo_root / "src").is_dir() else None
+    spec_level, spec_reason = detect_spec_level(repo_root, scan=scan)
+    say(f"Spec level: {spec_level} ({spec_reason})")
+
     try:
         collection, calls, all_diags = asyncio.run(
             run_review(
@@ -268,8 +319,18 @@ def execute_review(
     failed = [r for r in collection.rejected if r.get("reason") == "provider_error"]
     if failed:
         notices.append(f"{len(failed)} 个单元调用模型失败，相关文件未被审查")
+
+    # A high abstain rate is a signal about *our* context, not about the code: the
+    # falsifier keeps saying it cannot decide. Surfacing it turns a silent
+    # degradation into a number the user can act on.
+    warning = abstain_warning(collection.findings)
+    if warning:
+        notices.append(warning)
+
     collection.notes = notices
     collection.commit = get_commit(repo_root)
+    collection.spec_level = spec_level
+    collection.spec_level_reason = spec_reason
     collection.house_rules_sha = rules.sha
     collection.house_rules_chars = rules.chars
     collection.house_rules_source = rules.source
@@ -293,7 +354,6 @@ def execute_review(
         out_path = out if out.is_absolute() else repo_root / out
         out_path.write_text(markdown, encoding="utf-8")
 
-    store = store_for(repo_root)
     store.save_run(collection, ts)
     store.save_comparison(collection, ts)
 
