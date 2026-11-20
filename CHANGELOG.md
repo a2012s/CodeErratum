@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.3.0] — 项目规范
+
+让审查知道「本项目的规矩」，降低噪音。形态是**追加**而非替换：把 system prompt 交给用户整段覆盖，会把静默失败引进来（锚点校验全挂 → 空报告 → 看起来像「没有 bug」）。
+
+### Added
+
+- `codeerratum review --rules <file>`；不传则自动发现 `<repo>/.codeerratum/rules.md`。
+- 规范包在 `<house_rules>` 块内，位置在硬规则之后、`# Output` 之前；块头显式声明「与硬规则冲突时硬规则优先」。
+- UI 侧栏折叠区可直接编辑规范；`/api/meta` 回传自动发现状态（路径 / 字数 / sha），空白 textarea 的语义因此不再含糊。
+- `FindingCollection` 新增 `house_rules_sha` / `house_rules_chars` / `house_rules_source`，`review.md` 头部同步显示。同一 diff 两次结果不同时，先看这里。
+- `tests/test_house_rules.py` 14 项，含「规则确实进了发给模型的 messages」这条端到端断言。
+
+### Changed
+
+- prompt 模板新增 `{{HOUSE_RULES}}` 占位符；加载器找不到占位符时**抛错**，而不是静默跳过——否则以后改 prompt 时规则会无声消失。
+- 证伪轮不接收项目规范（有意为之）：吸收了项目规矩的证伪者会退化成第二个审查者。
+
+### Security
+
+- 用户文本里的 `<house_rules>` / `</house_rules>` 先剥离，防止提前闭合标签越界成指令。
+- 规范上限 4000 字，超出截断并声明；防止用户文本把硬规则挤出上下文窗口。
+- UI 只接受规范**文本**，不接受路径，本地服务不具备读任意文件的能力。
+
 ## [0.2.0] — 图形界面
 
 `codeerratum ui`：本地 Web UI，标准库实现，零新增依赖。目的不是好看，是把终端里读不出来的卖点（三区分流、证据等级、证伪记录）变成一屏能看懂的东西。

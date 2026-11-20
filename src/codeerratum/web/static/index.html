@@ -88,6 +88,25 @@
   .row2 { display: grid; grid-template-columns: 1fr 84px; gap: 8px; align-items: end; }
   .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
   .check input { width: auto; }
+  .rules { border: 1px solid var(--border); border-radius: 8px; padding: 0 10px;
+    flex-shrink: 0; }
+  .rules[open] { padding-bottom: 10px; }
+  .rules summary { cursor: pointer; font-size: 12.5px; color: var(--muted); padding: 8px 0; }
+  .rules summary::marker { color: var(--muted); }
+  .badge-quiet { font-size: 11px; color: var(--muted); margin-left: 4px; }
+  .rules textarea {
+    width: 100%; box-sizing: border-box; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 7px; padding: 8px 9px; resize: vertical;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    line-height: 1.55;
+  }
+  .rules textarea:focus { outline: none; border-color: var(--accent); }
+  .hint { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 6px; }
+  .hint code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
+    padding: 0 3px;
+  }
   .runs-title { margin-top: 8px; font-size: 12px; color: var(--muted); letter-spacing: .04em; }
   ul#runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
   ul#runs li {
@@ -245,6 +264,12 @@
       <label for="authorModel">作者模型（可选，排除出审查席位）</label>
       <input id="authorModel" placeholder="写这段代码的模型 id" spellcheck="false">
     </div>
+    <details class="rules">
+      <summary>项目规范（可选）<span id="rulesBadge" class="badge-quiet"></span></summary>
+      <textarea id="houseRules" rows="5" spellcheck="false"
+        placeholder="只写「该看什么 / 该跳过什么」，例如：&#10;- 本项目不用 type hints，缺注解不算问题&#10;- 日志里 f-string 的性能开销已权衡过，不要报"></textarea>
+      <div class="hint" id="rulesHint">留空则自动读取 <code>.codeerratum/rules.md</code>（若存在）。规范只会追加，不能覆盖格式与锚点硬规则。</div>
+    </details>
     <button class="primary" id="runBtn">运行审查</button>
     <div id="models" class="chips"></div>
     <div class="runs-title">历史运行</div>
@@ -332,7 +357,23 @@ async function boot() {
       .map((m) => `<span class="chip model">${esc(m.model_id)} · ${esc(m.family)}</span>`).join("");
     $("mode").value = STATE.meta.mode;
   }
+  renderRulesHint(STATE.meta.house_rules);
   await loadRuns(true);
+}
+
+function renderRulesHint(info) {
+  if (!info) return;
+  const badge = $("rulesBadge");
+  const hint = $("rulesHint");
+  if (info.applied) {
+    badge.textContent = `已检测到 ${info.path} · ${info.chars} 字`;
+    hint.innerHTML = `留空则使用已检测到的 <code>${esc(info.path)}</code>（sha ${esc(info.sha)}）。`
+      + " 在上面填写会整体替换它。";
+  } else {
+    badge.textContent = "";
+    hint.innerHTML = `未检测到 <code>${esc(info.path || ".codeerratum/rules.md")}</code>。`
+      + " 在上面填写即只对本次运行生效。规范只会追加，不能覆盖格式与锚点硬规则。";
+  }
 }
 
 async function loadRuns(autoOpen) {
@@ -378,6 +419,9 @@ function renderRun() {
     `<span class="chip">${run.totals.rejected} 条被拒</span>`,
     run.spec_level ? `<span class="chip">规格 ${esc(run.spec_level)}</span>` : "",
     run.falsifier ? `<span class="chip">证伪者 ${esc(run.falsifier)}</span>` : "",
+    run.house_rules && run.house_rules.applied
+      ? `<span class="chip" title="项目规范会改变审查侧重点，两次结果不同先看这里">规范 ${esc(run.house_rules.chars)} 字 · ${esc(run.house_rules.sha)}</span>`
+      : "",
   ];
   run.models.forEach((m) => chips.push(`<span class="chip model">${esc(m)}</span>`));
   if (run.has_markdown) {
@@ -517,6 +561,7 @@ $("runBtn").onclick = async () => {
     max_units: Number($("maxUnits").value) || 10,
     author_model: $("authorModel").value.trim(),
     write_markdown: $("writeMd").checked,
+    house_rules: $("houseRules").value,
   };
   btn.disabled = true;
   const old = btn.innerHTML;

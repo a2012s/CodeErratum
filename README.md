@@ -20,7 +20,7 @@ Success criterion: sample 10 findings at random; at least 7 must be executed cor
 
 ## Status
 
-- **Phases 1–3 implemented and tested** (50 tests + real-HTTP end-to-end + CI)
+- **Phases 1–3 implemented and tested** (73 tests + real-HTTP end-to-end + CI)
 - Commands: `review` (write the work order) / `accept` / `reject` / `stats` (feedback loop) / `compare` (cross-model comparison and model profiles) / `ui` (local web UI)
 - Written in Python ≥3.11; reviews Python; any OpenAI-compatible provider; `correctness` lens
 - Three review modes: `quick` (single model) / `dual` (two models + falsification) / `committee` (three models)
@@ -110,6 +110,25 @@ codeerratum review --diff HEAD~1 -o review.md
 Hand the resulting `review.md` to Claude Code / Cursor / Cline. Every run leaves traceable artifacts in `.codeerratum/runs/<run_id>/` (`input.diff`, `units.json`, `calls.json`, `findings.json`, `static_diags.json`); the feedback database sits in the same directory and never pollutes your working tree.
 
 In dual mode the report splits into three sections: **unique findings** (reported by only one model — the most valuable part) / **conflicts** (models disagree, awaiting a human call) / **consensus**.
+
+### Project rules (optional)
+
+Tell the reviewer what this project has already decided, so it stops flagging settled questions:
+
+```bash
+codeerratum review --diff HEAD~1 --rules project-rules.md
+# or drop the flag entirely — .codeerratum/rules.md is discovered automatically
+```
+
+```markdown
+<!-- .codeerratum/rules.md -->
+- No type hints in this repo; missing annotations are not a finding.
+- The f-string cost in the logger is a deliberate trade-off; do not report it.
+```
+
+Rules are **appended, never substituted**. They land in a `<house_rules>` block between the hard rules and the output contract, and the prompt states that a project rule loses to a hard rule on conflict. That ordering is not cosmetic: a substituted system prompt lets a rule ask for longer `claim` values or non-verbatim snippets, and the anchor check would then discard every finding — producing a clean, empty report that reads exactly like "no bugs found".
+
+The cap is 4000 characters; anything longer is truncated and the truncation is stated in the report. The rules actually used are recorded as a 12-char sha256 in both `review.md` and `findings.json`, so when two runs over the same diff disagree you can tell whether the prompt changed. The falsification round deliberately does **not** receive project rules — a falsifier that has absorbed your conventions stops being an independent check.
 
 Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject <finding_id> --reason "..."`, `codeerratum stats` for the acceptance rate, `codeerratum compare` for per-model unique-finding counts and measured profiles. All three resolve to the same database from any subdirectory of the repo.
 

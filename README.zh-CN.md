@@ -20,7 +20,7 @@
 
 ## 当前状态
 
-- **第一、二、三期已实现并通过测试**（50 tests + 真实 HTTP 端到端验证 + CI）
+- **第一、二、三期已实现并通过测试**（73 tests + 真实 HTTP 端到端验证 + CI）
 - 可用命令：`review`（出工单）/ `accept` / `reject` / `stats`（反馈闭环）/ `compare`（交叉对照与模型画像）/ `ui`（本地图形界面）
 - 实现语言 Python ≥3.11；目标语言 Python；OpenAI 兼容 provider；correctness 视角
 - 三种审查模式：`quick`（单模型）/ `dual`（双模型+证伪）/ `committee`（三模型）
@@ -111,6 +111,25 @@ codeerratum review --diff HEAD~1 -o review.md
 产出 `review.md` 交给 Claude Code / Cursor / Cline 执行；每次运行的可追溯产物落在 `.codeerratum/runs/<run_id>/`（`input.diff` / `units.json` / `calls.json` / `findings.json` / `static_diags.json`），反馈数据库在同一目录，不会污染工作区。
 双模型下报告分三区：**独有发现**（仅一家报出，最值得看）/ **冲突区**（意见相反，待人工裁决）/ **共识区**。
 审查后反馈：`codeerratum accept <finding_id>` / `codeerratum reject <finding_id> --reason "..."`，`codeerratum stats` 看采纳率，`codeerratum compare` 看各模型独有发现数与实测画像。这三个命令在仓库任意子目录执行都指向同一个数据库。
+
+### 项目规范（可选）
+
+告诉审查「本项目已经拍过板的事」，让它别再报：
+
+```bash
+codeerratum review --diff HEAD~1 --rules project-rules.md
+# 也可以完全不传：.codeerratum/rules.md 会被自动发现
+```
+
+```markdown
+<!-- .codeerratum/rules.md -->
+- 本项目不用类型注解，缺注解不算问题
+- 日志里 f-string 的性能开销是权衡过的，不要报
+```
+
+规范是**追加，不是替换**。它被包在 `<house_rules>` 块里，位置在硬规则之后、输出契约之前，prompt 里明确写了「与硬规则冲突时以硬规则为准」。这个顺序不是排版偏好：如果允许整段替换 system prompt，用户就可能要求更长的 `claim`、或非逐字的 `snippet`，锚点校验会把这类发现全部丢弃——最后返回一份干净的空报告，读起来和「没有 bug」一模一样。
+
+上限 4000 字，超出会截断并在报告里声明。实际生效的规范以 12 位 sha256 同时写进 `review.md` 头部与 `findings.json`：同一个 diff 两次结果不一样时，先看这里是不是换了提示词。证伪轮**故意不接收**项目规范——一个吸收了你家规矩的证伪者，就不再是独立检验。
 
 ## 图形界面（可选）
 

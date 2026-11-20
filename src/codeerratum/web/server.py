@@ -23,12 +23,15 @@ from urllib.parse import urlsplit
 from ..config import Config
 from ..models import ModelRegistry
 from ..pipeline import (
+    HOUSE_RULES_FILE,
     STATE_DIR,
     NoChanges,
     PipelineError,
     execute_review,
+    resolve_house_rules,
     store_for,
 )
+from ..review import MAX_HOUSE_RULES_CHARS
 
 STATIC_DIR = Path(__file__).parent / "static"
 RUN_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
@@ -58,6 +61,7 @@ class WebApp:
             "mode": "quick",
             "models": [],
             "config_error": "",
+            "house_rules": self.house_rules_info(),
         }
         try:
             config = Config.from_env()
@@ -71,6 +75,10 @@ class WebApp:
             {"model_id": m.model_id, "family": m.resolved_family()} for m in registry.models
         ]
         return info
+
+    def house_rules_info(self) -> dict:
+        """Report the auto-discovered rules file so an empty textarea is not ambiguous."""
+        return resolve_house_rules(None, self.repo_root).summary() | {"path": HOUSE_RULES_FILE}
 
     def list_runs(self) -> dict:
         rows = self.store.list_runs()
@@ -110,6 +118,12 @@ class WebApp:
             "comparison": collection.get("comparison", {}),
             "notes": collection.get("notes", []),
             "spec_level": collection.get("spec_level", "L1"),
+            "house_rules": {
+                "applied": bool(collection.get("house_rules_sha")),
+                "sha": collection.get("house_rules_sha", ""),
+                "chars": collection.get("house_rules_chars", 0),
+                "source": collection.get("house_rules_source", ""),
+            },
             "totals": {
                 "findings": len(findings),
                 "rejected": len(collection.get("rejected", [])),
@@ -144,6 +158,14 @@ class WebApp:
                 raise PipelineError("max_units must be an integer") from exc
             max_units = max(1, min(max_units, 50))
             author = str(payload.get("author_model") or "").strip() or None
+            # Rules arrive as text, never as a path: the UI must not be able to read
+            # arbitrary local files, even though it only listens on loopback.
+            house_rules = str(payload.get("house_rules") or "")
+            if len(house_rules) > MAX_HOUSE_RULES_CHARS * 2:
+                raise PipelineError(
+                    f"house_rules is too long ({len(house_rules)} chars, "
+                    f"limit {MAX_HOUSE_RULES_CHARS * 2})"
+                )
             out = (
                 Path(str(payload.get("out") or "review.md"))
                 if payload.get("write_markdown")
@@ -157,6 +179,7 @@ class WebApp:
                 author_model=author,
                 out=out,
                 registry=self.registry,
+                house_rules=house_rules,
             )
             summary = outcome.summary()
             if outcome.out_path:
