@@ -21,7 +21,7 @@
 ## 当前状态
 
 - **第一、二、三期已实现并通过测试**（50 tests + 真实 HTTP 端到端验证 + CI）
-- 可用命令：`review`（出工单）/ `accept` / `reject` / `stats`（反馈闭环）/ `compare`（交叉对照与模型画像）
+- 可用命令：`review`（出工单）/ `accept` / `reject` / `stats`（反馈闭环）/ `compare`（交叉对照与模型画像）/ `ui`（本地图形界面）
 - 实现语言 Python ≥3.11；目标语言 Python；OpenAI 兼容 provider；correctness 视角
 - 三种审查模式：`quick`（单模型）/ `dual`（双模型+证伪）/ `committee`（三模型）
 - 不依赖 Docker；单模型三环境变量即可跑通，多模型用 JSON 配置
@@ -112,6 +112,19 @@ codeerratum review --diff HEAD~1 -o review.md
 双模型下报告分三区：**独有发现**（仅一家报出，最值得看）/ **冲突区**（意见相反，待人工裁决）/ **共识区**。
 审查后反馈：`codeerratum accept <finding_id>` / `codeerratum reject <finding_id> --reason "..."`，`codeerratum stats` 看采纳率，`codeerratum compare` 看各模型独有发现数与实测画像。这三个命令在仓库任意子目录执行都指向同一个数据库。
 
+## 图形界面（可选）
+
+```bash
+codeerratum ui                      # 起服务并打开 http://127.0.0.1:8765/
+codeerratum ui --port 9000 --no-browser
+```
+
+![CodeErratum 图形界面](https://raw.githubusercontent.com/a2012s/CodeErratum/main/docs/ui.png)
+
+纯标准库实现——没有 FastAPI、没有打包工具、没有 node_modules。装依赖的故事仍然只有"三个环境变量"，界面只是补上终端给不了的东西：三区分流并排、每条发现的证据强度、证伪轮各方意见，以及直接写回 `feedback.db` 的采纳/驳回按钮。
+
+左侧选 diff 范围、模式、单元上限和作者模型（写这段代码的模型不进入审查席位），下方是历史运行，点开任意一次即可。只绑本机回环地址，并拒绝跨站 POST——否则随便哪个网页都能替你烧 token。
+
 ## 设计底线
 
 1. **审查者 ≠ 作者**：生成代码的模型不得进入审查席位
@@ -130,6 +143,7 @@ codeerratum review --diff HEAD~1 -o review.md
 | 四 | 自动化接入：GitHub Action、PR 评论、规则库 | 待开发 |
 | 五 | 文档生成：API 文档 / 用户手册（独立里程碑，可砍） | 待开发 |
 | 六 | 扩展：沙箱复现、多语言、MCP（可砍） | 待开发 |
+| 旁支 | 本地 Web UI：三区分流、界面内裁决 | ✅ 已实现 |
 
 完整范围与验收见 [开发计划.md](开发计划.md)。
 

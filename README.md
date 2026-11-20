@@ -21,7 +21,7 @@ Success criterion: sample 10 findings at random; at least 7 must be executed cor
 ## Status
 
 - **Phases 1–3 implemented and tested** (50 tests + real-HTTP end-to-end + CI)
-- Commands: `review` (write the work order) / `accept` / `reject` / `stats` (feedback loop) / `compare` (cross-model comparison and model profiles)
+- Commands: `review` (write the work order) / `accept` / `reject` / `stats` (feedback loop) / `compare` (cross-model comparison and model profiles) / `ui` (local web UI)
 - Written in Python ≥3.11; reviews Python; any OpenAI-compatible provider; `correctness` lens
 - Three review modes: `quick` (single model) / `dual` (two models + falsification) / `committee` (three models)
 - No Docker. Three environment variables get a single model running; multi-model uses one JSON config
@@ -113,6 +113,19 @@ In dual mode the report splits into three sections: **unique findings** (reporte
 
 Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject <finding_id> --reason "..."`, `codeerratum stats` for the acceptance rate, `codeerratum compare` for per-model unique-finding counts and measured profiles. All three resolve to the same database from any subdirectory of the repo.
 
+## Web UI (optional)
+
+```bash
+codeerratum ui                      # serves http://127.0.0.1:8765/ and opens a tab
+codeerratum ui --port 9000 --no-browser
+```
+
+![CodeErratum web UI](https://raw.githubusercontent.com/a2012s/CodeErratum/main/docs/ui.png)
+
+Standard library only — no FastAPI, no bundler, no `node_modules`. The install story stays "three environment variables and you're done", and the UI adds what a terminal can't show: the three zones side by side, evidence strength per finding, the falsification trail, and accept/reject buttons that write straight into `feedback.db`.
+
+Pick the diff range, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only and rejects cross-origin POSTs, so a random web page cannot trigger a paid review through your browser.
+
 ## Design invariants
 
 1. **The reviewer is never the author** — a model that generated the code may not sit on the review panel
@@ -131,6 +144,7 @@ Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject 
 | 4 | Automation: GitHub Action, PR comments, rule library | Planned |
 | 5 | Doc generation: API docs / user manuals (separate milestone, cuttable) | Planned |
 | 6 | Extensions: sandbox reproduction, more languages, MCP (cuttable) | Planned |
+| UI | Local web UI: three-zone report, in-place verdicts | ✅ Done |
 
 Full scope and acceptance criteria: [开发计划.md](开发计划.md) (Chinese).
 
