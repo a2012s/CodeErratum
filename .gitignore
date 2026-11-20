@@ -1,0 +1,31 @@
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 运行产物与本地反馈数据（全部落在仓库根的 .codeerratum/ 下）
+.codeerratum/
+runs/
+*.log
+review.md
+.pytest_tmp/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 编辑器与系统
+.DS_Store
+.idea/
+.vscode/
+
+# 锁文件要进仓库（依赖需可复现），抵消全局 gitignore 里的 *.lock
+!uv.lock
