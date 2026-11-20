@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import webbrowser
 from pathlib import Path
@@ -120,6 +121,128 @@ def review(
     if outcome.collection.comparison:
         console.print(f"Comparison: {outcome.collection.comparison}")
     console.print(f"Artifacts: {outcome.run_dir}")
+
+
+@app.command()
+def pr(
+    post: bool = typer.Option(
+        False, "--post", help="Actually post to GitHub; without it this is a dry run"
+    ),
+    event: Path | None = typer.Option(
+        None, "--event", help="GitHub event JSON (default: $GITHUB_EVENT_PATH)"
+    ),
+    diff: str = typer.Option("", "--diff", help="Override the range (default: base...head)"),
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository root"),
+    token: str = typer.Option("", "--token", help="GitHub token (default: $GITHUB_TOKEN)"),
+    max_inline: int = typer.Option(
+        5, "--max-inline", help="Inline comments cap (GitHub noise limit)"
+    ),
+    max_units: int = typer.Option(10, "--max-units", help="Max review units (cost guard)"),
+    mode: str = typer.Option("", "--mode", help="quick|dual|committee"),
+    rules: Path | None = typer.Option(None, "--rules", help="Project rules file"),
+) -> None:
+    """Review a pull request and post the result as PR comments."""
+    from .ci import (
+        CIError,
+        inline_body,
+        load_event,
+        parse_pull_request,
+        post_review,
+        split_by_anchor,
+        summary_body,
+    )
+    from .ci.github import marker_for
+
+    try:
+        pull = parse_pull_request(load_event(event))
+    except CIError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"PR {pull.slug}#{pull.number} · {pull.base_sha[:8]}...{pull.head_sha[:8]}")
+
+    try:
+        outcome = execute_review(
+            repo.resolve(),
+            diff_spec=diff or pull.diff_spec,
+            mode=mode,
+            max_units=max_units,
+            out=None,
+            progress=lambda msg: console.print(msg),
+            house_rules=_read_rules_file(rules),
+        )
+    except (NotARepository, ConfigError, DiffFailed) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    except NoChanges as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(0) from exc
+
+    collection = outcome.collection
+    inline, rest = split_by_anchor(collection.ranked_findings(), outcome.units, max(0, max_inline))
+    marker = marker_for(pull.head_sha)
+    body = summary_body(collection, inline, rest, marker)
+
+    # Keep the exact payload with the run: a CI failure is easier to debug from the
+    # artifact than from the Actions log.
+    (outcome.run_dir / "pr-comments.json").write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "slug": pull.slug,
+                    "number": pull.number,
+                    "base_sha": pull.base_sha,
+                    "head_sha": pull.head_sha,
+                },
+                "inline": [
+                    {
+                        "path": f.anchors[0].file,
+                        "line": f.anchors[0].end_line or f.anchors[0].start_line,
+                        "body": inline_body(f),
+                    }
+                    for f in inline
+                ],
+                "summary": body,
+                "posted": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    if not post:
+        console.print(
+            f"\n[cyan]Dry run[/cyan] — {len(inline)} 条行内评论，summary {len(body)} 字符。"
+            "\n加上 [bold]--post[/bold] 才会真正发到 GitHub。"
+            f"\n待发内容已写入 {outcome.run_dir / 'pr-comments.json'}\n"
+        )
+        for f in inline:
+            anchor = f.anchors[0]
+            typer.echo(f"\n--- {anchor.file}:{anchor.start_line} ({f.severity}) ---")
+            typer.echo(inline_body(f))
+        console.print("\n[bold]=== Summary ===[/bold]")
+        typer.echo(body)
+        return
+
+    gh_token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    if not gh_token:
+        console.print("[red]--post needs a token: set GITHUB_TOKEN or pass --token[/red]")
+        raise typer.Exit(1)
+    try:
+        result = post_review(pull, gh_token, collection, inline, rest)
+    except CIError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if result.get("skipped"):
+        console.print(f"[yellow]已发过（{result['skipped']}），未重复评论。[/yellow]")
+    else:
+        console.print(
+            f"[green]Posted[/green] {result['inline_posted']} inline + 1 summary"
+            + (" [yellow](降级为逐条发送)[/yellow]" if result.get("degraded") else "")
+        )
+    if result.get("summary_url"):
+        console.print(result["summary_url"])
 
 
 @app.command()

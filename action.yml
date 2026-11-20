@@ -1,0 +1,51 @@
+name: CodeErratum Review
+description: 给 AI 写的代码开一张勘误表 —— 异构模型双跑 + 证伪轮，结果直接贴到 PR
+branding:
+  icon: edit-3
+  color: purple
+
+inputs:
+  models:
+    description: >-
+      JSON array of model specs, same shape as CODEERRATUM_MODELS.
+      e.g. [{"model_id":"gpt-4o","base_url":"https://api.openai.com/v1","api_key":"sk-...","family":"openai"}]
+    required: true
+  mode:
+    description: quick | dual | committee
+    default: dual
+  max-units:
+    description: Cost guard — maximum review units per run
+    default: "10"
+  max-inline:
+    description: Inline comment cap. Past five, nobody reads any of them.
+    default: "5"
+  github-token:
+    description: Token used to post comments. Needs pull-requests:write.
+    default: ${{ github.token }}
+  pip-spec:
+    description: Where to install codeerratum from — pin a tag in real use
+    default: "git+https://github.com/a2012s/CodeErratum@main"
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install CodeErratum
+      shell: bash
+      run: pip install "${{ inputs.pip-spec }}"
+
+    # fetch-depth: 0 is required in the caller's checkout step: the review diffs
+    # base...head, and a shallow clone cannot see the merge base.
+    - name: Review pull request
+      shell: bash
+      env:
+        CODEERRATUM_MODELS: ${{ inputs.models }}
+        CODEERRATUM_MODE: ${{ inputs.mode }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        codeerratum pr --post \
+          --max-units "${{ inputs.max-units }}" \
+          --max-inline "${{ inputs.max-inline }}"

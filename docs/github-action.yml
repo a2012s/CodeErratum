@@ -1,0 +1,41 @@
+# 把这段放到 .github/workflows/codeerratum.yml
+#
+# 前提：
+#   1. 仓库 Secrets 里配 CODEERRATUM_MODELS（JSON 数组，至少两家不同厂商）
+#   2. checkout 必须 fetch-depth: 0，否则看不到 base...head 的 merge base
+#   3. fork 提交的 PR 拿不到 secrets —— 这是 GitHub 的限制，不是本项目的
+#      （用 pull_request_target 能绕过，但等于让不可信代码跑你的 secrets，不要这么做）
+name: CodeErratum
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    # 只审同仓库分支；fork 的 PR 没有 secrets，跑了也只会报配置缺失
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: a2012s/CodeErratum@main
+        with:
+          models: ${{ secrets.CODEERRATUM_MODELS }}
+          mode: dual
+          max-units: "10"
+          max-inline: "5"
+
+      # 产物留着：失败时能直接看发给模型的内容与判据
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codeerratum-run
+          path: .codeerratum/runs/
+          if-no-files-found: ignore

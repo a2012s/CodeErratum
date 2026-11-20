@@ -56,6 +56,7 @@ class ReviewOutcome:
     collection: FindingCollection
     units_total: int
     units_selected: int
+    units: list[ReviewUnit] = field(default_factory=list)
     calls: list[dict] = field(default_factory=list)
     diags: list[dict] = field(default_factory=list)
     markdown: str = ""
@@ -302,6 +303,7 @@ def execute_review(
         collection=collection,
         units_total=len(units),
         units_selected=len(selected),
+        units=selected,
         calls=calls,
         diags=all_diags,
         markdown=markdown,
