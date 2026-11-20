@@ -80,6 +80,49 @@ class WebApp:
         """Report the auto-discovered rules file so an empty textarea is not ambiguous."""
         return resolve_house_rules(None, self.repo_root).summary() | {"path": HOUSE_RULES_FILE}
 
+    def docs_overview(self) -> dict:
+        """Module map plus signature drift, computed from the AST on each request.
+
+        Parsing a few dozen files is cheaper than keeping a cache coherent with edits.
+        """
+        from ..docs import build_index, collect, compare, load_index
+        from ..ingest import get_commit
+
+        scan = (self.repo_root / "src") if (self.repo_root / "src").is_dir() else None
+        try:
+            modules = collect(self.repo_root, scan)
+        except (NotADirectoryError, OSError) as exc:
+            raise PipelineError(f"cannot scan sources: {exc}") from exc
+
+        commit = get_commit(self.repo_root)
+        current = build_index(modules, commit=commit)
+        baseline = load_index(self.repo_root / STATE_DIR / "docs-index.json")
+        drifts = compare(baseline, current) if baseline else []
+        return {
+            "commit": commit,
+            "has_baseline": baseline is not None,
+            "baseline_commit": (baseline or {}).get("commit", ""),
+            "modules": [
+                {
+                    "module": m.module,
+                    "path": m.path,
+                    "public": sum(1 for s in m.flatten() if s.is_public),
+                    "total": len(m.flatten()),
+                }
+                for m in modules
+            ],
+            "drift": [
+                {
+                    "kind": d.kind,
+                    "path": d.path,
+                    "symbol": d.symbol,
+                    "detail": d.detail,
+                    "breaking": d.is_breaking,
+                }
+                for d in drifts
+            ],
+        }
+
     def list_runs(self) -> dict:
         rows = self.store.list_runs()
         for row in rows:
@@ -276,6 +319,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, app.list_runs())
                 elif path == "/api/stats":
                     self._json(HTTPStatus.OK, app.stats())
+                elif path == "/api/docs":
+                    self._json(HTTPStatus.OK, app.docs_overview())
                 elif m := re.fullmatch(r"/api/runs/([0-9a-f]+)", path):
                     self._json(HTTPStatus.OK, app.get_run(m.group(1)))
                 elif m := re.fullmatch(r"/api/runs/([0-9a-f]+)/review\.md", path):

@@ -207,6 +207,7 @@
     overflow-y: auto; box-shadow: -8px 0 24px rgba(0,0,0,.08);
   }
   .drawer h3 { margin: 0 0 10px; font-size: 13px; }
+  .drawer.wide { width: 520px; }
   .stat-row { display: flex; justify-content: space-between; padding: 5px 0;
     border-bottom: 1px solid var(--border); font-size: 13px; }
   table.mini { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
@@ -236,6 +237,7 @@
   <div class="brand"><span class="mark">E</span> CodeErratum <span class="ver">UI</span></div>
   <div class="repo" id="repoLabel">…</div>
   <div class="spacer"></div>
+  <button class="ghost" id="docsBtn">文档</button>
   <button class="ghost" id="statsBtn">统计</button>
 </header>
 
@@ -299,6 +301,11 @@
 <aside class="drawer" id="drawer" hidden>
   <h3>使用统计</h3>
   <div id="statsBody"></div>
+</aside>
+
+<aside class="drawer wide" id="docsDrawer" hidden>
+  <h3>模块文档 · 签名漂移</h3>
+  <div id="docsBody"></div>
 </aside>
 <div id="toast"></div>
 
@@ -595,6 +602,58 @@ $("statsBtn").onclick = async () => {
       (cat ? `<h3 style="margin-top:16px">按分类</h3><table class="mini"><tr><th>分类</th><th>总数</th><th>驳回</th></tr>${cat}</table>` : "");
   } catch (e) { $("statsBody").textContent = e.message; }
 };
+
+const DRIFT_LABEL = {
+  module_added: "模块新增", module_removed: "模块删除",
+  symbol_added: "符号新增", symbol_removed: "符号删除", signature_changed: "签名变更"
+};
+
+$("docsBtn").onclick = async () => {
+  const d = $("docsDrawer");
+  d.hidden = !d.hidden;
+  if (d.hidden) return;
+  $("docsBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px">
+    <span class="spinner"></span> 解析 AST…</div>`;
+  try {
+    renderDocs(await api("/api/docs"));
+  } catch (e) {
+    $("docsBody").innerHTML = `<div style="color:var(--bad);font-size:12.5px">${esc(e.message)}</div>`;
+  }
+};
+
+function renderDocs(data) {
+  const publicCount = data.modules.reduce((sum, m) => sum + m.public, 0);
+  const parts = [
+    statRow("模块", data.modules.length),
+    statRow("公开符号", publicCount),
+    statRow("基线", data.has_baseline ? String(data.baseline_commit || "?").slice(0, 8) : "未生成"),
+  ];
+
+  if (!data.has_baseline) {
+    parts.push(`<p style="color:var(--muted);font-size:12px;line-height:1.6;margin-top:10px">
+      还没有基线。先跑 <code>codeerratum docs</code> 生成，之后这里显示签名漂移。</p>`);
+  } else if (data.drift.length) {
+    parts.push(`<h3 style="margin-top:16px">漂移 ${data.drift.length} 处</h3>`);
+    parts.push(`<table class="mini"><tr><th>类型</th><th>文件</th><th>符号</th></tr>` +
+      data.drift.slice(0, 40).map((x) => `<tr>
+        <td style="color:${x.breaking ? "var(--bad)" : "var(--muted)"}">${esc(DRIFT_LABEL[x.kind] || x.kind)}</td>
+        <td style="font-family:ui-monospace,monospace;font-size:11px">${esc(x.path)}</td>
+        <td>${esc(x.symbol || "—")}</td></tr>`).join("") + `</table>`);
+  } else {
+    parts.push(`<p style="color:var(--ok);font-size:12.5px;margin-top:12px">无签名漂移</p>`);
+  }
+
+  parts.push(`<h3 style="margin-top:16px">模块（${data.modules.length}）</h3>`);
+  parts.push(`<table class="mini"><tr><th>模块</th><th>公开/全部</th></tr>` +
+    data.modules.slice(0, 60).map((m) => `<tr>
+      <td style="font-family:ui-monospace,monospace;font-size:11px">${esc(m.module)}</td>
+      <td style="color:var(--muted)">${m.public}/${m.total}</td></tr>`).join("") + `</table>`);
+  $("docsBody").innerHTML = parts.join("");
+}
+
+function statRow(label, value) {
+  return `<div class="stat-row"><span>${esc(label)}</span><b>${esc(value)}</b></div>`;
+}
 
 boot();
 </script>
