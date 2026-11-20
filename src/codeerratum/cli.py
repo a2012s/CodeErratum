@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import webbrowser
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -243,6 +244,86 @@ def pr(
         )
     if result.get("summary_url"):
         console.print(result["summary_url"])
+
+
+@app.command()
+def docs(
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository root"),
+    src: Path | None = typer.Option(
+        None, "--src", help="Subdirectory to scan (default: whole repo)"
+    ),
+    out: Path = typer.Option(Path("docs/api"), "--out", help="Markdown output directory"),
+    check: bool = typer.Option(False, "--check", help="Only report signature drift, write nothing"),
+    strict: bool = typer.Option(False, "--strict", help="With --check: exit 1 on breaking drift"),
+) -> None:
+    """Generate module docs from the AST, or check them for signature drift."""
+    from .docs import build_index, collect, compare, load_index, save_index, write_all
+    from .ingest import get_commit
+
+    root = find_repo_root(repo)
+    # Default to src/ when it exists: documenting the test suite and mock servers
+    # buries the public surface the docs are for.
+    scan = src or ((root / "src") if (root / "src").is_dir() else None)
+    try:
+        modules = collect(root, scan)
+    except NotADirectoryError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if not modules:
+        console.print("[yellow]No Python modules found.[/yellow]")
+        raise typer.Exit(0)
+
+    commit = get_commit(root)
+    index_path = root / ".codeerratum" / "docs-index.json"
+    baseline = load_index(index_path)
+    current = build_index(
+        modules, commit=commit, generated_at=datetime.now(UTC).isoformat(timespec="seconds")
+    )
+    drifts = compare(baseline, current) if baseline else []
+
+    if check:
+        if baseline is None:
+            console.print(
+                "[yellow]尚无基线：先跑一次 `codeerratum docs` 生成，"
+                "之后 --check 才有意义。[/yellow]"
+            )
+            raise typer.Exit(1)
+        _print_drift(drifts)
+        if strict and any(d.is_breaking for d in drifts):
+            console.print("[red]--strict：存在破坏性签名变更[/red]")
+            raise typer.Exit(1)
+        return
+
+    out_dir = out if out.is_absolute() else root / out
+    written = write_all(modules, out_dir, commit=commit)
+    save_index(index_path, current)
+    console.print(f"[green]Wrote {len(written)} file(s) to {out_dir}[/green]")
+    if drifts:
+        console.print(f"\n[yellow]相对上次基线有 {len(drifts)} 处变化[/yellow]")
+        _print_drift(drifts)
+
+
+def _print_drift(drifts) -> None:
+    from rich.table import Table
+
+    if not drifts:
+        console.print("[green]无签名漂移[/green]")
+        return
+    labels = {
+        "module_added": "模块新增",
+        "module_removed": "模块删除",
+        "symbol_added": "符号新增",
+        "symbol_removed": "符号删除",
+        "signature_changed": "签名变更",
+    }
+    table = Table(show_header=True, header_style="bold", box=None)
+    for column in ("类型", "文件", "符号", "说明"):
+        table.add_column(column)
+    for d in drifts[:40]:
+        table.add_row(labels.get(d.kind, d.kind), d.path, d.symbol or "—", d.detail[:80])
+    console.print(table)
+    if len(drifts) > 40:
+        console.print(f"[yellow]另有 {len(drifts) - 40} 条未显示[/yellow]")
 
 
 @app.command()
