@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeErratum — 审查结果</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #f0f2f5;
+    --border: #dfe3e8;
+    --text: #1b1f24;
+    --muted: #616b76;
+    --accent: #2f6fec;
+    --accent-weak: #e6efff;
+    --p0: #d92d20;
+    --p1: #e8590c;
+    --p2: #b7791f;
+    --p3: #6b7280;
+    --ok: #157347;
+    --ok-weak: #e3f4e8;
+    --bad: #b42318;
+    --bad-weak: #fde8e6;
+    --code-bg: #0f1720;
+    --code-text: #e6edf3;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117;
+      --panel: #161b22;
+      --panel-2: #1c2330;
+      --border: #2b3441;
+      --text: #e6edf3;
+      --muted: #9aa7b4;
+      --accent: #4d8dff;
+      --accent-weak: #16233b;
+      --ok-weak: #12321f;
+      --bad-weak: #3a1a16;
+      --code-bg: #0a0f16;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  header.top {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 18px; background: var(--panel);
+    border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10;
+  }
+  .brand { font-weight: 650; letter-spacing: .2px; display: flex; align-items: center; gap: 8px; }
+  .brand .mark {
+    width: 22px; height: 22px; border-radius: 6px; background: var(--accent);
+    color: #fff; display: grid; place-items: center; font-size: 13px; font-weight: 700;
+  }
+  .ver { font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 7px; font-weight: 500; }
+  .repo { color: var(--muted); font-size: 12.5px; }
+  .spacer { flex: 1; }
+
+  select, input, button {
+    font: inherit; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px;
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.primary {
+    background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
+  }
+  button.ghost { background: transparent; }
+
+  .layout { display: grid; grid-template-columns: 292px minmax(0, 1fr); height: calc(100vh - 51px); }
+  aside.sidebar {
+    border-right: 1px solid var(--border); background: var(--panel);
+    padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
+  }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 12px; color: var(--muted); }
+  .field input[type=number] { width: 100%; }
+  .row2 { display: grid; grid-template-columns: 1fr 84px; gap: 8px; align-items: end; }
+  .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
+  .check input { width: auto; }
+  .runs-title { margin-top: 8px; font-size: 12px; color: var(--muted); letter-spacing: .04em; }
+  ul#runs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  ul#runs li {
+    padding: 7px 9px; border-radius: 8px; cursor: pointer; border: 1px solid transparent;
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  ul#runs li:hover { background: var(--panel-2); }
+  ul#runs li.active { background: var(--accent-weak); border-color: var(--accent); }
+  ul#runs .r1 { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; }
+  ul#runs .r2 { font-size: 11.5px; color: var(--muted); }
+
+  section.content { overflow-y: auto; padding: 18px 22px 60px; }
+  .empty { color: var(--muted); text-align: center; margin-top: 18vh; line-height: 1.9; }
+  .empty kbd {
+    background: var(--panel-2); border: 1px solid var(--border); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 5px; font-size: 12px;
+  }
+
+  .run-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .run-head h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 4px; }
+  .chip {
+    font-size: 11.5px; padding: 2px 8px; border-radius: 999px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+  }
+  .chip.model { color: var(--accent); border-color: var(--accent); background: var(--accent-weak); }
+  .notes { margin: 12px 0; display: flex; flex-direction: column; gap: 5px; }
+  .note {
+    font-size: 12.5px; color: var(--p2); background: var(--panel);
+    border: 1px solid var(--border); border-left: 3px solid var(--p2);
+    border-radius: 6px; padding: 6px 10px;
+  }
+
+  .rejected-details {
+    border: 1px solid var(--border); border-radius: 8px; background: var(--panel);
+    padding: 8px 12px; font-size: 12.5px; color: var(--muted);
+  }
+  .rejected-details summary { cursor: pointer; }
+  .rejected-list { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+  .rejected-item {
+    display: grid; grid-template-columns: 150px minmax(0, 1fr) 140px; gap: 10px;
+    padding: 4px 0; border-top: 1px solid var(--border); align-items: baseline;
+  }
+  .rejected-item .mono { color: var(--bad); font-size: 11.5px; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin: 16px 0 14px; }
+  .tab {
+    background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+    padding: 8px 12px; color: var(--muted); font-weight: 550;
+  }
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab .n { font-size: 11.5px; color: var(--muted); margin-left: 5px; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    margin-bottom: 12px; overflow: hidden;
+  }
+  .card.done-accepted { border-left: 3px solid var(--ok); }
+  .card.done-rejected { border-left: 3px solid var(--bad); opacity: .72; }
+  .card-head { display: flex; gap: 9px; align-items: flex-start; padding: 12px 14px 8px; }
+  .sev {
+    font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px;
+    color: #fff; flex: none; margin-top: 1px;
+  }
+  .sev.P0 { background: var(--p0); } .sev.P1 { background: var(--p1); }
+  .sev.P2 { background: var(--p2); } .sev.P3 { background: var(--p3); }
+  .claim { font-weight: 600; font-size: 14.5px; flex: 1; }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; flex: none; }
+  .badge.open { background: var(--panel-2); color: var(--muted); }
+  .badge.accepted { background: var(--ok-weak); color: var(--ok); font-weight: 600; }
+  .badge.rejected { background: var(--bad-weak); color: var(--bad); font-weight: 600; }
+  .card-body { padding: 0 14px 12px; display: flex; flex-direction: column; gap: 10px; }
+  .loc { font-size: 12.5px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .loc .path { color: var(--accent); font-family: ui-monospace, Menlo, monospace; }
+  pre.snippet, pre.block {
+    margin: 0; background: var(--code-bg); color: var(--code-text);
+    border-radius: 8px; padding: 10px 12px; overflow-x: auto; font-size: 12.5px; line-height: 1.65;
+  }
+  pre .ln { color: #5d6b7a; user-select: none; }
+  pre .add { color: #7ee787; } pre .del { color: #ff9a92; }
+  .detail { color: var(--text); white-space: pre-wrap; }
+  .kv { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  .accept {
+    display: flex; align-items: center; gap: 8px; background: var(--panel-2);
+    border: 1px dashed var(--border); border-radius: 8px; padding: 7px 10px; font-size: 12.5px;
+  }
+  .accept code { flex: 1; overflow-x: auto; white-space: nowrap; }
+  .ev { display: flex; gap: 6px; flex-wrap: wrap; }
+  .ev .chip.hard { color: var(--p1); border-color: var(--p1); }
+  .verdicts { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+  .actions { display: flex; gap: 8px; align-items: center; padding-top: 2px; }
+  .actions .reason { flex: 1; }
+  .small { font-size: 11.5px; color: var(--muted); }
+
+  .drawer {
+    position: fixed; right: 0; top: 51px; bottom: 0; width: 340px; z-index: 20;
+    background: var(--panel); border-left: 1px solid var(--border); padding: 16px;
+    overflow-y: auto; box-shadow: -8px 0 24px rgba(0,0,0,.08);
+  }
+  .drawer h3 { margin: 0 0 10px; font-size: 13px; }
+  .stat-row { display: flex; justify-content: space-between; padding: 5px 0;
+    border-bottom: 1px solid var(--border); font-size: 13px; }
+  table.mini { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  table.mini th, table.mini td { text-align: left; padding: 4px 3px; border-bottom: 1px solid var(--border); }
+  table.mini th { color: var(--muted); font-weight: 500; }
+
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 8px;
+    font-size: 13px; opacity: 0; pointer-events: none; transition: .2s; max-width: 70vw; z-index: 40;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.bad { background: var(--bad); color: #fff; }
+  .spinner {
+    width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent;
+    border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; vertical-align: -2px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (max-width: 860px) {
+    .layout { grid-template-columns: 1fr; height: auto; }
+    aside.sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="mark">E</span> CodeErratum <span class="ver">UI</span></div>
+  <div class="repo" id="repoLabel">…</div>
+  <div class="spacer"></div>
+  <button class="ghost" id="statsBtn">统计</button>
+</header>
+
+<main class="layout">
+  <aside class="sidebar">
+    <div class="field">
+      <label for="diff">git diff 范围</label>
+      <input id="diff" value="HEAD~1" spellcheck="false">
+    </div>
+    <div class="row2">
+      <div class="field">
+        <label for="mode">模式</label>
+        <select id="mode">
+          <option value="quick">quick · 单模型</option>
+          <option value="dual">dual · 双模型+证伪</option>
+          <option value="committee">committee · 三模型</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="maxUnits">上限</label>
+        <input id="maxUnits" type="number" value="10" min="1" max="50">
+      </div>
+    </div>
+    <label class="check"><input type="checkbox" id="writeMd"> 同时写 review.md 到仓库根</label>
+    <div class="field">
+      <label for="authorModel">作者模型（可选，排除出审查席位）</label>
+      <input id="authorModel" placeholder="写这段代码的模型 id" spellcheck="false">
+    </div>
+    <button class="primary" id="runBtn">运行审查</button>
+    <div id="models" class="chips"></div>
+    <div class="runs-title">历史运行</div>
+    <ul id="runs"></ul>
+  </aside>
+
+  <section class="content">
+    <div class="empty" id="empty">
+      左侧填 diff 范围，点「运行审查」。<br>
+      已有运行记录时，从这里选一条打开：三区分流、逐条采纳/驳回。<br>
+      <span class="small">命令行等价：<kbd>codeerratum review --diff HEAD~1</kbd></span>
+    </div>
+    <div id="runView" hidden>
+      <div class="run-head">
+        <h1 id="runTitle">run</h1>
+        <span class="small" id="runWhen"></span>
+      </div>
+      <div class="chips" id="runChips"></div>
+      <div class="notes" id="notes"></div>
+      <div class="notes" id="rejectedBox"></div>
+      <div class="tabs" id="tabs"></div>
+      <div id="cards"></div>
+    </div>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" hidden>
+  <h3>使用统计</h3>
+  <div id="statsBody"></div>
+</aside>
+<div id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const ZONE_LABEL = { unique: "独有发现", conflict: "冲突区", consensus: "共识区", all: "全部发现" };
+const ZONE_HINT = {
+  unique: "仅一家报出、且未被证伪推翻 —— 最值得看的部分",
+  conflict: "两家意见相反，需人工裁决",
+  consensus: "多家一致，可信度最高但新信息最少",
+  all: "quick 单模型模式"
+};
+let STATE = { run: null, zone: null, meta: null };
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...opts,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function toast(msg, bad = false) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.className = "show" + (bad ? " bad" : "");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => (t.className = ""), bad ? 5200 : 2400);
+}
+
+function ago(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  const s = (Date.now() - d.getTime()) / 1000;
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  return `${Math.floor(s / 86400)} 天前`;
+}
+
+async function boot() {
+  try {
+    STATE.meta = await api("/api/meta");
+  } catch (e) { toast("无法连接后端: " + e.message, true); return; }
+  $("repoLabel").textContent = STATE.meta.repo;
+  const box = $("models");
+  if (!STATE.meta.configured) {
+    box.innerHTML = `<span class="chip" style="color:var(--bad);border-color:var(--bad)">未配置模型：${esc(STATE.meta.config_error.split("\n")[0])}</span>`;
+  } else {
+    box.innerHTML = STATE.meta.models
+      .map((m) => `<span class="chip model">${esc(m.model_id)} · ${esc(m.family)}</span>`).join("");
+    $("mode").value = STATE.meta.mode;
+  }
+  await loadRuns(true);
+}
+
+async function loadRuns(autoOpen) {
+  const { runs } = await api("/api/runs");
+  const ul = $("runs");
+  if (!runs.length) {
+    ul.innerHTML = `<li class="small" style="cursor:default">还没有运行记录</li>`;
+    return;
+  }
+  ul.innerHTML = runs.map((r) => `
+    <li data-run="${esc(r.run_id)}" class="${STATE.run && STATE.run.run_id === r.run_id ? "active" : ""}">
+      <div class="r1"><span class="mono">${esc(r.run_id)}</span><span>${r.n_findings ?? 0} 条</span></div>
+      <div class="r2">${esc(ago(r.created_at))} · ${esc(r.model_id || "")}</div>
+    </li>`).join("");
+  ul.querySelectorAll("li[data-run]").forEach((li) => {
+    li.onclick = () => openRun(li.dataset.run);
+  });
+  if (autoOpen && runs.length) openRun(runs[0].run_id);
+}
+
+async function openRun(id) {
+  try {
+    const run = await api("/api/runs/" + id);
+    STATE.run = run;
+    const firstZone = Object.keys(run.zones)[0];
+    if (!STATE.zone || !(STATE.zone in run.zones)) STATE.zone = firstZone;
+    renderRun();
+    document.querySelectorAll("ul#runs li").forEach((li) =>
+      li.classList.toggle("active", li.dataset.run === id));
+  } catch (e) { toast("打不开该运行: " + e.message, true); }
+}
+
+function renderRun() {
+  const run = STATE.run;
+  $("empty").hidden = true;
+  $("runView").hidden = false;
+  $("runTitle").textContent = "运行 " + run.run_id;
+  $("runWhen").textContent = `${ago(run.created_at)} · commit ${(run.commit || "?").slice(0, 8)}`;
+
+  const chips = [
+    `<span class="chip">${esc(run.mode)}</span>`,
+    `<span class="chip">${run.totals.findings} 条发现</span>`,
+    `<span class="chip">${run.totals.rejected} 条被拒</span>`,
+    run.spec_level ? `<span class="chip">规格 ${esc(run.spec_level)}</span>` : "",
+    run.falsifier ? `<span class="chip">证伪者 ${esc(run.falsifier)}</span>` : "",
+  ];
+  run.models.forEach((m) => chips.push(`<span class="chip model">${esc(m)}</span>`));
+  if (run.has_markdown) {
+    chips.push(`<a class="chip" style="text-decoration:none" href="/api/runs/${run.run_id}/review.md" target="_blank">review.md ↗</a>`);
+  }
+  $("runChips").innerHTML = chips.filter(Boolean).join("");
+
+  $("notes").innerHTML = (run.notes || [])
+    .map((n) => `<div class="note">${esc(n)}</div>`).join("");
+
+  const rejected = run.rejected || [];
+  $("rejectedBox").innerHTML = rejected.length ? `
+    <details class="rejected-details">
+      <summary>${rejected.length} 条发现被定位校验丢弃（防幻觉）</summary>
+      <div class="rejected-list">${rejected.map((r) => `
+        <div class="rejected-item">
+          <span class="mono">${esc(r.reason || "unknown")}</span>
+          <span>${esc(r.claim || r.unit_id || "")}</span>
+          <span class="small">${esc(r.model || r.error || "")}</span>
+        </div>`).join("")}</div>
+    </details>` : "";
+
+  $("tabs").innerHTML = Object.entries(run.zones).map(([k, v]) => `
+    <button class="tab ${k === STATE.zone ? "active" : ""}" data-zone="${k}" title="${esc(ZONE_HINT[k] || "")}">
+      ${ZONE_LABEL[k] || k}<span class="n">${v.length}</span>
+    </button>`).join("");
+  $("tabs").querySelectorAll(".tab").forEach((b) => {
+    b.onclick = () => { STATE.zone = b.dataset.zone; renderRun(); };
+  });
+
+  const list = run.zones[STATE.zone] || [];
+  $("cards").innerHTML = list.length
+    ? list.map(cardHTML).join("")
+    : `<div class="empty" style="margin-top:8vh">这个分区没有发现</div>`;
+  bindCards();
+}
+
+function cardHTML(f) {
+  const a = (f.anchors && f.anchors[0]) || {};
+  const lines = (a.snippet || "").replace(/\n$/, "").split("\n");
+  const snippet = lines.map((ln, i) =>
+    `<span class="ln">${(a.start_line || 1) + i}│</span> ${esc(ln)}`).join("\n");
+  const extraAnchors = (f.anchors || []).slice(1)
+    .map((x) => `<span class="chip mono">${esc(x.file)}:${x.start_line}</span>`).join("");
+  const ev = (f.evidence || []).map((e) =>
+    `<span class="chip ${e.strength === "hard" ? "hard" : ""}" title="${esc(e.summary)}">${esc(e.kind)}${e.strength === "hard" ? " · 硬证据" : ""}</span>`).join("");
+  const verdicts = (f.verdicts || []).map((v) =>
+    `<div>${esc(v.model_id)} · <b>${esc(v.role)}</b> — ${esc(v.reason)}</div>`).join("");
+  const sug = f.suggestion || {};
+  const sugBody = sug.diff
+    ? `<pre class="block">${colorDiff(sug.diff)}</pre>`
+    : `<div class="detail">${esc(sug.explanation || "")}</div>`;
+  const status = f.status || "open";
+  return `
+  <article class="card done-${status}" data-id="${esc(f.id)}">
+    <div class="card-head">
+      <span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>
+      <div class="claim">${esc(f.claim)}</div>
+      <span class="badge ${status}">${{ open: "待裁决", accepted: "已采纳", rejected: "已驳回" }[status] || status}</span>
+    </div>
+    <div class="card-body">
+      <div class="loc">
+        <span class="path">${esc(a.file)}:${a.start_line}</span>
+        ${a.symbol ? `<span class="mono">${esc(a.symbol)}</span>` : ""}
+        <span>${esc(f.category)} · ${esc(f.lens)}</span>
+        <span class="chip">证据 ${esc(f.verification || "unverified")}</span>
+        ${extraAnchors}
+      </div>
+      ${snippet ? `<pre class="snippet">${snippet}</pre>` : ""}
+      <div class="detail">${esc(f.detail || "")}</div>
+      ${ev ? `<div class="ev">${ev}</div>` : ""}
+      <div class="kv">修改建议</div>
+      ${sugBody}
+      ${sug.acceptance ? `<div class="accept"><span class="small">验收</span><code>${esc(sug.acceptance)}</code>
+        <button class="ghost" data-copy="${esc(sug.acceptance)}">复制</button></div>` : ""}
+      ${verdicts ? `<div class="kv">证伪轮</div><div class="verdicts">${verdicts}</div>` : ""}
+      <div class="actions">
+        <button data-act="accepted">采纳</button>
+        <input class="reason" placeholder="驳回理由（写清为什么是误报）">
+        <button data-act="rejected">驳回</button>
+        <button class="ghost" data-act="open">重置</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+function colorDiff(text) {
+  return text.split("\n").map((ln) => {
+    const cls = ln.startsWith("+") && !ln.startsWith("+++") ? "add"
+      : ln.startsWith("-") && !ln.startsWith("---") ? "del" : "";
+    return cls ? `<span class="${cls}">${esc(ln)}</span>` : esc(ln);
+  }).join("\n");
+}
+
+function bindCards() {
+  document.querySelectorAll(".card").forEach((card) => {
+    const id = card.dataset.id;
+    card.querySelectorAll("button[data-act]").forEach((btn) => {
+      btn.onclick = async () => {
+        const status = btn.dataset.act;
+        const reason = card.querySelector(".reason").value.trim();
+        if (status === "rejected" && !reason) { toast("驳回要写理由，否则统计没有意义", true); return; }
+        btn.disabled = true;
+        try {
+          const r = await api(`/api/findings/${id}/status`, {
+            method: "POST",
+            body: JSON.stringify({ status, reason }),
+          });
+          applyStatus(r.id, r.status, r.reason);
+          toast(status === "accepted" ? "已采纳" : status === "rejected" ? "已驳回" : "已重置");
+        } catch (e) { toast(e.message, true); }
+        finally { btn.disabled = false; }
+      };
+    });
+    const copyBtn = card.querySelector("[data-copy]");
+    if (copyBtn) copyBtn.onclick = async () => {
+      try { await navigator.clipboard.writeText(copyBtn.dataset.copy); toast("已复制验收命令"); }
+      catch { toast("浏览器拒绝剪贴板访问", true); }
+    };
+  });
+}
+
+function applyStatus(id, status, reason) {
+  for (const list of Object.values(STATE.run.zones)) {
+    for (const f of list) {
+      if (f.id === id) { f.status = status; f.rejection_reason = reason || ""; }
+    }
+  }
+  renderRun();
+}
+
+$("runBtn").onclick = async () => {
+  const btn = $("runBtn");
+  const body = {
+    diff: $("diff").value.trim() || "HEAD~1",
+    mode: $("mode").value,
+    max_units: Number($("maxUnits").value) || 10,
+    author_model: $("authorModel").value.trim(),
+    write_markdown: $("writeMd").checked,
+  };
+  btn.disabled = true;
+  const old = btn.innerHTML;
+  btn.innerHTML = `<span class="spinner"></span> 审查中…`;
+  try {
+    const s = await api("/api/review", { method: "POST", body: JSON.stringify(body) });
+    toast(`完成：${s.findings} 条发现，${s.calls} 次模型调用，均 ${s.latency_ms_avg}ms`);
+    await loadRuns(false);
+    await openRun(s.run_id);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    btn.disabled = false; btn.innerHTML = old;
+  }
+};
+
+$("statsBtn").onclick = async () => {
+  const d = $("drawer");
+  d.hidden = !d.hidden;
+  if (d.hidden) return;
+  try {
+    const s = await api("/api/stats");
+    const rows = [
+      ["审查运行数", s.runs], ["发现总数", s.findings_total],
+      ["已采纳", s.accepted], ["已驳回", s.rejected],
+      ["采纳率", s.acceptance_rate == null ? "尚无人工裁决" : (s.acceptance_rate * 100).toFixed(1) + "%"],
+    ].map(([k, v]) => `<div class="stat-row"><span>${k}</span><b>${esc(v)}</b></div>`).join("");
+    const cat = (s.by_category || []).map((r) =>
+      `<tr><td>${esc(r.category)}</td><td>${r.total}</td><td>${r.rejected}</td></tr>`).join("");
+    $("statsBody").innerHTML = rows +
+      (cat ? `<h3 style="margin-top:16px">按分类</h3><table class="mini"><tr><th>分类</th><th>总数</th><th>驳回</th></tr>${cat}</table>` : "");
+  } catch (e) { $("statsBody").textContent = e.message; }
+};
+
+boot();
+</script>
+</body>
+</html>

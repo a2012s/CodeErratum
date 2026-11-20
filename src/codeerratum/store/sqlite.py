@@ -210,6 +210,39 @@ class ReviewStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def list_runs(self, limit: int = 50) -> list[dict]:
+        """Newest first, for the UI's run history."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT run_id, commit_sha, model_id, created_at, n_findings, n_rejected "
+                "FROM runs ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def statuses_for(self, finding_ids: list[str]) -> dict[str, dict]:
+        """Human verdicts keyed by finding id.
+
+        Looked up by id and not by run_id on purpose: a finding id is a content
+        hash, so the same defect resurfacing in a later run keeps its verdict,
+        while the findings row's run_id points at whichever run saw it last.
+        """
+        if not finding_ids:
+            return {}
+        out: dict[str, dict] = {}
+        with self._conn() as conn:
+            for chunk_start in range(0, len(finding_ids), 500):
+                chunk = finding_ids[chunk_start : chunk_start + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    "SELECT id, status, rejection_reason FROM findings "
+                    f"WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    out[r["id"]] = {"status": r["status"], "reason": r["rejection_reason"] or ""}
+        return out
+
     def stats(self) -> dict:
         with self._conn() as conn:
             total = conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0]

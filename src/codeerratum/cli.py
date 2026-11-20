@@ -1,50 +1,30 @@
-"""CLI entry point — the only public interface in v0.1."""
+"""CLI entry point — the primary interface; `ui` opens the optional web UI."""
 
 from __future__ import annotations
 
-import asyncio
 import json
-import uuid
-from datetime import UTC, datetime
+import threading
+import webbrowser
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from . import __version__
-from .config import Config
-from .ingest import DiffError, get_commit, get_diff, split_diff
-from .models import ReviewUnit
-from .report import render_markdown
-from .review import run_review
+from .pipeline import (
+    ConfigError,
+    DiffFailed,
+    NoChanges,
+    NotARepository,
+    execute_review,
+    find_repo_root,
+    store_for,
+)
 from .store import ReviewStore
-
-STATE_DIR = ".codeerratum"
-
-
-def _find_repo_root(path: Path) -> Path:
-    """Nearest ancestor containing .git, or the given path when there is none."""
-    current = path.resolve()
-    for candidate in (current, *current.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return current
 
 
 def _store(repo_root: Path) -> ReviewStore:
-    return ReviewStore(repo_root / STATE_DIR / "feedback.db")
-
-
-def _prioritize(units: list[ReviewUnit]) -> list[ReviewUnit]:
-    """Spend the unit budget on risky, public, larger changes first."""
-    return sorted(
-        units,
-        key=lambda u: (
-            0 if u.risk_tags else 1,
-            0 if u.is_public else 1,
-            -u.changed_lines,
-        ),
-    )
+    return store_for(repo_root)
 
 
 app = typer.Typer(name="codeerratum", help="给 AI 写的代码开一张勘误表", no_args_is_help=True)
@@ -83,116 +63,91 @@ def review(
 ) -> None:
     """Review a git diff and write an executable review.md work order."""
     repo_root = repo.resolve()
-    if not (repo_root / ".git").exists():
-        console.print(f"[red]Error: {repo_root} is not a git repository[/red]")
-        raise typer.Exit(1)
-
     try:
-        config = Config.from_env()
-    except ValueError as exc:
+        outcome = execute_review(
+            repo_root,
+            diff_spec=diff,
+            mode=mode,
+            max_units=max_units,
+            author_model=author_model or None,
+            out=out,
+            progress=lambda msg: console.print(msg),
+        )
+    except NotARepository as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    except ConfigError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
-
-    try:
-        diff_text = get_diff(diff, repo_root)
-    except DiffError as exc:
+    except DiffFailed as exc:
         console.print(f"[red]git diff failed: {exc}[/red]")
         console.print(
             "[yellow]提示：首个 commit 没有父提交时请用 `--diff HEAD`（暂存区+工作区）"
             "或 `--diff $(git hash-object -t tree /dev/null)`。[/yellow]"
         )
         raise typer.Exit(1) from exc
+    except NoChanges as exc:
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(0) from exc
 
-    if not diff_text.strip():
-        console.print("[yellow]No changes in diff. Nothing to review.[/yellow]")
-        raise typer.Exit(0)
-
-    run_id = uuid.uuid4().hex[:12]
-    run_dir = repo_root / STATE_DIR / "runs" / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "input.diff").write_text(diff_text, encoding="utf-8")
-
-    notices: list[str] = []
-    units = split_diff(diff_text, repo_root, notices=notices)
-    (run_dir / "units.json").write_text(
-        json.dumps([u.model_dump() for u in units], ensure_ascii=False, indent=2), encoding="utf-8"
+    summary = outcome.summary()
+    console.print(f"\n[green]Wrote {outcome.out_path or outcome.run_dir / 'review.md'}[/green]")
+    console.print(f"Findings: {summary['findings']} | Rejected: {summary['rejected']}")
+    console.print(
+        f"Static diagnostics: {summary['static_diags']} | Model calls: {summary['calls']}"
     )
-    console.print(f"Split diff into {len(units)} review unit(s)")
-    for note in notices:
-        console.print(f"  [yellow]{note}[/yellow]")
-    if not units:
-        console.print("[yellow]No reviewable units found.[/yellow]")
-        raise typer.Exit(0)
+    if outcome.calls:
+        console.print(f"Avg latency: {summary['latency_ms_avg']:.0f} ms/call")
+    if outcome.collection.comparison:
+        console.print(f"Comparison: {outcome.collection.comparison}")
+    console.print(f"Artifacts: {outcome.run_dir}")
 
-    selected = _prioritize(units)[:max_units]
-    if len(units) > max_units:
-        notices.append(f"仅审查 {max_units}/{len(units)} 个单元（--max-units 可调整）")
-        console.print(f"[yellow]Capped at {max_units} units (use --max-units to raise)[/yellow]")
 
-    run_mode = mode or config.mode
-    if run_mode not in ("quick", "dual", "committee"):
-        console.print(f"[red]Invalid mode {run_mode!r}; choose quick/dual/committee[/red]")
+@app.command()
+def ui(
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository root to review"),
+    port: int = typer.Option(8765, "--port", help="Loopback port for the local UI"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (keep it on loopback)"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Do not open a browser tab"),
+) -> None:
+    """Open the local web UI (run history, three-zone report, accept/reject)."""
+    from .web import WebApp, make_server
+
+    repo_root = find_repo_root(repo)
+    if not (repo_root / ".git").exists():
+        console.print(f"[red]Error: {repo_root} is not a git repository[/red]")
         raise typer.Exit(1)
-    console.print(f"Mode: {run_mode} | models: {len(config.registry.models)}")
 
+    app_ui = WebApp(repo_root)
     try:
-        collection, calls, all_diags = asyncio.run(
-            run_review(
-                config.registry,
-                run_mode,  # type: ignore[arg-type]
-                selected,
-                repo_root,
-                run_id,
-                author_model=author_model or None,
-            )
-        )
-    except ValueError as exc:
-        console.print(f"[red]{exc}[/red]")
+        httpd = make_server(app_ui, host=host, port=port)
+    except OSError as exc:
+        console.print(f"[red]Cannot bind {host}:{port} — {exc}[/red]")
         raise typer.Exit(1) from exc
 
-    failed = [r for r in collection.rejected if r.get("reason") == "provider_error"]
-    if failed:
-        notices.append(f"{len(failed)} 个单元调用模型失败，相关文件未被审查")
-    collection.notes = notices
-    collection.commit = get_commit(repo_root)
-
-    (run_dir / "calls.json").write_text(
-        json.dumps(calls, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (run_dir / "findings.json").write_text(
-        json.dumps(collection.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    (run_dir / "static_diags.json").write_text(
-        json.dumps(all_diags, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-    ts = datetime.now(UTC).isoformat(timespec="seconds")
-    markdown = render_markdown(collection, ts)
-    out_path = out if out.is_absolute() else repo_root / out
-    out_path.write_text(markdown, encoding="utf-8")
-
-    # Persist run + findings + phase-3 comparison/profile into the feedback store.
-    store = _store(repo_root)
-    store.save_run(collection, ts)
-    store.save_comparison(collection, ts)
-
-    console.print(f"\n[green]Wrote {out_path}[/green]")
-    console.print(f"Findings: {len(collection.findings)} | Rejected: {len(collection.rejected)}")
-    console.print(f"Static diagnostics: {len(all_diags)} | Model calls: {len(calls)}")
-    if calls:
-        units_called = len(calls)
-        latency = sum(c.get("latency_ms", 0) for c in calls) / units_called
-        console.print(f"Avg latency: {latency:.0f} ms/call")
-    if collection.comparison:
-        console.print(f"Comparison: {collection.comparison}")
-    console.print(f"Artifacts: {run_dir}")
+    url = f"http://{host}:{httpd.server_address[1]}/"
+    console.print(f"[green]CodeErratum UI[/green] on {url}")
+    console.print(f"Repo: {repo_root}")
+    if not app_ui.meta()["configured"]:
+        console.print(
+            "[yellow]尚未配置模型（CODEERRATUM_BASE_URL / API_KEY / MODEL），"
+            "界面可以看历史记录，但不能发起新审查。[/yellow]"
+        )
+    console.print("[dim]Ctrl+C 停止[/dim]")
+    if not no_browser:
+        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        console.print("\nStopped.")
+    finally:
+        httpd.server_close()
 
 
 @app.command()
 def accept(finding_prefix: str = typer.Argument(..., help="Finding id prefix to accept")) -> None:
     """Mark a finding as accepted (true positive)."""
-    store = _store(_find_repo_root(Path(".")))
+    store = _store(find_repo_root(Path(".")))
     found = store.find_finding(finding_prefix)
     if not found:
         console.print(f"[red]No finding starts with {finding_prefix}[/red]")
@@ -208,7 +163,7 @@ def reject(
     reason: str = typer.Option("", "--reason", "-r", help="Why it is a false positive"),
 ) -> None:
     """Mark a finding as rejected (false positive) with a reason."""
-    store = _store(_find_repo_root(Path(".")))
+    store = _store(find_repo_root(Path(".")))
     found = store.find_finding(finding_prefix)
     if not found:
         console.print(f"[red]No finding starts with {finding_prefix}[/red]")
@@ -221,7 +176,7 @@ def reject(
 @app.command()
 def compare() -> None:
     """Show cross-model comparison and per-model profile (phase-3 resume evidence)."""
-    store = _store(_find_repo_root(Path(".")))
+    store = _store(find_repo_root(Path(".")))
     history = store.comparison_history()
     profiles = store.model_profiles()
 
@@ -256,7 +211,7 @@ def compare() -> None:
 @app.command()
 def stats() -> None:
     """Show acceptance-rate stats — the resume-ready evidence produced by daily use."""
-    s = _store(_find_repo_root(Path("."))).stats()
+    s = _store(find_repo_root(Path("."))).stats()
     console.print("[bold]CodeErratum 使用统计[/bold]\n")
     console.print(f"审查运行数：{s['runs']}")
     console.print(f"发现总数：{s['findings_total']}")
