@@ -12,7 +12,12 @@ VALID = {
             "severity": "P1",
             "claim": "空列表取首元素导致崩溃",
             "detail": "当 items 为空时，items[0] 抛 IndexError，接口返回 500。",
-            "anchor": {"file": "m.py", "start_line": 3, "end_line": 3, "snippet": "    return x[0]\n"},
+            "anchor": {
+                "file": "m.py",
+                "start_line": 3,
+                "end_line": 3,
+                "snippet": "    return x[0]\n",
+            },
             "suggestion": {
                 "diff": None,
                 "explanation": "取首元素前先判空或提供默认值",
