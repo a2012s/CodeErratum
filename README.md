@@ -1,30 +1,32 @@
 # CodeErratum
 
+**English** | [简体中文](README.zh-CN.md)
+
 [![CI](https://github.com/a2012s/CodeErratum/actions/workflows/ci.yml/badge.svg)](https://github.com/a2012s/CodeErratum/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
-**给 AI 写的代码开一张勘误表。**
+**An errata sheet for code written by AI.**
 
-`CodeErratum` 读一次 git diff，输出一份 `review.md` —— 不是给人看的评论列表，而是**给另一个写代码的 AI 直接执行的修改工单**：精确定位、说明期望行为、给出改法和验收命令。
+CodeErratum reads a git diff and writes a `review.md` — not a list of comments for humans to skim, but a **work order another coding agent can execute directly**: exact location, expected behavior, a concrete fix, and an acceptance command.
 
-> 项目早期代号 `reviewCodeAgent` / `CrossCheck` / `Erratum`。名称已在 PyPI、npm、GitHub 完成注册表级查重，均无占用；备选名 `Snag`。
+> Formerly known as `reviewCodeAgent` / `CrossCheck` / `Erratum`. The name was checked against the PyPI, npm and GitHub registries — none taken. Fallback name: `Snag`.
 
-## 第一期目标（唯一）
+## The one goal (phase 1)
 
-> 把 `review.md` 原样交给 Claude Code / Cursor / Cline，它能在不追问的情况下改对代码。
+> Hand `review.md` to Claude Code / Cursor / Cline as-is, and it fixes the code without asking a single follow-up question.
 
-判据：随机抽 10 条 finding，下游 AI 直接执行成功的比例 ≥ 7 条。
+Success criterion: sample 10 findings at random; at least 7 must be executed correctly by a downstream agent with no clarification.
 
-## 当前状态
+## Status
 
-- **第一、二、三期已实现并通过测试**（50 tests + 真实 HTTP 端到端验证 + CI）
-- 可用命令：`review`（出工单）/ `accept` / `reject` / `stats`（反馈闭环）/ `compare`（交叉对照与模型画像）
-- 实现语言 Python ≥3.11；目标语言 Python；OpenAI 兼容 provider；correctness 视角
-- 三种审查模式：`quick`（单模型）/ `dual`（双模型+证伪）/ `committee`（三模型）
-- 不依赖 Docker；单模型三环境变量即可跑通，多模型用 JSON 配置
+- **Phases 1–3 implemented and tested** (50 tests + real-HTTP end-to-end + CI)
+- Commands: `review` (write the work order) / `accept` / `reject` / `stats` (feedback loop) / `compare` (cross-model comparison and model profiles)
+- Written in Python ≥3.11; reviews Python; any OpenAI-compatible provider; `correctness` lens
+- Three review modes: `quick` (single model) / `dual` (two models + falsification) / `committee` (three models)
+- No Docker. Three environment variables get a single model running; multi-model uses one JSON config
 
-## 安装
+## Install
 
 ```bash
 git clone git@github.com:a2012s/CodeErratum.git
@@ -33,65 +35,65 @@ uv sync --extra dev
 uv run codeerratum --version
 ```
 
-不想用 uv 时等价做法：
+Without uv, the equivalent:
 
 ```bash
 python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 .venv/bin/codeerratum --version
 ```
 
-> PyPI 尚未发布，`pip install codeerratum` 现在不可用；装完 `uv sync` 后 `codeerratum` 就在 `.venv/bin/` 里。
+> Not on PyPI yet — `pip install codeerratum` will not work today. After `uv sync` the command lives in `.venv/bin/`.
 
-## 配置
+## Configuration
 
-CLI **不会**自动读 `.env`，必须导出为环境变量：
+The CLI does **not** load `.env` on its own; export the variables into your shell:
 
 ```bash
-cp .env.example .env && vi .env     # 填 BASE_URL / API_KEY / MODEL
+cp .env.example .env && vi .env     # fill in BASE_URL / API_KEY / MODEL
 set -a && source .env && set +a
 ```
 
-单模型只需三个变量；异构多模型用 `CODEERRATUM_MODELS`（JSON）+ `CODEERRATUM_MODE`，见下文。
+A single model needs three variables. Heterogeneous multi-model uses `CODEERRATUM_MODELS` (JSON) plus `CODEERRATUM_MODE` — see below.
 
-## 运行
+## Usage
 
-在**被审查的仓库**里执行（不是在本项目目录里）：
+Run it **inside the repository under review**, not inside this project's directory:
 
 ```bash
 cd /path/to/your-repo
 codeerratum review --diff HEAD~1 -o review.md
 ```
 
-`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `review.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
+`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `review.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
 
-## 不花钱的自检
+## Zero-cost self-check
 
 ```bash
-uv run pytest -q                     # 期望 50 passed
+uv run pytest -q                     # expect 50 passed
 ```
 
-想验证全链路又不想消耗 token，用仓库自带的假模型端点（固定返回一条 finding）：
+To exercise the whole pipeline without spending tokens, use the bundled fake model endpoint (always returns one fixed finding):
 
 ```bash
-uv run python scripts/mock_server.py          # 终端 A，监听 127.0.0.1:8899
+uv run python scripts/mock_server.py          # terminal A, listens on 127.0.0.1:8899
 
-# 终端 B，在任意有 ≥2 次提交的仓库里
+# terminal B, inside any repo with at least 2 commits
 CODEERRATUM_BASE_URL=http://127.0.0.1:8899/v1 CODEERRATUM_API_KEY=x \
 CODEERRATUM_MODEL=mock codeerratum review --diff HEAD~1 -o review.md
 ```
 
-## 快速开始
+## Quick start
 
-配好三个环境变量后，一条命令：
+With three environment variables set, it is one command:
 
 ```bash
 export CODEERRATUM_BASE_URL=https://api.example.com/v1
-export CODEERRATUM_API_KEY=sk-...          # 本地端点可留空
+export CODEERRATUM_API_KEY=sk-...          # may be empty for local endpoints
 export CODEERRATUM_MODEL=your-model-id
 codeerratum review --diff HEAD~1 -o review.md
 ```
 
-双模型异构交叉（dual，第三期核心价值）：至少配两家不同厂商 + 可选第三家作证伪。
+Two heterogeneous models (dual — the core of phase 3). At least two different vendors, plus an optional third to act as falsifier:
 
 ```bash
 export CODEERRATUM_MODELS='[
@@ -103,38 +105,39 @@ export CODEERRATUM_MODE=dual
 codeerratum review --diff HEAD~1 -o review.md
 ```
 
-`family` 是异构判据：同厂商两个型号不算异构，会被路由拒绝。证伪轮优先用第三家；没配第三家时在两个审查模型间交叉证伪。
-如果这段代码是某个模型写的，用 `--author-model <model_id>` 把它排除出审查席位（设计底线第 1 条）。
+`family` is the heterogeneity test: two model IDs from the same vendor do not count as heterogeneous and the router will reject them. The falsification round prefers the third vendor; without one, the two reviewers falsify each other's findings. If a model wrote the code, pass `--author-model <model_id>` to keep it out of the reviewer seats (design invariant #1).
 
-产出 `review.md` 交给 Claude Code / Cursor / Cline 执行；每次运行的可追溯产物落在 `.codeerratum/runs/<run_id>/`（`input.diff` / `units.json` / `calls.json` / `findings.json` / `static_diags.json`），反馈数据库在同一目录，不会污染工作区。
-双模型下报告分三区：**独有发现**（仅一家报出，最值得看）/ **冲突区**（意见相反，待人工裁决）/ **共识区**。
-审查后反馈：`codeerratum accept <finding_id>` / `codeerratum reject <finding_id> --reason "..."`，`codeerratum stats` 看采纳率，`codeerratum compare` 看各模型独有发现数与实测画像。这三个命令在仓库任意子目录执行都指向同一个数据库。
+Hand the resulting `review.md` to Claude Code / Cursor / Cline. Every run leaves traceable artifacts in `.codeerratum/runs/<run_id>/` (`input.diff`, `units.json`, `calls.json`, `findings.json`, `static_diags.json`); the feedback database sits in the same directory and never pollutes your working tree.
 
-## 设计底线
+In dual mode the report splits into three sections: **unique findings** (reported by only one model — the most valuable part) / **conflicts** (models disagree, awaiting a human call) / **consensus**.
 
-1. **审查者 ≠ 作者**：生成代码的模型不得进入审查席位
-2. **每条结论带定位**：文件、行号、原文片段对不上就不输出
-3. **输出是工单不是评论**：期望行为、具体改法、验收标准，三样缺一不可
-4. **AI 审查通过 ≠ 可以合入**：报告固定保留人工确认位
-5. **不靠多数投票定真假**：LLM 错误高度相关；用跨厂商「证伪」替代投票，独有发现单独成区
+Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject <finding_id> --reason "..."`, `codeerratum stats` for the acceptance rate, `codeerratum compare` for per-model unique-finding counts and measured profiles. All three resolve to the same database from any subdirectory of the repo.
 
-## 路线图（按重要程度）
+## Design invariants
 
-| 期次 | 主题 | 状态 |
+1. **The reviewer is never the author** — a model that generated the code may not sit on the review panel
+2. **Every finding carries a location** — if file, line and quoted snippet don't line up, the finding is dropped
+3. **Output is a work order, not a comment** — expected behavior, concrete fix, acceptance criterion; all three or it doesn't ship
+4. **AI review passing ≠ mergeable** — the report always keeps a human-confirmation slot
+5. **Truth is not decided by majority vote** — LLM errors are highly correlated; a cross-vendor *falsification* round replaces voting, and unique findings get their own section
+
+## Roadmap (in priority order)
+
+| Phase | Theme | Status |
 |---|---|---|
-| 一 | 可执行工单：diff → AI 能照着改的 `review.md` | ✅ 已实现 |
-| 二 | 可信度：消除幻觉定位与空泛结论 | ✅ 已实现 |
-| 三 | 异构交叉：双模型 + 证伪，产出独有发现 | ✅ 已实现 |
-| 四 | 自动化接入：GitHub Action、PR 评论、规则库 | 待开发 |
-| 五 | 文档生成：API 文档 / 用户手册（独立里程碑，可砍） | 待开发 |
-| 六 | 扩展：沙箱复现、多语言、MCP（可砍） | 待开发 |
+| 1 | Executable work order: diff → a `review.md` an AI can follow | ✅ Done |
+| 2 | Trust: eliminate hallucinated locations and vacuous claims | ✅ Done |
+| 3 | Heterogeneous cross-check: two models + falsification, surfacing unique findings | ✅ Done |
+| 4 | Automation: GitHub Action, PR comments, rule library | Planned |
+| 5 | Doc generation: API docs / user manuals (separate milestone, cuttable) | Planned |
+| 6 | Extensions: sandbox reproduction, more languages, MCP (cuttable) | Planned |
 
-完整范围与验收见 [开发计划.md](开发计划.md)。
+Full scope and acceptance criteria: [开发计划.md](开发计划.md) (Chinese).
 
-## 文档说明
+## About the docs
 
-内部产品设计、竞品与成本分析、技术架构细节**不随本仓库发布**，保存在本地私有目录。本仓库只公开 README、开发计划、示例与用户文档。
+Internal product design, competitive and cost analysis, and architecture details are **not published with this repo**; they stay in a private local directory. This repo ships only the README, the development plan, examples and user docs.
 
-## 许可
+## License
 
-[MIT](LICENSE) © 2026 a2012s。可商用、可修改、可闭源再分发，只需保留版权声明与许可声明。许可证不覆盖模型供应商的服务条款，也不对审查结论的正确性作任何担保。
+[MIT](LICENSE) © 2026 a2012s. Commercial use, modification and closed-source redistribution are all permitted; keep the copyright and license notice. The license does not cover your model provider's terms of service, and it warrants nothing about the correctness of the review output.

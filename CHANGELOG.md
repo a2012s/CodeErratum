@@ -36,3 +36,4 @@
 - `LICENSE`（MIT）、GitHub Actions CI（3.11/3.12/3.13：lint + format + test）。
 - 版本号单一来源（`pyproject.toml` 从 `src/codeerratum/__init__.py` 读取）。
 - `tests/test_regressions.py`：16 条回归测试，每条对应上面一个已修缺陷。
+- 中英双语 README：英文 `README.md` 作默认首页（PyPI 描述同源），中文 `README.zh-CN.md`，两版顶部互链。

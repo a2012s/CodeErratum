@@ -45,7 +45,7 @@ path = "src/codeerratum/__init__.py"
 packages = ["src/codeerratum"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "README.md", "开发计划.md", "LICENSE"]
+include = ["src", "README.md", "README.zh-CN.md", "开发计划.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
