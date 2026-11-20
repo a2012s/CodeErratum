@@ -1,3 +1,3 @@
-from .git import DiffError, get_commit, get_diff, split_diff
+from .git import DiffError, detect_language, get_commit, get_diff, split_diff
 
-__all__ = ["DiffError", "get_commit", "get_diff", "split_diff"]
+__all__ = ["DiffError", "detect_language", "get_commit", "get_diff", "split_diff"]

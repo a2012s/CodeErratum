@@ -146,7 +146,7 @@ def build_messages(
     parts = [
         f"# File: {unit.primary_file}\n# Symbol: {unit.symbol}\n"
         "# Line numbers below are absolute line numbers of this file.\n\n"
-        f"```python\n{excerpt}\n```"
+        f"```{unit.language or 'text'}\n{excerpt}\n```"
     ]
     if callers:
         parts.append("# Direct callers\n" + "\n".join(f"- {c}" for c in callers))

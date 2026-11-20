@@ -197,10 +197,55 @@ class _SymbolGroup:
             self.hunks.append(hunk)
 
 
+LANGUAGE_BY_SUFFIX = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".jsx": "jsx",
+    ".mjs": "javascript",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".rb": "ruby",
+    ".php": "php",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".cs": "csharp",
+    ".swift": "swift",
+    ".sh": "bash",
+    ".sql": "sql",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".json": "json",
+    ".ini": "ini",
+    ".md": "markdown",
+    ".css": "css",
+    ".html": "html",
+}
+
+
+def detect_language(file: str) -> str:
+    """Map a path to a language tag. Unknown extensions become 'text'.
+
+    Only Python gets symbol-level splitting; everything else is reviewed per file.
+    That is a real limitation, not a silent claim of support: the tag reaches the
+    prompt so the model knows what it is reading, and `language` is recorded on the
+    unit so the report can show it.
+    """
+    return LANGUAGE_BY_SUFFIX.get(Path(file).suffix.lower(), "text")
+
+
 def split_diff(
     diff_text: str,
     repo_root: Path,
-    language: str = "python",
+    language: str | None = None,
     notices: list[str] | None = None,
 ) -> list[ReviewUnit]:
     """Split a unified diff into per-symbol ReviewUnits.
@@ -210,6 +255,9 @@ def split_diff(
     source that is not there, and sending them downstream only yields a crash
     or a fabricated location. Every skip is appended to ``notices`` so the
     degradation stays visible.
+
+    ``language`` forces a single language for every file; by default it is inferred
+    per file from the extension.
     """
     units: list[ReviewUnit] = []
     for file, hunks, is_deleted in _iter_files(diff_text):
@@ -221,8 +269,9 @@ def split_diff(
                 reason = "deleted" if is_deleted else "not present in working tree"
                 notices.append(f"skipped {file} ({reason})")
             continue
+        lang = language or detect_language(file)
         source = source_path.read_text(encoding="utf-8", errors="replace")
-        index = _build_symbol_index(source) if language == "python" and source else []
+        index = _build_symbol_index(source) if lang == "python" and source else []
 
         by_symbol: dict[tuple[str, str], _SymbolGroup] = {}
         for hunk in hunks:
@@ -251,7 +300,7 @@ def split_diff(
                     primary_file=file,
                     symbol=symbol,
                     kind=kind,  # type: ignore[arg-type]
-                    language=language,
+                    language=lang,
                     hunks=group.hunks,
                     changed_lines=group.changed,
                     is_public=not symbol.startswith("_") and symbol != "<module>",

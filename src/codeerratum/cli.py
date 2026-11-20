@@ -303,6 +303,14 @@ def docs(
         _print_drift(drifts)
 
 
+def _compact(detail: str, limit: int = 52) -> str:
+    """Keep the new signature in the table; the old one is still in the existing docs."""
+    if " → " in detail:
+        new = detail.split(" → ", 1)[1]
+        return f"→ {new[:limit]}…" if len(new) > limit else f"→ {new}"
+    return f"{detail[:limit]}…" if len(detail) > limit else detail
+
+
 def _print_drift(drifts) -> None:
     from rich.table import Table
 
@@ -316,14 +324,30 @@ def _print_drift(drifts) -> None:
         "symbol_removed": "符号删除",
         "signature_changed": "签名变更",
     }
-    table = Table(show_header=True, header_style="bold", box=None)
-    for column in ("类型", "文件", "符号", "说明"):
-        table.add_column(column)
+    table = Table(show_header=True, header_style="bold", box=None, pad_edge=False)
+    table.add_column("类型", no_wrap=True)
+    table.add_column("文件", no_wrap=True, max_width=36, overflow="ellipsis")
+    table.add_column("符号", no_wrap=True, max_width=26, overflow="ellipsis")
+    table.add_column("说明", no_wrap=True, max_width=54, overflow="ellipsis")
     for d in drifts[:40]:
-        table.add_row(labels.get(d.kind, d.kind), d.path, d.symbol or "—", d.detail[:80])
+        table.add_row(labels.get(d.kind, d.kind), d.path, d.symbol or "—", _compact(d.detail))
+    console.print(table)
     console.print(table)
     if len(drifts) > 40:
         console.print(f"[yellow]另有 {len(drifts) - 40} 条未显示[/yellow]")
+
+
+@app.command()
+def mcp(
+    repo: Path = typer.Option(Path("."), "--repo", help="Default repository for tool calls"),
+) -> None:
+    """Run the MCP server on stdio (for Claude Code, Cursor, Cline...)."""
+    from .mcp import serve
+
+    # Point the default repo at the caller's choice for one process; tools still
+    # accept an explicit `repo` argument and override this.
+    os.environ.setdefault("CODEERRATUM_MCP_REPO", str(find_repo_root(repo)))
+    raise typer.Exit(serve())
 
 
 @app.command()
