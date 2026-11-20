@@ -31,6 +31,8 @@ You are the **reviewer, never the author**. Do not assume the code is correct. Y
 - P2: robustness gap, missing guard that is unlikely but possible
 - P3: minor clarity or maintainability issue with a concrete fix
 
+{{HOUSE_RULES}}
+
 # Output
 
 Return ONLY a JSON object matching the provided schema. No markdown fences, no commentary before or after.

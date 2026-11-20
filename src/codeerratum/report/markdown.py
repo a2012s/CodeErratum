@@ -19,6 +19,7 @@ HEADER = """# Code Review 工单
 
 > 生成信息：commit={commit} | 模式={mode} | 规格等级={spec_level}
 > 审查者={reviewers} | 时间={ts}
+> 项目规范={rules}
 > 本次共 {total} 条发现，本工单渲染前 {shown} 条（按严重度 / 证据 / 一致性排序）。
 >
 > **执行协议**（交给执行方 AI）：
@@ -29,6 +30,19 @@ HEADER = """# Code Review 工单
 > 5. AI 审查通过 ≠ 可以合入；必须人工确认。
 
 """
+
+
+def _rules_note(collection: FindingCollection) -> str:
+    """Name the project rules in the header — two runs over one diff can differ only here."""
+    if not collection.house_rules_sha:
+        return "未应用"
+    source = collection.house_rules_source
+    if source == "flag":
+        source = "手动传入"
+    return (
+        f"已应用 sha={collection.house_rules_sha}"
+        f"（{collection.house_rules_chars} 字，{source or '未知来源'}）"
+    )
 
 
 def _severity_counts(findings) -> dict[str, int]:
@@ -164,6 +178,7 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
             mode=collection.mode,
             total=len(ordered),
             shown=len(display),
+            rules=_rules_note(collection),
         )
     ]
 

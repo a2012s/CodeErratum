@@ -9,6 +9,7 @@ progress callback and format the results themselves.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import uuid
 from collections.abc import Callable
@@ -20,10 +21,11 @@ from .config import Config
 from .ingest import DiffError, get_commit, get_diff, split_diff
 from .models import FindingCollection, ModelRegistry, ReviewUnit
 from .report import render_markdown
-from .review import run_review
+from .review import MAX_HOUSE_RULES_CHARS, run_review, sanitize_house_rules, truncate_house_rules
 from .store import ReviewStore
 
 STATE_DIR = ".codeerratum"
+HOUSE_RULES_FILE = f"{STATE_DIR}/rules.md"
 VALID_MODES = ("quick", "dual", "committee")
 
 
@@ -84,6 +86,12 @@ class ReviewOutcome:
             "zones": {k: len(v) for k, v in self.collection.zoned().items()},
             "comparison": self.collection.comparison,
             "notes": self.collection.notes,
+            "house_rules": {
+                "applied": bool(self.collection.house_rules_sha),
+                "sha": self.collection.house_rules_sha,
+                "chars": self.collection.house_rules_chars,
+                "source": self.collection.house_rules_source,
+            },
         }
 
 
@@ -119,6 +127,56 @@ def resolve_mode(mode: str, config: Config) -> str:
     return resolved
 
 
+@dataclass
+class HouseRules:
+    """The owner's additions to the system prompt, plus the trace needed to explain a run."""
+
+    text: str = ""
+    source: str = ""
+    sha: str = ""
+    chars: int = 0
+    truncated: bool = False
+
+    def __bool__(self) -> bool:
+        return bool(self.text)
+
+    def summary(self) -> dict:
+        return {
+            "applied": bool(self.text),
+            "source": self.source,
+            "sha": self.sha,
+            "chars": self.chars,
+            "truncated": self.truncated,
+        }
+
+
+def resolve_house_rules(explicit: str | None, repo_root: Path) -> HouseRules:
+    """Explicit text wins; otherwise `<repo>/.codeerratum/rules.md` is picked up.
+
+    Blank explicit input falls back to the file on purpose: the UI textarea starts
+    empty, and a hidden third state ("empty means disable") would make behaviour
+    depend on whether a file happens to exist.
+    """
+    text, source = "", ""
+    if explicit and explicit.strip():
+        text, source = explicit, "flag"
+    else:
+        path = repo_root / HOUSE_RULES_FILE
+        if path.is_file():
+            text = path.read_text(encoding="utf-8", errors="replace")
+            source = HOUSE_RULES_FILE
+    text, truncated = truncate_house_rules(sanitize_house_rules(text))
+    if not text:
+        return HouseRules()
+    return HouseRules(
+        text=text,
+        source=source,
+        sha=hashlib.sha256(text.encode("utf-8")).hexdigest()[:12],
+        chars=len(text),
+        truncated=truncated,
+    )
+
+
 def execute_review(
     repo_root: Path,
     diff_spec: str = "HEAD~1",
@@ -128,6 +186,7 @@ def execute_review(
     out: Path | None = None,
     registry: ModelRegistry | None = None,
     progress: Callable[[str], None] | None = None,
+    house_rules: str = "",
 ) -> ReviewOutcome:
     """Run the whole pipeline and persist artifacts + feedback rows.
 
@@ -167,6 +226,12 @@ def execute_review(
     (run_dir / "input.diff").write_text(diff_text, encoding="utf-8")
 
     notices: list[str] = []
+    rules = resolve_house_rules(house_rules, repo_root)
+    if rules.truncated:
+        notices.append(f"项目规范超过 {MAX_HOUSE_RULES_CHARS} 字，已截断")
+        say(notices[-1])
+    if rules:
+        say(f"Project rules: {rules.source} ({rules.chars} chars, sha {rules.sha})")
     units = split_diff(diff_text, repo_root, notices=notices)
     (run_dir / "units.json").write_text(
         json.dumps([u.model_dump() for u in units], ensure_ascii=False, indent=2), encoding="utf-8"
@@ -193,6 +258,7 @@ def execute_review(
                 repo_root,
                 run_id,
                 author_model=author_model or None,
+                house_rules=rules.text,
             )
         )
     except ValueError as exc:
@@ -203,6 +269,9 @@ def execute_review(
         notices.append(f"{len(failed)} 个单元调用模型失败，相关文件未被审查")
     collection.notes = notices
     collection.commit = get_commit(repo_root)
+    collection.house_rules_sha = rules.sha
+    collection.house_rules_chars = rules.chars
+    collection.house_rules_source = rules.source
 
     (run_dir / "calls.json").write_text(
         json.dumps(calls, ensure_ascii=False, indent=2), encoding="utf-8"

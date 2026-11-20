@@ -42,6 +42,7 @@ async def _review_with(
     units: list[ReviewUnit],
     repo_root: Path,
     run_id: str,
+    house_rules: str = "",
 ) -> tuple[dict[str, list[Finding]], list[dict], list[dict], list[dict]]:
     """Run one model over all units. Returns its findings + rejected + call stats + diags."""
     per_unit: dict[str, list[Finding]] = {}
@@ -51,7 +52,7 @@ async def _review_with(
     for unit in units:
         try:
             findings, rej, completion, diags = await review_unit(
-                provider, spec.model_id, unit, repo_root, run_id
+                provider, spec.model_id, unit, repo_root, run_id, house_rules
             )
         except Exception as exc:  # noqa: BLE001 - one model/unit failing must not kill the run
             rejected.append(
@@ -100,17 +101,26 @@ async def run_review(
     run_id: str,
     author_model: str | None = None,
     rejected_category_counts: dict[str, int] | None = None,
+    house_rules: str = "",
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
     Works for quick (1 model) as well as dual/committee (N heterogeneous models).
     In dual/committee, findings are clustered and merged across models, then a
     different-vendor model tries to falsify each high-value finding.
+
+    ``house_rules`` only reaches the reviewers. The falsifier is deliberately left
+    with the stock prompt: a falsifier that has absorbed the project's conventions
+    would start agreeing with the reviewer for the wrong reason, which destroys the
+    independence the falsification round exists to provide.
     """
     reviewers, falsifier_spec = registry.route(mode, author_model=author_model)  # type: ignore[arg-type]
 
     providers = {m.model_id: _make_provider(m) for m in reviewers}
-    tasks = [_review_with(providers[m.model_id], m, units, repo_root, run_id) for m in reviewers]
+    tasks = [
+        _review_with(providers[m.model_id], m, units, repo_root, run_id, house_rules)
+        for m in reviewers
+    ]
     results = await asyncio.gather(*tasks)
 
     per_model_reviews: dict[str, dict[str, list[Finding]]] = {}

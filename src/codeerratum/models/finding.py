@@ -226,6 +226,15 @@ class FindingCollection(BaseModel):
         default_factory=list,
         description="Visible degradations for this run (skipped files, failed units, ...)",
     )
+    house_rules_sha: str = Field(
+        default="",
+        description="sha256 of the appended project rules; empty when none were applied. "
+        "Two runs over the same diff can differ only because of this, so it must be traceable.",
+    )
+    house_rules_chars: int = Field(default=0, description="Length of the applied project rules")
+    house_rules_source: str = Field(
+        default="", description="Where the rules came from: 'flag' | file name | ''"
+    )
 
     def sorted_findings(self) -> list[Finding]:
         order = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}

@@ -20,6 +20,7 @@ from .pipeline import (
     find_repo_root,
     store_for,
 )
+from .review import MAX_HOUSE_RULES_CHARS
 from .store import ReviewStore
 
 
@@ -29,6 +30,16 @@ def _store(repo_root: Path) -> ReviewStore:
 
 app = typer.Typer(name="codeerratum", help="给 AI 写的代码开一张勘误表", no_args_is_help=True)
 console = Console()
+
+
+def _read_rules_file(path: Path | None) -> str:
+    """Read --rules. A typo in the path must fail loudly rather than review without it."""
+    if path is None:
+        return ""
+    if not path.is_file():
+        console.print(f"[red]Error: rules file not found: {path}[/red]")
+        raise typer.Exit(1)
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _version_callback(value: bool) -> None:
@@ -60,9 +71,16 @@ def review(
         "--author-model",
         help="Model that wrote this code; it will never be seated as a reviewer",
     ),
+    rules: Path | None = typer.Option(
+        None,
+        "--rules",
+        help="Markdown file with project-specific rules, appended to the system prompt. "
+        f"Defaults to .codeerratum/rules.md when it exists (max {MAX_HOUSE_RULES_CHARS} chars)",
+    ),
 ) -> None:
     """Review a git diff and write an executable review.md work order."""
     repo_root = repo.resolve()
+    house_rules = _read_rules_file(rules)
     try:
         outcome = execute_review(
             repo_root,
@@ -72,6 +90,7 @@ def review(
             author_model=author_model or None,
             out=out,
             progress=lambda msg: console.print(msg),
+            house_rules=house_rules,
         )
     except NotARepository as exc:
         console.print(f"[red]Error: {exc}[/red]")
