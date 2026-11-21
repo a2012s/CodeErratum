@@ -208,6 +208,23 @@
   }
   .drawer h3 { margin: 0 0 10px; font-size: 13px; }
   .drawer.wide { width: 520px; }
+  .drawer.config { width: min(720px, 92vw); }
+  .cfg-note {
+    font-size: 12.5px; color: var(--muted); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px;
+    line-height: 1.6;
+  }
+  .cfg-note.bad { color: var(--bad); border-color: var(--bad); }
+  table.cfg { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 8px; }
+  table.cfg th { font-size: 11.5px; font-weight: 500; color: var(--muted); text-align: left; }
+  table.cfg th:nth-child(1) { width: 25%; }
+  table.cfg th:nth-child(2) { width: 34%; }
+  table.cfg th:nth-child(3) { width: 14%; }
+  table.cfg th:nth-child(4) { width: 21%; }
+  table.cfg th:nth-child(5) { width: 6%; }
+  table.cfg td { padding: 3px 2px; vertical-align: middle; }
+  table.cfg input { width: 100%; min-width: 0; padding: 5px 6px; font-size: 11.5px; }
+  table.cfg button { padding: 4px 7px; }
   .stat-row { display: flex; justify-content: space-between; padding: 5px 0;
     border-bottom: 1px solid var(--border); font-size: 13px; }
   table.mini { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
@@ -237,6 +254,7 @@
   <div class="brand"><span class="mark">E</span> CodeErratum <span class="ver">UI</span></div>
   <div class="repo" id="repoLabel">…</div>
   <div class="spacer"></div>
+  <button class="ghost" id="configBtn">配置</button>
   <button class="ghost" id="docsBtn">文档</button>
   <button class="ghost" id="statsBtn">统计</button>
 </header>
@@ -308,6 +326,11 @@
   <div id="statsBody"></div>
 </aside>
 
+<aside class="drawer config" id="configDrawer" hidden>
+  <h3>模型配置</h3>
+  <div id="configBody"></div>
+</aside>
+
 <aside class="drawer wide" id="docsDrawer" hidden>
   <h3>模块文档 · 签名漂移</h3>
   <div id="docsBody"></div>
@@ -356,20 +379,27 @@ function ago(iso) {
   return `${Math.floor(s / 86400)} 天前`;
 }
 
+function renderMeta() {
+  const m = STATE.meta;
+  if (!m) return;
+  $("repoLabel").textContent = m.repo;
+  const box = $("models");
+  if (!m.configured) {
+    box.innerHTML = `<span class="chip" style="color:var(--bad);border-color:var(--bad)">未配置模型：${esc((m.config_error || "").split("\n")[0])}</span>`;
+  } else {
+    box.innerHTML = m.models
+      .map((x) => `<span class="chip model">${esc(x.model_id)} · ${esc(x.family)}</span>`).join("")
+      + `<span class="chip" title="配置来源">来源：${esc(m.source === "file" ? "配置文件" : "环境变量")}</span>`;
+    $("mode").value = m.mode;
+  }
+  renderRulesHint(m.house_rules);
+}
+
 async function boot() {
   try {
     STATE.meta = await api("/api/meta");
   } catch (e) { toast("无法连接后端: " + e.message, true); return; }
-  $("repoLabel").textContent = STATE.meta.repo;
-  const box = $("models");
-  if (!STATE.meta.configured) {
-    box.innerHTML = `<span class="chip" style="color:var(--bad);border-color:var(--bad)">未配置模型：${esc(STATE.meta.config_error.split("\n")[0])}</span>`;
-  } else {
-    box.innerHTML = STATE.meta.models
-      .map((m) => `<span class="chip model">${esc(m.model_id)} · ${esc(m.family)}</span>`).join("");
-    $("mode").value = STATE.meta.mode;
-  }
-  renderRulesHint(STATE.meta.house_rules);
+  renderMeta();
   await loadRuns(true);
 }
 
@@ -656,6 +686,98 @@ function renderDocs(data) {
       <td style="color:var(--muted)">${m.public}/${m.total}</td></tr>`).join("") + `</table>`);
   $("docsBody").innerHTML = parts.join("");
 }
+
+const MODES = [
+  ["quick", "quick · 单模型"],
+  ["dual", "dual · 双模型 + 证伪"],
+  ["committee", "committee · 三模型"],
+];
+
+function cfgRow(m = {}) {
+  const tr = document.createElement("tr");
+  tr.dataset.key = m.api_key_set ? "1" : "0";
+  tr.innerHTML = `
+    <td><input class="cfg-mid" value="${esc(m.model_id || "")}" placeholder="gpt-4o" spellcheck="false"></td>
+    <td><input class="cfg-url" value="${esc(m.base_url || "")}" placeholder="https://api.example.com/v1" spellcheck="false"></td>
+    <td><input class="cfg-fam" value="${esc(m.family || "")}" placeholder="自动推断"></td>
+    <td><input class="cfg-key" type="password" value="" placeholder="${esc(m.api_key_hint || "无")}" autocomplete="new-password"></td>
+    <td><button class="ghost cfg-del" title="删除这一行">×</button></td>`;
+  tr.querySelector(".cfg-del").onclick = () => tr.remove();
+  return tr;
+}
+
+function renderConfig(info) {
+  const parts = [];
+  const src = info.source === "file"
+    ? `本地配置文件 <code>${esc(info.path)}</code>（保存后重启仍生效）`
+    : info.source === "env"
+      ? "环境变量（尚未保存；点「保存配置」后写入本地文件）"
+      : "未配置";
+  parts.push(`<div class="cfg-note">当前来源：${src}</div>`);
+  if (info.config_error) parts.push(`<div class="cfg-note bad" style="margin-top:8px">${esc(info.config_error)}</div>`);
+  parts.push(`<div class="field" style="margin:14px 0 6px">
+    <label for="cfgMode">审查模式</label>
+    <select id="cfgMode">${MODES.map(([v, label]) =>
+      `<option value="${v}" ${v === info.mode ? "selected" : ""}>${label}</option>`).join("")}</select>
+  </div>`);
+  parts.push(`<div class="hint" style="margin:0 0 6px">
+    dual 要求至少两家不同 family，证伪者取第三家。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。
+  </div>`);
+  parts.push(`<table class="cfg"><thead><tr>
+    <th>model_id</th><th>base_url</th><th>family</th><th>api_key</th><th></th>
+  </tr></thead><tbody id="cfgRows"></tbody></table>`);
+  parts.push(`<div class="actions" style="margin-top:12px">
+    <button class="ghost" id="cfgAdd">+ 添加模型</button>
+    <span class="spacer"></span>
+    <button class="primary" id="cfgSave">保存配置</button>
+  </div>`);
+  $("configBody").innerHTML = parts.join("");
+  const tbody = $("cfgRows");
+  (info.models || []).forEach((m) => tbody.appendChild(cfgRow(m)));
+  if (!tbody.children.length) tbody.appendChild(cfgRow());
+  $("cfgAdd").onclick = () => tbody.appendChild(cfgRow());
+  $("cfgSave").onclick = saveConfig;
+}
+
+async function saveConfig() {
+  const mode = $("cfgMode").value;
+  const models = [...document.querySelectorAll("#cfgRows tr")].map((tr) => {
+    const entered = tr.querySelector(".cfg-key").value.trim();
+    return {
+      model_id: tr.querySelector(".cfg-mid").value.trim(),
+      base_url: tr.querySelector(".cfg-url").value.trim(),
+      family: tr.querySelector(".cfg-fam").value.trim(),
+      api_key: entered || (tr.dataset.key === "1" ? "__KEEP__" : ""),
+    };
+  });
+  const btn = $("cfgSave");
+  btn.disabled = true;
+  try {
+    const info = await api("/api/config", {
+      method: "POST", body: JSON.stringify({ mode, models }),
+    });
+    renderConfig(info);
+    STATE.meta = await api("/api/meta");
+    renderMeta();
+    toast("配置已保存到 " + info.path);
+  } catch (e) {
+    toast("保存失败: " + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("configBtn").onclick = async () => {
+  const d = $("configDrawer");
+  d.hidden = !d.hidden;
+  if (d.hidden) return;
+  $("configBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px"><span class="spinner"></span> 读取配置…</div>`;
+  try {
+    renderConfig(await api("/api/config"));
+  } catch (e) {
+    $("configBody").innerHTML = `<div class="cfg-note bad">${esc(e.message)}</div>`;
+  }
+};
 
 function statRow(label, value) {
   return `<div class="stat-row"><span>${esc(label)}</span><b>${esc(value)}</b></div>`;

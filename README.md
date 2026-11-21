@@ -153,6 +153,8 @@ Standard library only — no FastAPI, no bundler, no `node_modules`. The install
 
 Pick the diff range, path filter, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only, rejects non-loopback Hosts (DNS rebinding), and requires a same-origin `Origin` on every POST, so a random web page cannot trigger a paid review through your browser.
 
+The header's **Config** button shows the active mode and model endpoints and lets you edit them. Saving writes `.codeerratum/config.json` (mode 0600), which takes precedence over environment variables and survives a restart — the CLI reads the same file. API keys are never echoed to the browser; leave the key field blank to keep the stored value.
+
 ### Posting to a pull request
 
 ```bash

@@ -18,6 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import Config
+from .config_store import CONFIG_REL
+from .config_store import load as load_saved_config
 from .ingest import DiffError, get_commit, get_diff, new_side_sources, split_diff
 from .models import FindingCollection, ModelRegistry, ReviewUnit
 from .report import render_markdown
@@ -244,10 +246,18 @@ def execute_review(
     if not (repo_root / ".git").exists():
         raise NotARepository(f"{repo_root} is not a git repository")
 
+    # A saved config (written by the UI) wins over env so an edit sticks across
+    # process restarts. A corrupt file is an error, never a silent fallback —
+    # otherwise the user thinks the old model set is still in force.
     try:
-        config = Config.from_env()
-    except ValueError as exc:
-        raise ConfigError(str(exc)) from exc
+        config = load_saved_config(repo_root)
+    except (OSError, ValueError) as exc:
+        raise ConfigError(f"cannot read {CONFIG_REL}: {exc}") from exc
+    if config is None:
+        try:
+            config = Config.from_env()
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
     if registry is not None:
         config = Config(
             base_url=config.base_url,

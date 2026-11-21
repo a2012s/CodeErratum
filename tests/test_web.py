@@ -252,3 +252,135 @@ def test_pipeline_refuses_non_repository(tmp_path):
 
     with pytest.raises(NotARepository):
         execute_review(tmp_path)
+
+
+# --- configuration read / write -------------------------------------------
+
+
+def test_config_get_masks_api_key(client, monkeypatch):
+    monkeypatch.setenv("CODEERRATUM_API_KEY", "sk-super-secret-12345678")
+    info = client.get("/api/config").json()
+    assert info["source"] == "env"
+    assert info["configured"] is True
+    assert info["models"][0]["api_key_set"] is True
+    assert info["models"][0]["api_key_hint"].endswith("5678")
+    assert "sk-super-secret-12345678" not in json.dumps(info)
+
+
+def test_config_save_roundtrip_and_file_permissions(client, repo):
+    resp = client.post(
+        "/api/config",
+        json={
+            "mode": "quick",
+            "models": [
+                {
+                    "model_id": "saved-model",
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "sk-abcdefghijkl",
+                    "family": "openai",
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    info = resp.json()
+    assert info["source"] == "file"
+    assert info["models"][0]["model_id"] == "saved-model"
+    assert "sk-abcdefghijkl" not in json.dumps(info)
+
+    path = repo / ".codeerratum" / "config.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert json.loads(path.read_text())["models"][0]["api_key"] == "sk-abcdefghijkl"
+    assert client.get("/api/meta").json()["source"] == "file"
+
+
+def test_keep_secret_retains_existing_key(client, repo):
+    model = {
+        "model_id": "saved-model",
+        "base_url": "https://api.example.com/v1",
+        "api_key": "sk-original-key-value",
+    }
+    assert client.post("/api/config", json={"mode": "quick", "models": [model]}).status_code == 200
+    resp = client.post(
+        "/api/config",
+        json={
+            "mode": "quick",
+            "models": [{**model, "api_key": "__KEEP__"}],
+        },
+    )
+    assert resp.status_code == 200
+    stored = json.loads((repo / ".codeerratum" / "config.json").read_text())
+    assert stored["models"][0]["api_key"] == "sk-original-key-value"
+
+
+@pytest.mark.parametrize(
+    ("payload", "fragment"),
+    [
+        (
+            {"mode": "bogus", "models": [{"model_id": "x", "base_url": "https://x.test"}]},
+            "mode must be",
+        ),
+        ({"mode": "quick", "models": []}, "models must be"),
+        (
+            {"mode": "quick", "models": [{"model_id": "x", "base_url": "file:///etc/passwd"}]},
+            "base_url must start",
+        ),
+        (
+            {
+                "mode": "quick",
+                "models": [
+                    {"model_id": "dup", "base_url": "https://a.test"},
+                    {"model_id": "dup", "base_url": "https://b.test"},
+                ],
+            },
+            "duplicate model_id",
+        ),
+    ],
+)
+def test_config_rejects_bad_payload(client, payload, fragment):
+    resp = client.post("/api/config", json=payload)
+    assert resp.status_code == 400
+    assert fragment in resp.json()["error"]
+
+
+def test_config_post_requires_same_origin(client):
+    resp = client.post(
+        "/api/config",
+        json={"mode": "quick", "models": [{"model_id": "x", "base_url": "https://x.test"}]},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+
+
+def test_saved_config_drives_the_review(client, monkeypatch):
+    """A browser edit must change which model actually runs, not just a file."""
+    resp = client.post(
+        "/api/config",
+        json={
+            "mode": "quick",
+            "models": [
+                {
+                    "model_id": "from-file",
+                    "base_url": "http://stub.invalid/v1",
+                    "family": "openai",
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    # If the pipeline fell back to env, this stale value would show up instead.
+    monkeypatch.setenv("CODEERRATUM_MODEL", "env-should-be-ignored")
+    summary = client.post("/api/review", json={"diff": "HEAD", "mode": "quick"})
+    assert summary.status_code == 200, summary.text
+    runs = client.get("/api/runs").json()["runs"]
+    assert runs[0]["model_id"] == "from-file"
+
+
+def test_corrupt_config_file_is_not_silently_ignored(client, repo):
+    (repo / ".codeerratum").mkdir(exist_ok=True)
+    (repo / ".codeerratum" / "config.json").write_text("{ not json", encoding="utf-8")
+    info = client.get("/api/config").json()
+    assert "cannot read" in info["config_error"]
+    resp = client.post("/api/review", json={"diff": "HEAD~1"})
+    assert resp.status_code == 400
+    assert "cannot read" in resp.json()["error"]

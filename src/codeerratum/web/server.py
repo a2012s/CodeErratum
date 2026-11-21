@@ -22,7 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ..config import Config
+from ..config_store import public as public_config
+from ..config_store import save as save_config_file
 from ..ingest import DiffError, normalize_pathspec
 from ..models import ModelRegistry
 from ..pipeline import (
@@ -58,27 +59,31 @@ class WebApp:
     # ---- reads -----------------------------------------------------------
 
     def meta(self) -> dict:
-        info: dict = {
-            "repo": str(self.repo_root),
-            "state_dir": str(self.repo_root / STATE_DIR),
-            "configured": False,
-            "mode": "quick",
-            "models": [],
-            "config_error": "",
-            "house_rules": self.house_rules_info(),
-        }
-        try:
-            config = Config.from_env()
-        except ValueError as exc:
-            info["config_error"] = str(exc)
-            return info
-        registry = self.registry or config.registry
-        info["configured"] = True
-        info["mode"] = config.mode
+        info = public_config(self.repo_root)
+        info["repo"] = str(self.repo_root)
+        info["state_dir"] = str(self.repo_root / STATE_DIR)
+        info["house_rules"] = self.house_rules_info()
+        # /api/meta keeps its original two-field chip shape; the settings
+        # drawer reads /api/config for the rest (endpoints, keys masked, ...).
         info["models"] = [
-            {"model_id": m.model_id, "family": m.resolved_family()} for m in registry.models
+            {"model_id": m["model_id"], "family": m["resolved_family"]} for m in info["models"]
         ]
+        # An explicitly injected registry (tests, embedding) still takes
+        # precedence for the run itself; reflect that in the chips too.
+        if self.registry is not None:
+            info["configured"] = True
+            info["models"] = [
+                {"model_id": m.model_id, "family": m.resolved_family()}
+                for m in self.registry.models
+            ]
         return info
+
+    def config_info(self) -> dict:
+        """Full (masked) configuration for the settings drawer."""
+        return public_config(self.repo_root)
+
+    def save_config(self, payload: dict) -> dict:
+        return save_config_file(self.repo_root, payload)
 
     def house_rules_info(self) -> dict:
         """Report the auto-discovered rules file so an empty textarea is not ambiguous."""
@@ -347,6 +352,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     self._send(HTTPStatus.OK, html, "text/html; charset=utf-8")
                 elif path == "/api/meta":
                     self._json(HTTPStatus.OK, app.meta())
+                elif path == "/api/config":
+                    self._json(HTTPStatus.OK, app.config_info())
                 elif path == "/api/runs":
                     self._json(HTTPStatus.OK, app.list_runs())
                 elif path == "/api/stats":
@@ -382,6 +389,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 body = self._body()
                 if path == "/api/review":
                     self._json(HTTPStatus.OK, app.start_review(body))
+                elif path == "/api/config":
+                    self._json(HTTPStatus.OK, app.save_config(body))
                 elif m := re.fullmatch(r"/api/findings/([0-9a-f]+)/status", path):
                     self._json(
                         HTTPStatus.OK,
