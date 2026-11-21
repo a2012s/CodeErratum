@@ -51,7 +51,9 @@ include = ["src", "README.md", "README.zh-CN.md", "开发计划.md", "LICENSE", 
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-addopts = "--basetemp=.pytest_tmp"
+# No fixed --basetemp: pinning it under the repo put pytest's per-test "current"
+# symlinks inside a Finder-visible directory, and the next session's rm_rf died
+# with ENOTEMPTY, failing collection before a single test ran.
 
 [tool.ruff]
 line-length = 100

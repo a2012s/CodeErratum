@@ -41,9 +41,20 @@ def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
 
     ``paths`` is split on whitespace and appended after ``--`` as separate git
     arguments, so each token is treated as a path, never as a flag.
+
+    ``spec`` is a revision, not an option: ``git diff --output=/tmp/x HEAD~1``
+    would write the diff to an arbitrary file and return an empty stdout, which
+    looks exactly like "no changes". Reject option-looking specs up front (clear
+    message) and pass ``--end-of-options`` so git itself refuses anything that
+    still tries to parse as a flag.
     """
+    spec = spec.strip()
+    if not spec:
+        raise DiffError("diff spec must not be empty")
+    if spec.startswith("-"):
+        raise DiffError("diff spec must not start with '-': git would parse it as an option")
     pathspec = normalize_pathspec(paths)
-    cmd = ["git", "diff", "--no-color", "--unified=3", spec]
+    cmd = ["git", "diff", "--no-color", "--unified=3", "--end-of-options", spec]
     if pathspec:
         cmd += ["--", *pathspec.split()]
     result = subprocess.run(
@@ -190,22 +201,64 @@ def _changed_lines(hunk: Hunk):
             new += 1
 
 
+_TAG_WORD = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])")
+_RISK_VOCAB: tuple[tuple[frozenset[str], str], ...] = (
+    (
+        frozenset(
+            {
+                "thread",
+                "threading",
+                "asyncio",
+                "async",
+                "await",
+                "lock",
+                "locks",
+                "mutex",
+                "semaphore",
+                "concurrent",
+                "concurrency",
+                "race",
+            }
+        ),
+        "concurrency",
+    ),
+    (
+        frozenset(
+            {
+                "auth",
+                "authentication",
+                "authorize",
+                "authorization",
+                "oauth",
+                "token",
+                "tokens",
+                "password",
+                "passwords",
+                "credential",
+                "credentials",
+                "jwt",
+                "login",
+                "permission",
+                "permissions",
+            }
+        ),
+        "auth",
+    ),
+    (frozenset({"migration", "migrations"}), "migration"),
+    (frozenset({"transaction", "transactions"}), "data"),
+)
+
+
 def _risk_tags(content: str) -> list[str]:
-    tags: set[str] = set()
-    lowered = content.lower()
-    for keyword, tag in (
-        ("thread", "concurrency"),
-        ("asyncio", "concurrency"),
-        ("lock", "concurrency"),
-        ("auth", "auth"),
-        ("token", "auth"),
-        ("password", "auth"),
-        ("migration", "migration"),
-        ("transaction", "data"),
-    ):
-        if keyword in lowered:
-            tags.add(tag)
-    return sorted(tags)
+    """Tag the changed code by identifier words, not substrings.
+
+    Substring matching made ``author_name`` look like auth and ``blocking_call``
+    look like a lock, and those tags steer the unit budget (``prioritize``). Words
+    are split on non-letters and camelCase, so ``author`` no longer contains
+    ``auth`` and ``blocking`` no longer contains ``lock``.
+    """
+    words = {match.group(0).lower() for match in _TAG_WORD.finditer(content)}
+    return sorted(tag for vocab, tag in _RISK_VOCAB if words & vocab)
 
 
 class _SymbolGroup:
@@ -267,6 +320,35 @@ def detect_language(file: str) -> str:
     return LANGUAGE_BY_SUFFIX.get(Path(file).suffix.lower(), "text")
 
 
+def _matches_working_tree(hunk: Hunk, source_lines: list[str]) -> bool:
+    """Do this hunk's new-side lines exist at their claimed positions in the file?
+
+    A diff can describe a revision that is not checked out (``main...feature``
+    reviewed while on ``main``). The excerpt and the anchor check are both built
+    from the working tree, so hunk line numbers pointing at different code make the
+    model review the wrong region and still pass the hash check — a confident
+    finding about code that is not in the diff. Skipping the file, with a notice,
+    is the honest degradation until sources can be read from the diff revision.
+    """
+    lineno = hunk.new_start
+    for line in hunk.content.splitlines():
+        if not line:
+            continue
+        prefix = line[0]
+        if prefix == "-" or prefix == "\\":
+            continue
+        if prefix not in (" ", "+"):
+            return False  # malformed hunk body: line cannot be placed on the new side
+        if lineno > len(source_lines):
+            return False
+        expected = source_lines[lineno - 1]
+        actual = line[1:].rstrip("\r")
+        if expected != actual:
+            return False
+        lineno += 1
+    return True
+
+
 def split_diff(
     diff_text: str,
     repo_root: Path,
@@ -296,6 +378,13 @@ def split_diff(
             continue
         lang = language or detect_language(file)
         source = source_path.read_text(encoding="utf-8", errors="replace")
+        if hunks and not all(_matches_working_tree(h, source.splitlines()) for h in hunks):
+            if notices is not None:
+                notices.append(
+                    f"skipped {file} (working tree does not match the diff revision; "
+                    "check out the target revision and re-run)"
+                )
+            continue
         index = _build_symbol_index(source) if lang == "python" and source else []
 
         by_symbol: dict[tuple[str, str], _SymbolGroup] = {}

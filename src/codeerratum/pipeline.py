@@ -302,6 +302,9 @@ def execute_review(
     profiled = apply_measured_profiles(config.registry, store)
     if profiled:
         say(f"Model profiles: {profiled} model(s) have accumulated history")
+    rejected_counts = store.rejected_category_counts()
+    if rejected_counts:
+        say(f"Historical rejects: {rejected_counts}")
 
     scan = (repo_root / "src") if (repo_root / "src").is_dir() else None
     spec_level, spec_reason = detect_spec_level(repo_root, scan=scan)
@@ -316,6 +319,7 @@ def execute_review(
                 repo_root,
                 run_id,
                 author_model=author_model or None,
+                rejected_category_counts=rejected_counts or None,
                 house_rules=rules.text,
             )
         )

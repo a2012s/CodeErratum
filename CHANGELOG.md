@@ -1,5 +1,34 @@
 # Changelog
 
+## [未发布]
+
+### Fixed
+
+- **模型画像重复计数**：`save_run` 与 `save_comparison` 各自写一遍 `model_profile`，
+  dual/committee 下每次运行的 `n_assert` 被算两遍；且证伪轮的 `confirm` 仍记在证伪者头上，
+  一个从不提交发现的模型会拿到 100% precision。现在 `update_profiles` 是唯一写入者，
+  每个增量由 `verdict_events` 的 (run, finding, model, role) 去重，重复保存同一 collection 不再膨胀。
+- **`--diff` 可被当作 git 选项**：`get_diff` 把 revspec 直接放在 `git diff` 选项之后，
+  `--output=/path` 会被 git 接受，把 diff 写到任意文件并返回空 stdout —— 与“没有变更”无法区分。
+  现在拒绝以 `-` 开头的 revspec，并加 `--end-of-options` 让 git 自身兜底。
+- **风险标签按子串匹配**：`author_name` 被判成 auth、`blocking_call` 被判成锁，单元预算被导向
+  无关代码。改为标识符词匹配并拆分 camelCase，`author` 不再命中 `auth`。
+- **误报历史从未回流**：`rank_findings` 的 `rejected_category_counts` 参数一直没人传。
+  新增 `ReviewStore.rejected_category_counts()`，执行时读 `feedback.db` 并传给排序。
+- **工单渲染能被模型输出破坏**：`claim` 里的换行会注入伪章节，源码/docstring 里的 ``` 会提前
+  闭合围栏。claim/detail/说明折叠为单行，围栏长度按内容中最长反引号动态加长。
+- **跨版本 diff 会审错区域**：审 `main...feature` 等未 checkout 的版本时，hunk 行号被用来切
+  工作区源码，模型看到错位代码，而锚点哈希校验的正是同一份错位源码，所以仍会通过。
+  现在逐行核对 hunk 与工作区，不一致就跳过该文件并在「覆盖说明」写明（按 diff 版本读 blob
+  是彻底修复，留待后续）。
+- **测试临时目录固定在仓库内**：pytest 的 `current` 符号链接使下一次会话的 `rm_rf` 以
+  ENOTEMPTY 失败，收集阶段就中断。移除固定的 `--basetemp=.pytest_tmp`，改用 pytest 默认临时目录。
+
+### Tests
+
+新增 7 条回归测试（画像幂等与归属、选项注入、`--end-of-options` 下的 pathspec 兼容、风险标签、
+误报回流、工单渲染防注入、跨版本跳过）。合计 168 项通过，连续三次运行稳定。
+
 ## [0.4.2] — 路径过滤
 
 ### Added

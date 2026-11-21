@@ -116,7 +116,13 @@ class ReviewStore:
         self.update_profiles(collection)
 
     def save_comparison(self, collection: FindingCollection, created_at: str) -> None:
-        """Phase-3: persist cross-model comparison data for the eval/resume narrative."""
+        """Phase-3: persist cross-model comparison data for the eval/resume narrative.
+
+        Profile accumulation deliberately does NOT happen here. It used to, next to
+        ``update_profiles``, and the two copies counted every assertion twice while
+        crediting a falsifier's ``confirm`` to the falsifier — the exact model that
+        must never look accurate. ``model_profile`` has one writer now.
+        """
         if not collection.comparison:
             return
         cmp = collection.comparison
@@ -133,43 +139,6 @@ class ReviewStore:
                     created_at,
                 ),
             )
-            # Update per-model profile from verdicts across all findings. Events are
-            # keyed by (run, finding, model, role) so re-running the same review
-            # cannot inflate the profile.
-            for f in collection.findings:
-                for v in f.verdicts:
-                    col = {
-                        "assert": "n_assert",
-                        "refute": "n_refuted",
-                        "confirm": "n_confirmed",
-                    }.get(v.role)
-                    if not col:
-                        continue
-                    if not self._record_event(conn, collection.run_id, f.id, v.model_id, v.role):
-                        continue
-                    conn.execute(
-                        "INSERT INTO model_profile "
-                        "(model_id, family, n_assert, n_unique, n_refuted, n_confirmed) "
-                        "VALUES (?,?,0,0,0,0) ON CONFLICT(model_id) DO NOTHING",
-                        (v.model_id, ""),
-                    )
-                    conn.execute(
-                        f"UPDATE model_profile SET {col} = {col} + 1 WHERE model_id = ?",
-                        (v.model_id,),
-                    )
-                if len(f.source_models) == 1 and f.agreement == "unique":
-                    source = f.source_models[0]
-                    if self._record_event(conn, collection.run_id, f.id, source, "unique"):
-                        conn.execute(
-                            "INSERT INTO model_profile "
-                            "(model_id, family, n_assert, n_unique, n_refuted, n_confirmed) "
-                            "VALUES (?,?,0,0,0,0) ON CONFLICT(model_id) DO NOTHING",
-                            (source, ""),
-                        )
-                        conn.execute(
-                            "UPDATE model_profile SET n_unique = n_unique + 1 WHERE model_id = ?",
-                            (source,),
-                        )
 
     @staticmethod
     def _record_event(
@@ -208,45 +177,51 @@ class ReviewStore:
         falsifier who rendered it. A dedicated falsifier never submits findings;
         crediting it would give a perfect "precision" to a model that should not
         be seated as a reviewer, while the actual authors keep an empty profile.
+
+        This is the only writer of ``model_profile``. Each increment is guarded by
+        a ``verdict_events`` row keyed on (run, finding, model, role), so saving the
+        same collection twice (CLI then UI, a retried write) cannot inflate the
+        counts that routing depends on.
         """
-        tally: dict[str, dict[str, int]] = {}
-
-        def bump(model_id: str, key: str) -> None:
-            if not model_id:
-                return
-            row = tally.setdefault(model_id, {"a": 0, "u": 0, "c": 0, "r": 0})
-            row[key] += 1
-
-        for f in collection.findings:
-            unique = f.agreement == "unique" and len(f.source_models) == 1
-            for model_id in f.source_models:
-                bump(model_id, "a")
-                if unique:
-                    bump(model_id, "u")
-            # One finding is one precision sample for each asserting model, no
-            # matter how many falsifiers weighed in. Refute wins ties so a
-            # disputed finding never inflates its author's precision.
-            roles = {v.role for v in f.verdicts}
-            outcome = "r" if "refute" in roles else ("c" if "confirm" in roles else "")
-            if outcome:
-                for model_id in f.source_models:
-                    bump(model_id, outcome)
-
-        if not tally:
-            return
         with self._conn() as conn:
-            for model_id, row in tally.items():
-                conn.execute(
-                    "INSERT INTO model_profile (model_id, family) VALUES (?, '') "
-                    "ON CONFLICT(model_id) DO NOTHING",
-                    (model_id,),
-                )
-                conn.execute(
-                    "UPDATE model_profile SET n_assert = n_assert + ?, "
-                    "n_unique = n_unique + ?, n_confirmed = n_confirmed + ?, "
-                    "n_refuted = n_refuted + ? WHERE model_id = ?",
-                    (row["a"], row["u"], row["c"], row["r"], model_id),
-                )
+            for f in collection.findings:
+                unique = f.agreement == "unique" and len(f.source_models) == 1
+                # One finding is one precision sample for each asserting model, no
+                # matter how many falsifiers weighed in. Refute wins ties so a
+                # disputed finding never inflates its author's precision.
+                roles = {v.role for v in f.verdicts}
+                outcome = "refute" if "refute" in roles else "confirm" if "confirm" in roles else ""
+                for model_id in f.source_models:
+                    if not model_id:
+                        continue
+                    if self._record_event(conn, collection.run_id, f.id, model_id, "assert"):
+                        self._bump_profile(conn, model_id, "n_assert")
+                    if unique and self._record_event(
+                        conn, collection.run_id, f.id, model_id, "unique"
+                    ):
+                        self._bump_profile(conn, model_id, "n_unique")
+                    if outcome and self._record_event(
+                        conn, collection.run_id, f.id, model_id, outcome
+                    ):
+                        column = "n_confirmed" if outcome == "confirm" else "n_refuted"
+                        self._bump_profile(conn, model_id, column)
+
+    @staticmethod
+    def _bump_profile(conn: sqlite3.Connection, model_id: str, column: str) -> None:
+        """Increment one profile column, creating the row on first sight.
+
+        ``column`` is a code literal chosen by the caller, never user input — the
+        table shape is fixed and SQL injection has no way in here.
+        """
+        conn.execute(
+            "INSERT INTO model_profile (model_id, family) VALUES (?, '') "
+            "ON CONFLICT(model_id) DO NOTHING",
+            (model_id,),
+        )
+        conn.execute(
+            f"UPDATE model_profile SET {column} = {column} + 1 WHERE model_id = ?",
+            (model_id,),
+        )
 
     def model_profile_map(self) -> dict[str, dict]:
         with self._conn() as conn:
@@ -261,6 +236,20 @@ class ReviewStore:
             }
             for r in rows
         }
+
+    def rejected_category_counts(self) -> dict[str, int]:
+        """Human-confirmed false positives per category.
+
+        This is the only signal that says "this category has cried wolf before",
+        and it is fed into ``rank_findings`` so a category the owner keeps rejecting
+        drops below fresher findings instead of leading the work order every time.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT category, COUNT(*) AS n FROM findings "
+                "WHERE status = 'rejected' AND category IS NOT NULL GROUP BY category"
+            ).fetchall()
+        return {r["category"]: r["n"] for r in rows if r["category"]}
 
     def set_status(self, finding_id: str, status: str, reason: str = "") -> bool:
         with self._conn() as conn:

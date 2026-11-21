@@ -11,9 +11,10 @@ from pathlib import Path
 import httpx
 import pytest
 
+from codeerratum import pipeline
 from codeerratum.context import build_context
 from codeerratum.evidence import collect_static
-from codeerratum.ingest.git import DiffError, get_diff, split_diff
+from codeerratum.ingest.git import DiffError, _risk_tags, get_diff, split_diff
 from codeerratum.models import (
     Anchor,
     Evidence,
@@ -23,7 +24,7 @@ from codeerratum.models import (
     ReviewUnit,
     Suggestion,
 )
-from codeerratum.models.finding import DefectCategory, Lens, snippet_hash
+from codeerratum.models.finding import DefectCategory, Lens, Verdict, snippet_hash
 from codeerratum.providers.base import schema_to_json_schema, to_strict_json_schema
 from codeerratum.providers.openai_compat import OpenAICompatProvider
 from codeerratum.report import render_markdown
@@ -131,6 +132,80 @@ def test_bad_diff_spec_raises_diff_error(tmp_path):
     subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
     with pytest.raises(DiffError):
         get_diff("HEAD~1", repo)
+
+
+def test_risk_tags_match_identifiers_not_substrings():
+    """Reverting: substring matching tagged `author_name` as auth and
+    `blocking_call` as a lock, so the unit budget went to unrelated code."""
+    assert _risk_tags("author_name = x") == []
+    assert _risk_tags("blocking_call()") == []
+    assert _risk_tags("clock.now()") == []
+    assert _risk_tags("threading.Lock()") == ["concurrency"]
+    assert _risk_tags("acquire_lock()") == ["concurrency"]
+    assert _risk_tags("verify_token(t)") == ["auth"]
+    assert _risk_tags("run_migration()") == ["migration"]
+
+
+def test_diff_from_unchecked_out_revision_is_skipped(tmp_path):
+    """Reverting: hunks describing commit B were sliced against the checked-out
+    commit A, so the model reviewed the wrong region and the anchor hash still
+    passed (it validated the same wrong source it had shown the model)."""
+    repo = _init_repo(tmp_path)
+    (repo / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+    sha1 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    (repo / "a.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "two"], cwd=repo, check=True)
+    sha2 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    diff = get_diff(f"{sha1}..{sha2}", repo)
+    subprocess.run(["git", "checkout", "-q", sha1], cwd=repo, check=True)
+    notices: list[str] = []
+    assert split_diff(diff, repo, notices=notices) == []
+    assert any("a.py" in n and "diff revision" in n for n in notices)
+
+    subprocess.run(["git", "checkout", "-q", sha2], cwd=repo, check=True)
+    units = split_diff(diff, repo)
+    assert [u.symbol for u in units] == ["f"]
+
+
+def test_diff_spec_cannot_be_parsed_as_a_git_option(tmp_path):
+    """Reverting: `--diff '--output=/path HEAD~1'` made git write the diff to a
+    caller-chosen file and return empty stdout — indistinguishable from "no changes",
+    with an arbitrary file written as a side effect."""
+    repo = _init_repo(tmp_path)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "two"], cwd=repo, check=True)
+
+    escaped = tmp_path / "pwned.txt"
+    with pytest.raises(DiffError, match="option"):
+        get_diff(f"--output={escaped} HEAD~1", repo)
+    assert not escaped.exists()
+
+
+def test_diff_spec_with_pathspec_still_works(tmp_path):
+    """Reverting: inserting --end-of-options must not break `revspec -- paths`,
+    which is the documented way to review one directory without staging."""
+    repo = _init_repo(tmp_path)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "b.py").write_text("y = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=repo, check=True)
+    (repo / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (repo / "b.py").write_text("y = 2\n", encoding="utf-8")
+
+    diff = get_diff("HEAD", repo, paths="a.py")
+    assert "a.py" in diff
+    assert "b.py" not in diff
 
 
 # --- finding conversion -----------------------------------------------------
@@ -347,6 +422,101 @@ def test_rerun_does_not_reset_human_verdict(tmp_path):
     assert store.stats()["acceptance_rate"] == 1.0
 
 
+def test_profile_counts_once_and_credits_only_asserting_models(tmp_path):
+    """Reverting: save_comparison had a second profile writer, so every assertion
+    was counted twice (n_assert doubled on every dual run) and the falsifier's
+    ``confirm`` was credited to the falsifier, handing a model that never reports
+    anything a perfect precision — the exact inversion 0.4.1 set out to fix."""
+    store = ReviewStore(tmp_path / "f.db")
+    finding = _finding(1)
+    finding.source_models = ["gpt-x"]
+    finding.verdicts = [
+        Verdict(model_id="gpt-x", role="assert", reason="r"),
+        Verdict(model_id="claude-y", role="confirm", reason="ok"),
+    ]
+    collection = FindingCollection(
+        run_id="run1",
+        repo=".",
+        commit="c",
+        model_id="gpt-x,claude-y",
+        spec_level="L1",
+        mode="dual",
+        reviewer_models=["gpt-x", "claude-y"],
+        falsifier_model="claude-y",
+        comparison={
+            "mode": "dual",
+            "raw_counts": {"gpt-x": 1},
+            "after_clustering": 1,
+            "after_falsification": 1,
+            "zones": {"unique": 1},
+        },
+        findings=[finding],
+    )
+    store.save_run(collection, "t1")
+    store.save_comparison(collection, "t1")
+    store.save_run(collection, "t1")  # a retried save must be idempotent
+
+    profiles = store.model_profile_map()
+    assert profiles["gpt-x"]["n_assert"] == 1
+    assert profiles["gpt-x"]["n_unique"] == 1
+    assert profiles["gpt-x"]["n_confirmed"] == 1
+    assert "claude-y" not in profiles, "a falsifier must not gain a reviewer profile"
+
+
+def test_rejected_history_reaches_the_ranker(tmp_path, monkeypatch):
+    """Reverting: rank_findings accepted a rejected-category map that the pipeline
+    never passed, so the false positives in feedback.db never influenced order."""
+    repo = _init_repo(tmp_path)
+    (repo / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+    (repo / "a.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+
+    seeded = _finding(1)
+    store = pipeline.store_for(repo)
+    store.save_run(
+        FindingCollection(
+            run_id="old",
+            repo=str(repo),
+            commit="c",
+            model_id="m",
+            spec_level="L1",
+            findings=[seeded],
+        ),
+        "t0",
+    )
+    store.set_status(seeded.id, "rejected", "误报")
+
+    monkeypatch.setenv("CODEERRATUM_BASE_URL", "http://x")
+    monkeypatch.setenv("CODEERRATUM_MODEL", "m")
+    monkeypatch.delenv("CODEERRATUM_MODELS", raising=False)
+    captured: dict = {}
+
+    async def fake_run(
+        registry,
+        mode,
+        units,
+        repo_root,
+        run_id,
+        author_model=None,
+        rejected_category_counts=None,
+        house_rules="",
+    ):
+        captured["counts"] = rejected_category_counts
+        return (
+            FindingCollection(
+                run_id=run_id, repo=str(repo_root), commit="", model_id="m", spec_level="L1"
+            ),
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(pipeline, "run_review", fake_run)
+    outcome = pipeline.execute_review(repo, diff_spec="HEAD")
+    assert captured["counts"] == {"boundary": 1}
+    assert outcome.units_selected == 1
+
+
 def test_report_counts_match_rendered_items():
     """Reverting: the report rendered 13 items while the summary said 10 and the
     execution table had 10 rows — the executing AI saw an inconsistent work order."""
@@ -367,6 +537,43 @@ def test_report_counts_match_rendered_items():
     assert md.count("| 待处理 |") == rendered
     assert "还有 3 条发现未在本工单展开" in md
     assert "| 合计（本工单） | 10 |" in md
+
+
+def test_report_neutralizes_newlines_and_backticks_from_models():
+    """Reverting: a claim containing a newline injected a second heading, and a
+    docstring containing a line of ``` closed the snippet fence early, so the
+    rest of the snippet (and the following sections) rendered as free-form text."""
+    snippet = 'DOC = """\nexample\n```\n"""\n'
+    finding = Finding(
+        id="f" * 16,
+        unit_id="u1",
+        lens=Lens.CORRECTNESS,
+        category=DefectCategory.BOUNDARY,
+        severity="P2",
+        claim="结论\n## 伪造章节",
+        detail="细节\n```\n注入",
+        anchors=[
+            Anchor(
+                file="a.py",
+                start_line=1,
+                end_line=4,
+                snippet=snippet,
+                snippet_hash=snippet_hash(snippet),
+            )
+        ],
+        suggestion=Suggestion(explanation="说明", acceptance="pytest -q"),
+    )
+    collection = FindingCollection(
+        run_id="r", repo=".", commit="c", model_id="m", spec_level="L1", findings=[finding]
+    )
+    md = render_markdown(collection, "ts")
+
+    assert "\n## 伪造章节" not in md
+    assert "结论 ## 伪造章节" in md
+    assert "````python" in md, "fence must be longer than the ``` inside the snippet"
+    assert "example\n```\n" in md, "snippet content must stay literal"
+    assert "\n```\n注入" not in md, "detail prose must not open a code fence"
+    assert md.count("\n## 摘要") == 1
 
 
 def test_rank_prefers_evidence_backed_findings():

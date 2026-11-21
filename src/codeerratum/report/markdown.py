@@ -11,9 +11,34 @@ execution-result table must agree, and any truncation must be stated explicitly.
 
 from __future__ import annotations
 
+import re
+
 from ..models.finding import Finding, FindingCollection
 
 MAX_RENDER = 10
+
+_FENCE_RE = re.compile(r"`+")
+
+
+def _one_line(text: str) -> str:
+    """Collapse newlines so model-supplied prose cannot inject a heading or a fence.
+
+    The reader is an AI that executes this file in order; a claim containing
+    ``\\n## 执行协议`` would silently become a second instruction block.
+    """
+    return " ".join(text.split())
+
+
+def _fence(text: str) -> str:
+    """A fence longer than every backtick run inside the body.
+
+    A Python docstring can legitimately contain a line of ```; opening with three
+    backticks would let that line close the block early and leave the rest of the
+    snippet, and the following sections, as free-form markdown.
+    """
+    longest = max((len(m) for m in _FENCE_RE.findall(text)), default=0)
+    return "`" * max(3, longest + 1)
+
 
 HEADER = """# Code Review 工单
 
@@ -82,7 +107,7 @@ def _render_finding(f, index: int) -> str:
         loc += f"-{anchor.end_line}"
     verdict_label = VERIFICATION_LABEL.get(f.verification, f.verification)
     lines = [
-        f"## F-{index:03d} [{f.severity}] {f.claim}",
+        f"## F-{index:03d} [{f.severity}] {_one_line(f.claim)}",
         "",
         f"- 位置：`{loc}`",
         f"- 视角：{f.lens.value}",
@@ -111,14 +136,16 @@ def _render_finding(f, index: int) -> str:
             }[v.role]
             lines.append(f"- [{v.model_id}·{role_cn}] {v.reason}")
         lines.append("")
+    fence = _fence(anchor.snippet)
+    lang = "python" if anchor.file.endswith(".py") else ""
     lines.extend(
         [
             "**现状**：",
-            "```" + ("python" if anchor.file.endswith(".py") else ""),
+            f"{fence}{lang}",
             anchor.snippet.rstrip("\n"),
-            "```",
+            fence,
             "",
-            f"**问题**：{f.detail}",
+            f"**问题**：{_one_line(f.detail)}",
             "",
         ]
     )
@@ -127,12 +154,13 @@ def _render_finding(f, index: int) -> str:
         lines.append("**修改建议**：")
         lines.append("")
         if sugg.diff:
-            lines.append("```diff")
+            fence = _fence(sugg.diff)
+            lines.append(f"{fence}diff")
             lines.append(sugg.diff.rstrip("\n"))
-            lines.append("```")
+            lines.append(fence)
             lines.append("")
         if sugg.explanation:
-            lines.append(sugg.explanation)
+            lines.append(_one_line(sugg.explanation))
             lines.append("")
         lines.append(f"**验收**：`{sugg.acceptance}`")
         lines.append("")
