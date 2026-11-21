@@ -215,6 +215,14 @@
     line-height: 1.6;
   }
   .cfg-note.bad { color: var(--bad); border-color: var(--bad); }
+  .recent-repo {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px; margin-top: 6px;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 7px;
+    font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; color: var(--text);
+    cursor: pointer; text-align: left; width: 100%;
+  }
+  .recent-repo:hover { border-color: var(--accent); }
+  .recent-repo .go { margin-left: auto; color: var(--accent); flex: none; }
   table.cfg { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 8px; }
   table.cfg th { font-size: 11.5px; font-weight: 500; color: var(--muted); text-align: left; }
   table.cfg th:nth-child(1) { width: 25%; }
@@ -254,6 +262,7 @@
   <div class="brand"><span class="mark">E</span> CodeErratum <span class="ver">UI</span></div>
   <div class="repo" id="repoLabel">…</div>
   <div class="spacer"></div>
+  <button class="ghost" id="repoBtn">切换仓库</button>
   <button class="ghost" id="configBtn">配置</button>
   <button class="ghost" id="docsBtn">文档</button>
   <button class="ghost" id="statsBtn">统计</button>
@@ -327,6 +336,11 @@
 <aside class="drawer" id="drawer" hidden>
   <h3>使用统计</h3>
   <div id="statsBody"></div>
+</aside>
+
+<aside class="drawer config" id="repoDrawer" hidden>
+  <h3>选择本地仓库</h3>
+  <div id="repoBody"></div>
 </aside>
 
 <aside class="drawer config" id="configDrawer" hidden>
@@ -770,10 +784,84 @@ async function saveConfig() {
   }
 }
 
+const RECENT_REPOS_KEY = "codeerratum.recentRepos";
+
+function recentRepos() {
+  try {
+    const v = JSON.parse(localStorage.getItem(RECENT_REPOS_KEY) || "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch { return []; }
+}
+
+function rememberRepo(path) {
+  const list = [path, ...recentRepos().filter((p) => p !== path)].slice(0, 6);
+  try { localStorage.setItem(RECENT_REPOS_KEY, JSON.stringify(list)); } catch { /* private mode */ }
+}
+
+function renderRepoDrawer() {
+  const cur = STATE.meta ? STATE.meta.repo : "";
+  const recent = recentRepos().filter((p) => p !== cur);
+  const parts = [
+    `<div class="cfg-note">当前仓库：<code>${esc(cur)}</code><br>
+      浏览器不允许网页读取文件夹选择器，因此请粘贴本地绝对路径（支持 <code>~</code>）。
+      填仓库内任意子目录会自动定位到 git 根目录。切换只影响当前服务进程，不会改动磁盘上的代码。</div>`,
+    `<div class="field" style="margin:14px 0 8px">
+      <label for="repoPath">本地仓库绝对路径</label>
+      <input id="repoPath" placeholder="/Users/me/my-project 或 ~/my-project" spellcheck="false">
+    </div>`,
+    `<div class="actions"><button class="primary" id="repoSwitch">切换</button></div>`,
+    `<div class="cfg-note bad" id="repoErr" style="margin-top:10px" hidden></div>`,
+  ];
+  if (recent.length) {
+    parts.push(`<h3 style="margin-top:18px">最近使用</h3>`);
+    parts.push(recent.map((p) =>
+      `<button class="recent-repo" data-path="${esc(p)}">${esc(p)}<span class="go">→</span></button>`
+    ).join(""));
+  }
+  $("repoBody").innerHTML = parts.join("");
+  $("repoSwitch").onclick = () => doSwitchRepo($("repoPath").value.trim());
+  $("repoPath").onkeydown = (e) => { if (e.key === "Enter") doSwitchRepo($("repoPath").value.trim()); };
+  $("repoBody").querySelectorAll(".recent-repo").forEach((b) => {
+    b.onclick = () => doSwitchRepo(b.dataset.path);
+  });
+}
+
+async function doSwitchRepo(path) {
+  if (!path) { toast("请填写本地文件夹路径", true); return; }
+  const btn = $("repoSwitch");
+  btn.disabled = true;
+  try {
+    const meta = await api("/api/repo", { method: "POST", body: JSON.stringify({ path }) });
+    rememberRepo(meta.repo);
+    STATE.meta = meta;
+    STATE.run = null; STATE.zone = null;
+    $("runView").hidden = true; $("empty").hidden = false;
+    renderMeta();
+    $("repoDrawer").hidden = true;
+    await loadRuns(true);
+    toast("已切换到 " + meta.repo);
+  } catch (e) {
+    const err = $("repoErr");
+    if (err) { err.textContent = e.message; err.hidden = false; }
+    toast("切换失败：" + e.message, true);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("repoBtn").onclick = () => {
+  const d = $("repoDrawer");
+  d.hidden = !d.hidden;
+  if (d.hidden) return;
+  $("configDrawer").hidden = true;
+  renderRepoDrawer();
+};
+
 $("configBtn").onclick = async () => {
   const d = $("configDrawer");
   d.hidden = !d.hidden;
   if (d.hidden) return;
+  $("repoDrawer").hidden = true;
   $("configBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px"><span class="spinner"></span> 读取配置…</div>`;
   try {
     renderConfig(await api("/api/config"));

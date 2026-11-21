@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import threading
+from pathlib import Path
 
 import httpx
 import pytest
@@ -384,3 +386,101 @@ def test_corrupt_config_file_is_not_silently_ignored(client, repo):
     resp = client.post("/api/review", json={"diff": "HEAD~1"})
     assert resp.status_code == 400
     assert "cannot read" in resp.json()["error"]
+
+
+def _git_repo(path, name: str) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    for args in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t.io"],
+        ["git", "config", "user.name", "t"],
+    ):
+        subprocess.run(args, cwd=path, check=True, capture_output=True)
+    (path / name).write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=path, check=True, capture_output=True)
+    return path
+
+
+def test_switch_repo_http_changes_target(client, tmp_path):
+    """The folder a user pastes becomes the review target for subsequent calls."""
+    other = _git_repo(tmp_path / "other", "m.py")
+    (other / "src").mkdir()
+    # A subdirectory snaps up to the git root, as `ui --repo` does.
+    resp = client.post("/api/repo", json={"path": str(other / "src")})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["repo"] == str(other.resolve())
+    assert client.get("/api/meta").json()["repo"] == str(other.resolve())
+    assert client.get("/api/runs").json()["runs"] == []
+
+
+def test_switch_repo_reads_the_target_config(client, tmp_path):
+    other = _git_repo(tmp_path / "other", "m.py")
+    (other / ".codeerratum").mkdir()
+    (other / ".codeerratum" / "config.json").write_text(
+        json.dumps(
+            {
+                "mode": "quick",
+                "models": [
+                    {
+                        "model_id": "other-repo-model",
+                        "base_url": "http://stub.invalid/v1",
+                        "family": "openai",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    info = client.post("/api/repo", json={"path": str(other)}).json()
+    assert info["configured"]
+    assert [m["model_id"] for m in info["models"]] == ["other-repo-model"]
+
+
+@pytest.mark.parametrize(
+    ("path", "fragment"),
+    [
+        ("", "请填写"),
+        ("relative/dir", "绝对路径"),
+        ("/nonexistent/path/for/tests", "路径不存在"),
+    ],
+)
+def test_switch_repo_rejects_bad_paths(client, path, fragment):
+    resp = client.post("/api/repo", json={"path": path})
+    assert resp.status_code == 400
+    assert fragment in resp.json()["error"]
+
+
+def test_switch_repo_requires_git(client):
+    """A plain folder with no .git anywhere above it is refused."""
+    with tempfile.TemporaryDirectory() as plain:
+        resp = client.post("/api/repo", json={"path": plain})
+    assert resp.status_code == 400
+    assert "不是 git 仓库" in resp.json()["error"]
+
+
+def test_switch_repo_post_requires_same_origin(client, tmp_path):
+    other = _git_repo(tmp_path / "other", "m.py")
+    resp = client.post(
+        "/api/repo",
+        json={"path": str(other)},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+    assert client.get("/api/meta").json()["repo"] != str(other.resolve())
+
+
+def test_switch_repo_refused_during_review(client, repo, tmp_path):
+    """Switching mid-review would write artifacts into the wrong repository."""
+    other = _git_repo(tmp_path / "other", "m.py")
+    # The HTTP client cannot expose the server's WebApp; exercise the same
+    # method directly with its lock held, which is the state a running review
+    # creates. `client` is still requested so the same app fixture stays warm.
+    app = WebApp(repo)
+    assert app._review_lock.acquire(blocking=False)
+    try:
+        with pytest.raises(RuntimeError, match="审查进行中"):
+            app.switch_repo(str(other))
+    finally:
+        app._review_lock.release()
+    assert app.repo_root == repo.resolve()

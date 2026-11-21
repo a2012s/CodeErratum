@@ -153,6 +153,8 @@ Standard library only — no FastAPI, no bundler, no `node_modules`. The install
 
 Pick the diff range, path filter, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only, rejects non-loopback Hosts (DNS rebinding), and requires a same-origin `Origin` on every POST, so a random web page cannot trigger a paid review through your browser.
 
+The header's **Switch repo** button points the running UI at any local git repository — paste an absolute path (`~` works), or pick one of the six recent repos kept in browser storage. A subdirectory snaps up to the git root; each repo reads its own `.codeerratum/config.json`, so saved model settings follow the target. Switching is refused while a review runs (artifacts are keyed to the repo path), and browsers cannot read a native folder picker — hence paste, not a directory dialog.
+
 The header's **Config** button shows the active mode and model endpoints and lets you edit them. Saving writes `.codeerratum/config.json` (mode 0600), which takes precedence over environment variables and survives a restart — the CLI reads the same file. API keys are never echoed to the browser; leave the key field blank to keep the stored value.
 
 ### Posting to a pull request

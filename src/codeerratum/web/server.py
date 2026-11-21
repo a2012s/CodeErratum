@@ -32,6 +32,7 @@ from ..pipeline import (
     NoChanges,
     PipelineError,
     execute_review,
+    find_repo_root,
     resolve_house_rules,
     store_for,
 )
@@ -81,6 +82,38 @@ class WebApp:
     def config_info(self) -> dict:
         """Full (masked) configuration for the settings drawer."""
         return public_config(self.repo_root)
+
+    def switch_repo(self, raw_path: str) -> dict:
+        """Point the UI at another local git repository.
+
+        The browser cannot read a folder picker's absolute path (and must not be
+        able to enumerate the filesystem), so the user pastes a path instead.
+        A git worktree may be nested — accept any directory inside one and snap
+        to its root, the same rule `codeerratum ui --repo` uses. Refuse to switch
+        while a review holds the lock: artifacts are keyed to `self.repo_root`,
+        so changing it mid-run would write findings into the wrong repository.
+        """
+        value = str(raw_path or "").strip()
+        if not value:
+            raise PipelineError("请填写本地文件夹路径")
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise PipelineError("请填写绝对路径（支持 ~ 开头的家目录）")
+        candidate = candidate.resolve()
+        if not candidate.exists():
+            raise PipelineError(f"路径不存在：{candidate}")
+        if not candidate.is_dir():
+            raise PipelineError(f"不是文件夹：{candidate}")
+        root = find_repo_root(candidate)
+        if not (root / ".git").exists():
+            raise PipelineError(f"不是 git 仓库：{root}")
+        if not self._review_lock.acquire(blocking=False):
+            raise RuntimeError("审查进行中，不能切换仓库")
+        try:
+            self.repo_root = root
+        finally:
+            self._review_lock.release()
+        return self.meta()
 
     def save_config(self, payload: dict) -> dict:
         return save_config_file(self.repo_root, payload)
@@ -391,6 +424,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, app.start_review(body))
                 elif path == "/api/config":
                     self._json(HTTPStatus.OK, app.save_config(body))
+                elif path == "/api/repo":
+                    self._json(HTTPStatus.OK, app.switch_repo(str(body.get("path") or "")))
                 elif m := re.fullmatch(r"/api/findings/([0-9a-f]+)/status", path):
                     self._json(
                         HTTPStatus.OK,
