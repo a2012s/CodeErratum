@@ -20,7 +20,7 @@ Success criterion: sample 10 findings at random; at least 7 must be executed cor
 
 ## Status
 
-- **Phases 1–6 implemented and tested** (168 tests + real-HTTP end-to-end + CI)
+- **Phases 1–6 implemented and tested** (170 tests + real-HTTP end-to-end + CI)
 - Commands: `review` (write the work order) / `pr` (post to a pull request) / `docs` (module map + signature drift) / `mcp` (stdio server for coding agents) / `ui` (local web UI) / `accept` / `reject` / `stats` / `compare`
 - Written in Python ≥3.11; symbol-level review for Python, file-level for everything else; any OpenAI-compatible provider (cloud or local); `correctness` lens
 - Three review modes: `quick` (single model) / `dual` (two models + falsification) / `committee` (three models)
@@ -66,12 +66,12 @@ codeerratum review --diff HEAD~1 -o review.md
 
 `--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. Add `--path src/api` to review only that folder's changes (no `git add` needed). At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `review.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
 
-> Reviewing a revision that is **not checked out** (e.g. `main...feature`): a file whose working-tree contents disagree with the diff revision is skipped and listed in the run's coverage notes. Check out the target revision first so the findings describe the diff's actual code.
+> Reviewing a revision that is **not checked out** (e.g. `main...feature`): sources, excerpts and anchor checks all read the diff revision's git blob, so no checkout is needed. Only files whose blob is unavailable (e.g. uncommitted working-tree edits) fall back to the working tree; a mismatch there skips the file and is listed in the run's coverage notes.
 
 ## Zero-cost self-check
 
 ```bash
-uv run pytest -q                     # expect 168 passed
+uv run pytest -q                     # expect 170 passed
 ```
 
 To exercise the whole pipeline without spending tokens, use the bundled fake model endpoint (always returns one fixed finding):

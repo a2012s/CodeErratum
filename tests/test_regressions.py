@@ -14,7 +14,7 @@ import pytest
 from codeerratum import pipeline
 from codeerratum.context import build_context
 from codeerratum.evidence import collect_static
-from codeerratum.ingest.git import DiffError, _risk_tags, get_diff, split_diff
+from codeerratum.ingest.git import DiffError, _risk_tags, get_diff, new_side_sources, split_diff
 from codeerratum.models import (
     Anchor,
     Evidence,
@@ -25,10 +25,15 @@ from codeerratum.models import (
     Suggestion,
 )
 from codeerratum.models.finding import DefectCategory, Lens, Verdict, snippet_hash
-from codeerratum.providers.base import schema_to_json_schema, to_strict_json_schema
+from codeerratum.providers.base import (
+    Completion,
+    Usage,
+    schema_to_json_schema,
+    to_strict_json_schema,
+)
 from codeerratum.providers.openai_compat import OpenAICompatProvider
 from codeerratum.report import render_markdown
-from codeerratum.review.executor import build_messages, convert_findings
+from codeerratum.review.executor import build_messages, convert_findings, review_unit
 from codeerratum.review.schema import LLMReview
 from codeerratum.store import ReviewStore
 
@@ -38,6 +43,45 @@ def _init_repo(path: Path) -> Path:
     subprocess.run(["git", "config", "user.email", "t@t.io"], cwd=path, check=True)
     subprocess.run(["git", "config", "user.name", "t"], cwd=path, check=True)
     return path
+
+
+class _CiteProvider:
+    """Always cites line 2 of a.py with the given snippet; used to test the anchor gate."""
+
+    family = "stub"
+
+    def __init__(self, snippet: str):
+        self.snippet = snippet
+
+    async def complete(self, model_id, messages, schema, temperature=0.0, max_tokens=2048):
+        review = LLMReview.model_validate(
+            {
+                "summary": "stub",
+                "findings": [
+                    {
+                        "lens": "correctness",
+                        "category": "boundary",
+                        "severity": "P2",
+                        "claim": "空列表取首元素",
+                        "detail": "items 为空时抛 IndexError",
+                        "anchor": {
+                            "file": "a.py",
+                            "start_line": 2,
+                            "end_line": 2,
+                            "snippet": self.snippet,
+                        },
+                        "suggestion": {"explanation": "判空", "acceptance": "pytest -q"},
+                    }
+                ],
+            }
+        )
+        return Completion(
+            text="{}",
+            parsed=review,
+            usage=Usage(input_tokens=1, output_tokens=1),
+            raw_request_hash="stub",
+            latency_ms=1,
+        )
 
 
 def _unit(**overrides) -> ReviewUnit:
@@ -147,9 +191,9 @@ def test_risk_tags_match_identifiers_not_substrings():
 
 
 def test_diff_from_unchecked_out_revision_is_skipped(tmp_path):
-    """Reverting: hunks describing commit B were sliced against the checked-out
-    commit A, so the model reviewed the wrong region and the anchor hash still
-    passed (it validated the same wrong source it had shown the model)."""
+    """Reverting: without the new side's blob, hunks describing commit B were sliced
+    against the checked-out commit A, so the model reviewed the wrong region while
+    the anchor hash confirmed it."""
     repo = _init_repo(tmp_path)
     (repo / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
@@ -165,14 +209,59 @@ def test_diff_from_unchecked_out_revision_is_skipped(tmp_path):
     ).stdout.strip()
 
     diff = get_diff(f"{sha1}..{sha2}", repo)
+    sources = new_side_sources(f"{sha1}..{sha2}", repo)
+    assert sources["a.py"] == "def f():\n    return 2\n"
+
     subprocess.run(["git", "checkout", "-q", sha1], cwd=repo, check=True)
+
+    # With the new side's blob, B is reviewable while A is checked out.
     notices: list[str] = []
+    units = split_diff(diff, repo, notices=notices, sources=sources)
+    assert [u.symbol for u in units] == ["f"]
+    assert notices == []
+
+    # Without it, the working tree is used and the mismatch is refused rather than
+    # reviewed at the wrong offsets.
+    notices = []
     assert split_diff(diff, repo, notices=notices) == []
     assert any("a.py" in n and "diff revision" in n for n in notices)
 
-    subprocess.run(["git", "checkout", "-q", sha2], cwd=repo, check=True)
-    units = split_diff(diff, repo)
-    assert [u.symbol for u in units] == ["f"]
+
+@pytest.mark.asyncio
+async def test_anchor_is_verified_against_the_diff_revision(tmp_path):
+    """Reverting: anchors were checked against the working tree, so a model citing
+    the checked-out revision passed while the finding described the diff revision."""
+    repo = _init_repo(tmp_path)
+    (repo / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+    sha1 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    (repo / "a.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "two"], cwd=repo, check=True)
+    sha2 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    diff = get_diff(f"{sha1}..{sha2}", repo)
+    sources = new_side_sources(f"{sha1}..{sha2}", repo)
+    subprocess.run(["git", "checkout", "-q", sha1], cwd=repo, check=True)
+    unit = split_diff(diff, repo, sources=sources)[0]
+
+    findings, rejected, _completion, _diags = await review_unit(
+        _CiteProvider("    return 2\n"), "stub", unit, repo, "run", sources=sources
+    )
+    assert [f.anchors[0].snippet for f in findings] == ["    return 2\n"]
+    assert rejected == []
+
+    # The same citation, but with the checked-out revision's text, must fail.
+    findings, rejected, _completion, _diags = await review_unit(
+        _CiteProvider("    return 1\n"), "stub", unit, repo, "run", sources=sources
+    )
+    assert findings == []
+    assert [r["reason"] for r in rejected] == ["anchor_mismatch"]
 
 
 def test_diff_spec_cannot_be_parsed_as_a_git_option(tmp_path):
@@ -463,6 +552,55 @@ def test_profile_counts_once_and_credits_only_asserting_models(tmp_path):
     assert "claude-y" not in profiles, "a falsifier must not gain a reviewer profile"
 
 
+def test_pipeline_reads_the_diff_revisions_blobs(tmp_path, monkeypatch):
+    """Reverting: execute_review passed no sources to split_diff / run_review, so a
+    committed range was reviewed against whatever happened to be checked out."""
+    repo = _init_repo(tmp_path)
+    (repo / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+    sha1 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+    (repo / "a.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "-qam", "two"], cwd=repo, check=True)
+    sha2 = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+    subprocess.run(["git", "checkout", "-q", sha1], cwd=repo, check=True)
+
+    monkeypatch.setenv("CODEERRATUM_BASE_URL", "http://x")
+    monkeypatch.setenv("CODEERRATUM_MODEL", "m")
+    monkeypatch.delenv("CODEERRATUM_MODELS", raising=False)
+    captured: dict = {}
+
+    async def fake_run(
+        registry,
+        mode,
+        units,
+        repo_root,
+        run_id,
+        author_model=None,
+        rejected_category_counts=None,
+        house_rules="",
+        sources=None,
+    ):
+        captured["sources"] = sources
+        return (
+            FindingCollection(
+                run_id=run_id, repo=str(repo_root), commit="", model_id="m", spec_level="L1"
+            ),
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(pipeline, "run_review", fake_run)
+    outcome = pipeline.execute_review(repo, diff_spec=f"{sha1}..{sha2}")
+    assert captured["sources"]["a.py"] == "def f():\n    return 2\n"
+    assert outcome.units_selected == 1
+
+
 def test_rejected_history_reaches_the_ranker(tmp_path, monkeypatch):
     """Reverting: rank_findings accepted a rejected-category map that the pipeline
     never passed, so the false positives in feedback.db never influenced order."""
@@ -501,6 +639,7 @@ def test_rejected_history_reaches_the_ranker(tmp_path, monkeypatch):
         author_model=None,
         rejected_category_counts=None,
         house_rules="",
+        sources=None,
     ):
         captured["counts"] = rejected_category_counts
         return (

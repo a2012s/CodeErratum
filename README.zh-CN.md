@@ -20,7 +20,7 @@
 
 ## 当前状态
 
-- **第一至六期已实现并通过测试**（168 tests + 真实 HTTP 端到端验证 + CI）
+- **第一至六期已实现并通过测试**（170 tests + 真实 HTTP 端到端验证 + CI）
 - 可用命令：`review`（出工单）/ `pr`（贴到 PR）/ `docs`（模块文档与签名漂移）/ `mcp`（给 agent 用的 stdio 服务）/ `ui`（本地图形界面）/ `accept` / `reject` / `stats` / `compare`
 - 实现语言 Python ≥3.11；Python 走符号级审查，其他语言走文件级；OpenAI 兼容 provider（云端或本地）；correctness 视角
 - 三种审查模式：`quick`（单模型）/ `dual`（双模型+证伪）/ `committee`（三模型）
@@ -66,12 +66,12 @@ codeerratum review --diff HEAD~1 -o review.md
 
 `--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。加 `--path src/api` 可只审该目录的改动，不必先 `git add`。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `review.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
 
-> 审 `main...feature` 这类**未 checkout 的版本**时，若工作区文件内容与 diff 版本对不上，该文件会被跳过，并在报告「本次覆盖说明」里写明。先 `git checkout` 到目标版本再跑，得到的结果才对应 diff 的版本。
+> 审 `main...feature` 这类**未 checkout 的版本**时，源码、摘录与锚点校验都直接取 diff 版本的 git blob，不需要先切分支。只有当某个文件的 blob 取不到（例如未提交的工作区改动）时才回退到工作区，内容对不上会跳过该文件并在「本次覆盖说明」写明。
 
 ## 不花钱的自检
 
 ```bash
-uv run pytest -q                     # 期望 168 passed
+uv run pytest -q                     # 期望 170 passed
 ```
 
 想验证全链路又不想消耗 token，用仓库自带的假模型端点（固定返回一条 finding）：

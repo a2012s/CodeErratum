@@ -291,6 +291,13 @@ def _diags_in_ranges(diags, file: str, ranges: list[tuple[int, int]]):
     return hits
 
 
+def _same_text(text: str, path: Path) -> bool:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace") == text
+    except OSError:
+        return False
+
+
 async def review_unit(
     provider: Provider,
     model_id: str,
@@ -298,21 +305,36 @@ async def review_unit(
     repo_root: Path,
     run_id: str,
     house_rules: str = "",
+    sources: dict[str, str] | None = None,
 ) -> tuple[list[Finding], list[dict], Completion, list[dict]]:
     from ..context import build_context
     from ..evidence import collect_static, known_facts_block
 
     source_path = repo_root / unit.primary_file
-    source_lines = source_path.read_text(encoding="utf-8", errors="replace").splitlines(
-        keepends=True
+    blob = (sources or {}).get(unit.primary_file)
+    # The excerpt must come from the revision the diff describes. Reading the
+    # working tree while reviewing another revision shifts every line number and
+    # the anchor check still passes, because it validates the shifted text it
+    # just showed the model.
+    source_text = (
+        blob if blob is not None else source_path.read_text(encoding="utf-8", errors="replace")
     )
+    source_lines = source_text.splitlines(keepends=True)
+
+    # ruff/mypy only ever see the checked-out tree; on a mismatching revision their
+    # line numbers point at unrelated code, so they are dropped rather than fed in
+    # as "known facts".
+    static_ok = blob is None or _same_text(blob, source_path)
 
     # Jedi and the static tools are blocking subprocess/CPU work; running them in
     # worker threads keeps parallel model calls actually parallel.
-    ctx, diags = await asyncio.gather(
-        asyncio.to_thread(build_context, unit, repo_root),
-        asyncio.to_thread(collect_static, unit.primary_file, repo_root),
-    )
+    if static_ok:
+        ctx, diags = await asyncio.gather(
+            asyncio.to_thread(build_context, unit, repo_root, sources),
+            asyncio.to_thread(collect_static, unit.primary_file, repo_root),
+        )
+    else:
+        ctx, diags = await asyncio.to_thread(build_context, unit, repo_root, sources), []
     ranges = excerpt_ranges(unit, len(source_lines), ctx.get("enclosing_range"))
     relevant = _diags_in_ranges(diags, unit.primary_file, ranges)
 

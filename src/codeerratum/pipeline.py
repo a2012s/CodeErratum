@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import Config
-from .ingest import DiffError, get_commit, get_diff, split_diff
+from .ingest import DiffError, get_commit, get_diff, new_side_sources, split_diff
 from .models import FindingCollection, ModelRegistry, ReviewUnit
 from .report import render_markdown
 from .review import MAX_HOUSE_RULES_CHARS, run_review, sanitize_house_rules, truncate_house_rules
@@ -258,8 +258,9 @@ def execute_review(
         )
     run_mode = resolve_mode(mode, config)
 
+    run_spec = diff_spec.strip() or "HEAD"
     try:
-        diff_text = get_diff(diff_spec, repo_root, paths=paths)
+        diff_text = get_diff(run_spec, repo_root, paths=paths)
     except DiffError as exc:
         raise DiffFailed(str(exc)) from exc
     if not diff_text.strip():
@@ -280,7 +281,16 @@ def execute_review(
         say(notices[-1])
     if rules:
         say(f"Project rules: {rules.source} ({rules.chars} chars, sha {rules.sha})")
-    units = split_diff(diff_text, repo_root, notices=notices)
+    # Read the new side from the diff revision, not the working tree: reviewing
+    # main...feature while on main used to slice feature's line numbers into
+    # main's text, and the anchor hash happily confirmed the wrong region.
+    try:
+        sources = new_side_sources(run_spec, repo_root, paths=paths)
+    except DiffError as exc:
+        sources = {}
+        notices.append(f"无法读取 diff 版本的文件内容（{exc}），锚点改为基于工作区校验")
+        say(notices[-1])
+    units = split_diff(diff_text, repo_root, notices=notices, sources=sources)
     (run_dir / "units.json").write_text(
         json.dumps([u.model_dump() for u in units], ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -321,6 +331,7 @@ def execute_review(
                 author_model=author_model or None,
                 rejected_category_counts=rejected_counts or None,
                 house_rules=rules.text,
+                sources=sources,
             )
         )
     except ValueError as exc:

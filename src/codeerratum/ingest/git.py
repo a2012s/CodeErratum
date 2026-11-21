@@ -81,6 +81,58 @@ def get_commit(repo_root: Path) -> str:
     return result.stdout.strip() if result.returncode == 0 else "unknown"
 
 
+def new_side_sources(spec: str, repo_root: Path, paths: str = "") -> dict[str, str]:
+    """File contents of the diff's new side, read from the object database.
+
+    ``git diff A..B`` describes B's tree. Reviewing it while A is checked out used
+    to slice B's line numbers against A's text: the model saw the wrong region and
+    the anchor hash still passed, because it validated the same wrong text it had
+    shown the model. Reading B's blob removes that failure mode.
+
+    Files whose new side is the working tree (all-zero object id) are omitted, so
+    the caller falls back to the file on disk — that is the correct new side for
+    ``git diff HEAD``. Deleted files are omitted as well: there is nothing to read
+    and nothing to anchor.
+    """
+    spec = spec.strip() or "HEAD"
+    if spec.startswith("-"):
+        raise DiffError("diff spec must not start with '-': git would parse it as an option")
+    pathspec = normalize_pathspec(paths)
+    cmd = ["git", "diff", "--raw", "-z", "--no-color", "--end-of-options", spec]
+    if pathspec:
+        cmd += ["--", *pathspec.split()]
+    result = subprocess.run(cmd, cwd=repo_root, capture_output=True)
+    if result.returncode != 0:
+        raise DiffError(result.stderr.decode(errors="replace").strip() or "git diff failed")
+
+    sources: dict[str, str] = {}
+    tokens = result.stdout.split(b"\0")
+    index = 0
+    while index < len(tokens):
+        header = tokens[index]
+        index += 1
+        if not header.startswith(b":"):
+            continue
+        fields = header.split()
+        if len(fields) < 5:
+            continue
+        new_sha = fields[3].decode()
+        status = fields[4].decode()
+        path = tokens[index].decode(errors="replace") if index < len(tokens) else ""
+        index += 1
+        if status[:1] in ("R", "C") and index < len(tokens):
+            path = tokens[index].decode(errors="replace")  # destination of the rename/copy
+            index += 1
+        if status[:1] == "D" or not new_sha.strip("0"):
+            continue
+        blob = subprocess.run(
+            ["git", "cat-file", "blob", new_sha], cwd=repo_root, capture_output=True
+        )
+        if blob.returncode == 0:
+            sources[path] = blob.stdout.decode("utf-8", errors="replace")
+    return sources
+
+
 def _iter_files(diff_text: str):
     """Yield (path, hunks, is_deleted) per file from a unified diff.
 
@@ -320,15 +372,14 @@ def detect_language(file: str) -> str:
     return LANGUAGE_BY_SUFFIX.get(Path(file).suffix.lower(), "text")
 
 
-def _matches_working_tree(hunk: Hunk, source_lines: list[str]) -> bool:
-    """Do this hunk's new-side lines exist at their claimed positions in the file?
+def _hunk_matches_source(hunk: Hunk, source_lines: list[str]) -> bool:
+    """Do this hunk's new-side lines exist at their claimed positions in the source?
 
-    A diff can describe a revision that is not checked out (``main...feature``
-    reviewed while on ``main``). The excerpt and the anchor check are both built
-    from the working tree, so hunk line numbers pointing at different code make the
-    model review the wrong region and still pass the hash check — a confident
-    finding about code that is not in the diff. Skipping the file, with a notice,
-    is the honest degradation until sources can be read from the diff revision.
+    When the source is the diff revision's blob this is a parser self-check. When
+    it is the working tree while the diff describes another revision, a mismatch
+    means the model would be shown code at the wrong offsets — and the anchor hash
+    would still pass, because it validates whatever text the model was given.
+    Skipping the file, with a notice, is the honest degradation.
     """
     lineno = hunk.new_start
     for line in hunk.content.splitlines():
@@ -354,34 +405,40 @@ def split_diff(
     repo_root: Path,
     language: str | None = None,
     notices: list[str] | None = None,
+    sources: dict[str, str] | None = None,
 ) -> list[ReviewUnit]:
     """Split a unified diff into per-symbol ReviewUnits.
 
-    Files that no longer exist in the working tree (deleted files, or reviewing
-    a branch you are not on) are skipped: an anchor cannot be verified against
-    source that is not there, and sending them downstream only yields a crash
-    or a fabricated location. Every skip is appended to ``notices`` so the
-    degradation stays visible.
+    ``sources`` supplies the new side's file contents read from the diff revision
+    (see ``new_side_sources``). Without it the working tree is read; files whose
+    contents disagree with their hunks are then skipped, because slicing line
+    numbers from one revision against another's text reviews the wrong region
+    while every anchor still checks out. Every skip is appended to ``notices`` so
+    the degradation stays visible.
 
     ``language`` forces a single language for every file; by default it is inferred
     per file from the extension.
     """
     units: list[ReviewUnit] = []
+    blob_sources = sources or {}
     for file, hunks, is_deleted in _iter_files(diff_text):
         if file == "/dev/null" or file.endswith((".lock", ".sum")):
             continue
+        blob = blob_sources.get(file)
         source_path = repo_root / file
-        if is_deleted or not source_path.exists():
+        if is_deleted or (blob is None and not source_path.exists()):
             if notices is not None:
                 reason = "deleted" if is_deleted else "not present in working tree"
                 notices.append(f"skipped {file} ({reason})")
             continue
         lang = language or detect_language(file)
-        source = source_path.read_text(encoding="utf-8", errors="replace")
-        if hunks and not all(_matches_working_tree(h, source.splitlines()) for h in hunks):
+        source = (
+            blob if blob is not None else source_path.read_text(encoding="utf-8", errors="replace")
+        )
+        if hunks and not all(_hunk_matches_source(h, source.splitlines()) for h in hunks):
             if notices is not None:
                 notices.append(
-                    f"skipped {file} (working tree does not match the diff revision; "
+                    f"skipped {file} (file contents do not match the diff revision; "
                     "check out the target revision and re-run)"
                 )
             continue

@@ -29,8 +29,10 @@ def _make_provider(spec: ModelSpec) -> OpenAICompatProvider:
     return provider
 
 
-def _context_for(unit: ReviewUnit, repo_root: Path) -> tuple[str, str]:
-    ctx = build_context(unit, repo_root)
+def _context_for(
+    unit: ReviewUnit, repo_root: Path, sources: dict[str, str] | None = None
+) -> tuple[str, str]:
+    ctx = build_context(unit, repo_root, sources)
     diags = collect_static(unit.primary_file, repo_root)
     context = "\n".join([ctx.get("enclosing", ""), *ctx.get("callers", [])])
     return context, known_facts_block(diags)
@@ -43,6 +45,7 @@ async def _review_with(
     repo_root: Path,
     run_id: str,
     house_rules: str = "",
+    sources: dict[str, str] | None = None,
 ) -> tuple[dict[str, list[Finding]], list[dict], list[dict], list[dict]]:
     """Run one model over all units. Returns its findings + rejected + call stats + diags."""
     per_unit: dict[str, list[Finding]] = {}
@@ -52,7 +55,7 @@ async def _review_with(
     for unit in units:
         try:
             findings, rej, completion, diags = await review_unit(
-                provider, spec.model_id, unit, repo_root, run_id, house_rules
+                provider, spec.model_id, unit, repo_root, run_id, house_rules, sources
             )
         except Exception as exc:  # noqa: BLE001 - one model/unit failing must not kill the run
             rejected.append(
@@ -102,6 +105,7 @@ async def run_review(
     author_model: str | None = None,
     rejected_category_counts: dict[str, int] | None = None,
     house_rules: str = "",
+    sources: dict[str, str] | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
@@ -118,7 +122,7 @@ async def run_review(
 
     providers = {m.model_id: _make_provider(m) for m in reviewers}
     tasks = [
-        _review_with(providers[m.model_id], m, units, repo_root, run_id, house_rules)
+        _review_with(providers[m.model_id], m, units, repo_root, run_id, house_rules, sources)
         for m in reviewers
     ]
     results = await asyncio.gather(*tasks)
@@ -167,19 +171,19 @@ async def run_review(
     units_by_id = {u.unit_id: u for u in units}
     targets = [f for f in merged if should_falsify(f)]
     for f in targets:
-        sources = set(f.source_models)
+        source_models = set(f.source_models)
         source_unit = units_by_id.get(f.unit_id)
-        context, facts = _context_for(source_unit, repo_root) if source_unit else ("", "")
+        context, facts = _context_for(source_unit, repo_root, sources) if source_unit else ("", "")
         # Pick a falsifier from a family not among the sources; prefer the dedicated
         # third vendor, otherwise the reviewer with a different family than source.
         chosen_provider: Provider | None = None
         chosen_model = ""
-        if falsifier_spec is not None and falsifier_spec.model_id not in sources:
+        if falsifier_spec is not None and falsifier_spec.model_id not in source_models:
             chosen_provider = falsifier_provider
             chosen_model = falsifier_spec.model_id
         else:
             for m in reviewers:
-                if m.model_id not in sources:
+                if m.model_id not in source_models:
                     chosen_provider = providers[m.model_id]
                     chosen_model = m.model_id
                     break

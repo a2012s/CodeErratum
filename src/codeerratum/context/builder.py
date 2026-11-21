@@ -7,13 +7,16 @@ cannot know the caller's invariant or the surrounding function's full body.
 from __future__ import annotations
 
 import ast
+import hashlib
 from pathlib import Path
 
 from ..models import ReviewUnit
 
-# jedi parses the whole project on first use; cache per (file, mtime, symbol) so a
-# dual-model run does not pay that cost once per model.
-_CALLER_CACHE: dict[tuple[str, int, str], list[str]] = {}
+# jedi parses the whole project on first use; cache per (file, content stamp, symbol)
+# so a dual-model run does not pay that cost once per model. The stamp is the mtime
+# for the working tree and a content hash for a blob, so two revisions of the same
+# file cannot collide in the cache.
+_CALLER_CACHE: dict[tuple[str, str, str], list[str]] = {}
 _CACHE_LIMIT = 512
 
 
@@ -70,23 +73,33 @@ def enclosing_source(unit: ReviewUnit, source: str) -> str:
     return "\n".join(lines[span[0] - 1 : span[1]])
 
 
-def callers_of(unit: ReviewUnit, repo_root: Path) -> list[str]:
+def callers_of(
+    unit: ReviewUnit, repo_root: Path, sources: dict[str, str] | None = None
+) -> list[str]:
     """Find direct callers using jedi (in-process, no LSP subprocess).
 
     The reference search must start at the symbol's own name token. Querying the
     hunk's first line at column 0 resolves to nothing and silently returns no
     callers at all.
+
+    ``sources`` supplies the file text of the diff revision; without it the working
+    tree is used. The cache key carries a content hash in that case, so a review of
+    another revision cannot be answered from the working tree's cache entry.
     """
     if not unit.symbol or unit.symbol.startswith("<"):
         return []
     source_path = repo_root / unit.primary_file
-    if not source_path.exists():
+    blob = (sources or {}).get(unit.primary_file)
+    if blob is None and not source_path.exists():
         return []
-    try:
-        mtime = source_path.stat().st_mtime_ns
-    except OSError:
-        return []
-    key = (str(source_path), mtime, unit.symbol)
+    if blob is not None:
+        stamp = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    else:
+        try:
+            stamp = str(source_path.stat().st_mtime_ns)
+        except OSError:
+            return []
+    key = (str(source_path), stamp, unit.symbol)
     cached = _CALLER_CACHE.get(key)
     if cached is not None:
         return list(cached)
@@ -94,7 +107,9 @@ def callers_of(unit: ReviewUnit, repo_root: Path) -> list[str]:
     try:
         import jedi
 
-        source = source_path.read_text(encoding="utf-8", errors="replace")
+        source = (
+            blob if blob is not None else source_path.read_text(encoding="utf-8", errors="replace")
+        )
         position = _find_definition(source, unit.symbol)
         if position is None:
             _remember(key, [])
@@ -123,23 +138,29 @@ def callers_of(unit: ReviewUnit, repo_root: Path) -> list[str]:
         return []
 
 
-def _remember(key: tuple[str, int, str], value: list[str]) -> None:
+def _remember(key: tuple[str, str, str], value: list[str]) -> None:
     if len(_CALLER_CACHE) > _CACHE_LIMIT:
         _CALLER_CACHE.clear()
     _CALLER_CACHE[key] = list(value)
 
 
-def build_context(unit: ReviewUnit, repo_root: Path) -> dict:
+def build_context(unit: ReviewUnit, repo_root: Path, sources: dict[str, str] | None = None) -> dict:
     """Assemble the enrichment block used by the review prompt."""
     source_path = repo_root / unit.primary_file
-    source = (
-        source_path.read_text(encoding="utf-8", errors="replace") if source_path.exists() else ""
-    )
+    blob = (sources or {}).get(unit.primary_file)
+    if blob is not None:
+        source = blob
+    else:
+        source = (
+            source_path.read_text(encoding="utf-8", errors="replace")
+            if source_path.exists()
+            else ""
+        )
     span = enclosing_range(unit, source) if source else None
     return {
         "enclosing": enclosing_source(unit, source) if source else "",
         "enclosing_range": span,
-        "callers": callers_of(unit, repo_root),
+        "callers": callers_of(unit, repo_root, sources),
         "symbol": unit.symbol,
         "risk_tags": unit.risk_tags,
     }
