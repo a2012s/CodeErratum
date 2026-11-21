@@ -64,7 +64,7 @@ cd /path/to/your-repo
 codeerratum review --diff HEAD~1 -o review.md
 ```
 
-`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。加 `--path src/api` 可只审该目录的改动，不必先 `git add`。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `review.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
+`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。审本地未提交的改动用 `--diff HEAD`（暂存与未暂存一起）；全新文件要先 `git add`（不必 commit）。加 `--path src/api` 可只审该目录的改动，已跟踪文件不需要先 `git add`。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `review.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
 
 > 审 `main...feature` 这类**未 checkout 的版本**时，源码、摘录与锚点校验都直接取 diff 版本的 git blob，不需要先切分支。只有当某个文件的 blob 取不到（例如未提交的工作区改动）时才回退到工作区，内容对不上会跳过该文件并在「本次覆盖说明」写明。
 

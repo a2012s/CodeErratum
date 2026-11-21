@@ -8,6 +8,7 @@
   可直接增删改并保存。配置写入 `.codeerratum/config.json`（权限 0600），文件优先于环境变量，
   重启 UI 后仍生效，CLI 也读同一份。api_key 从不回显，输入框留空即沿用原值。
   配置写入和审查一样要求同源 loopback Origin / Host；配置文件损坏时直接报错，不静默退回环境变量。
+- 界面 diff 输入框补提示：本地未提交改动填 `HEAD`（含已暂存），新文件需先 `git add`；README 同步。
 
 ### Fixed
 

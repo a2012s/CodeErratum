@@ -64,7 +64,7 @@ cd /path/to/your-repo
 codeerratum review --diff HEAD~1 -o review.md
 ```
 
-`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. Add `--path src/api` to review only that folder's changes (no `git add` needed). At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `review.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
+`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. For local uncommitted work use `--diff HEAD` (staged and unstaged together); brand-new files must be `git add`-ed first, but never committed. Add `--path src/api` to review only that folder's changes (no `git add` needed for tracked files). At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `review.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
 
 > Reviewing a revision that is **not checked out** (e.g. `main...feature`): sources, excerpts and anchor checks all read the diff revision's git blob, so no checkout is needed. Only files whose blob is unavailable (e.g. uncommitted working-tree edits) fall back to the working tree; a mismatch there skips the file and is listed in the run's coverage notes.
 

@@ -264,6 +264,9 @@
     <div class="field">
       <label for="diff">git diff 范围</label>
       <input id="diff" value="HEAD~1" spellcheck="false">
+      <div class="hint"><code>HEAD</code> = 本地未提交改动（含已暂存）；
+        <code>HEAD~1</code> = 上一个提交；<code>HEAD~3..HEAD</code> = 最近三个提交。
+        新文件需先 <code>git add</code>（不必 commit）才会进入 diff。</div>
     </div>
     <div class="field">
       <label for="paths">路径过滤（可选，如 src/api）</label>
