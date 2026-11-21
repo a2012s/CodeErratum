@@ -19,10 +19,35 @@ class DiffError(RuntimeError):
     """Raised when git cannot produce the requested diff."""
 
 
-def get_diff(spec: str, repo_root: Path) -> str:
-    """Resolve a diff spec through git. Supports ranges like HEAD~1, HEAD~3..HEAD."""
+def normalize_pathspec(paths: str) -> str:
+    """Validate whitespace-separated git pathspecs from UI/CLI input.
+
+    Values are passed to git as separate arguments after ``--`` (so no shell and
+    no option injection), but a user can still type an absolute path or ``..``
+    and accidentally review files outside the intended tree. Reject those early.
+    """
+    parts = paths.split()
+    for value in parts:
+        # Treat backslashes as separators too: Path on POSIX does not, so
+        # "..\\secret" would otherwise slip through as a literal filename.
+        normalized = value.replace("\\", "/")
+        if normalized.startswith("/") or ".." in Path(normalized).parts:
+            raise DiffError("路径必须是仓库内的相对路径（不接受绝对路径或 ..）")
+    return paths.strip()
+
+
+def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
+    """Resolve a diff spec through git. Supports ranges and optional pathspecs.
+
+    ``paths`` is split on whitespace and appended after ``--`` as separate git
+    arguments, so each token is treated as a path, never as a flag.
+    """
+    pathspec = normalize_pathspec(paths)
+    cmd = ["git", "diff", "--no-color", "--unified=3", spec]
+    if pathspec:
+        cmd += ["--", *pathspec.split()]
     result = subprocess.run(
-        ["git", "diff", "--no-color", "--unified=3", spec],
+        cmd,
         cwd=repo_root,
         capture_output=True,
         text=True,

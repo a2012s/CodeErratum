@@ -247,6 +247,11 @@
       <label for="diff">git diff 范围</label>
       <input id="diff" value="HEAD~1" spellcheck="false">
     </div>
+    <div class="field">
+      <label for="paths">路径过滤（可选，如 src/api）</label>
+      <input id="paths" placeholder="留空则审查全部改动" spellcheck="false">
+      <div class="hint">只审该目录下的改动，不必先 git add。多个路径用空格分隔。</div>
+    </div>
     <div class="row2">
       <div class="field">
         <label for="mode">模式</label>
@@ -564,6 +569,7 @@ $("runBtn").onclick = async () => {
   const btn = $("runBtn");
   const body = {
     diff: $("diff").value.trim() || "HEAD~1",
+    paths: $("paths").value.trim(),
     mode: $("mode").value,
     max_units: Number($("maxUnits").value) || 10,
     author_model: $("authorModel").value.trim(),

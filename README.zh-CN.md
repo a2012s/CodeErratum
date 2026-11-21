@@ -64,7 +64,7 @@ cd /path/to/your-repo
 codeerratum review --diff HEAD~1 -o review.md
 ```
 
-`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `review.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
+`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。加 `--path src/api` 可只审该目录的改动，不必先 `git add`。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `review.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
 
 ## 不花钱的自检
 
@@ -148,7 +148,7 @@ codeerratum ui --port 9000 --no-browser
 
 纯标准库实现——没有 FastAPI、没有打包工具、没有 node_modules。装依赖的故事仍然只有"三个环境变量"，界面只是补上终端给不了的东西：三区分流并排、每条发现的证据强度、证伪轮各方意见，以及直接写回 `feedback.db` 的采纳/驳回按钮。
 
-左侧选 diff 范围、模式、单元上限和作者模型（写这段代码的模型不进入审查席位），下方是历史运行，点开任意一次即可。只绑本机回环地址，拒绝非回环 Host（防 DNS rebinding），并要求每次 POST 带同源 Origin——否则随便哪个网页都能替你烧 token。
+左侧选 diff 范围、路径过滤、模式、单元上限和作者模型（写这段代码的模型不进入审查席位），下方是历史运行，点开任意一次即可。只绑本机回环地址，拒绝非回环 Host（防 DNS rebinding），并要求每次 POST 带同源 Origin——否则随便哪个网页都能替你烧 token。
 
 ### 贴到 PR 上
 

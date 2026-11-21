@@ -229,12 +229,15 @@ def execute_review(
     registry: ModelRegistry | None = None,
     progress: Callable[[str], None] | None = None,
     house_rules: str = "",
+    paths: str = "",
 ) -> ReviewOutcome:
     """Run the whole pipeline and persist artifacts + feedback rows.
 
     ``out`` writes an extra copy of the work order (the CLI's ``-o``). The run
     directory always keeps its own ``review.md`` so the UI can serve a run
-    without touching the working tree.
+    without touching the working tree. ``paths`` narrows the diff to a git
+    pathspec (e.g. ``src/api``), so a review can target one folder without
+    staging changes first.
     """
     say = progress or (lambda _msg: None)
     repo_root = repo_root.resolve()
@@ -256,7 +259,7 @@ def execute_review(
     run_mode = resolve_mode(mode, config)
 
     try:
-        diff_text = get_diff(diff_spec, repo_root)
+        diff_text = get_diff(diff_spec, repo_root, paths=paths)
     except DiffError as exc:
         raise DiffFailed(str(exc)) from exc
     if not diff_text.strip():
@@ -268,6 +271,9 @@ def execute_review(
     (run_dir / "input.diff").write_text(diff_text, encoding="utf-8")
 
     notices: list[str] = []
+    if paths.strip():
+        notices.append(f"仅审查路径 {paths.strip()} 内的改动（其他目录未审）")
+        say(notices[-1])
     rules = resolve_house_rules(house_rules, repo_root)
     if rules.truncated:
         notices.append(f"项目规范超过 {MAX_HOUSE_RULES_CHARS} 字，已截断")

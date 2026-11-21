@@ -23,6 +23,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from ..config import Config
+from ..ingest import DiffError, normalize_pathspec
 from ..models import ModelRegistry
 from ..pipeline import (
     HOUSE_RULES_FILE,
@@ -204,6 +205,12 @@ class WebApp:
                 raise PipelineError("max_units must be an integer") from exc
             max_units = max(1, min(max_units, 50))
             author = str(payload.get("author_model") or "").strip() or None
+            # Validate here so a bad path is a 400 with a clear message, not a
+            # git failure buried in a 500 after the review has started.
+            try:
+                paths = normalize_pathspec(str(payload.get("paths") or ""))
+            except DiffError as exc:
+                raise PipelineError(str(exc)) from exc
             # Rules arrive as text, never as a path: the UI must not be able to read
             # arbitrary local files, even though it only listens on loopback.
             house_rules = str(payload.get("house_rules") or "")
@@ -230,6 +237,7 @@ class WebApp:
                 out=out,
                 registry=self.registry,
                 house_rules=house_rules,
+                paths=paths,
             )
             summary = outcome.summary()
             if outcome.out_path:

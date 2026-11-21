@@ -64,7 +64,7 @@ cd /path/to/your-repo
 codeerratum review --diff HEAD~1 -o review.md
 ```
 
-`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `review.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
+`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. Add `--path src/api` to review only that folder's changes (no `git add` needed). At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `review.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
 
 ## Zero-cost self-check
 
@@ -149,7 +149,7 @@ The docs drawer is the same server, one click away — module map and signature 
 
 Standard library only — no FastAPI, no bundler, no `node_modules`. The install story stays "three environment variables and you're done", and the UI adds what a terminal can't show: the three zones side by side, evidence strength per finding, the falsification trail, and accept/reject buttons that write straight into `feedback.db`.
 
-Pick the diff range, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only, rejects non-loopback Hosts (DNS rebinding), and requires a same-origin `Origin` on every POST, so a random web page cannot trigger a paid review through your browser.
+Pick the diff range, path filter, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only, rejects non-loopback Hosts (DNS rebinding), and requires a same-origin `Origin` on every POST, so a random web page cannot trigger a paid review through your browser.
 
 ### Posting to a pull request
 

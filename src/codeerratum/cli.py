@@ -79,6 +79,9 @@ def review(
         help="Markdown file with project-specific rules, appended to the system prompt. "
         f"Defaults to .codeerratum/rules.md when it exists (max {MAX_HOUSE_RULES_CHARS} chars)",
     ),
+    path: str = typer.Option(
+        "", "--path", help="Limit the diff to a git pathspec, e.g. src/api (no need to git add)"
+    ),
 ) -> None:
     """Review a git diff and write an executable review.md work order."""
     repo_root = repo.resolve()
@@ -93,6 +96,7 @@ def review(
             out=out,
             progress=lambda msg: console.print(msg),
             house_rules=house_rules,
+            paths=path,
         )
     except NotARepository as exc:
         console.print(f"[red]Error: {exc}[/red]")
@@ -141,6 +145,7 @@ def pr(
     max_units: int = typer.Option(10, "--max-units", help="Max review units (cost guard)"),
     mode: str = typer.Option("", "--mode", help="quick|dual|committee"),
     rules: Path | None = typer.Option(None, "--rules", help="Project rules file"),
+    path: str = typer.Option("", "--path", help="Limit the diff to a git pathspec, e.g. src/api"),
 ) -> None:
     """Review a pull request and post the result as PR comments."""
     from .ci import (
@@ -170,6 +175,7 @@ def pr(
             out=None,
             progress=lambda msg: console.print(msg),
             house_rules=_read_rules_file(rules),
+            paths=path,
         )
     except (NotARepository, ConfigError, DiffFailed) as exc:
         console.print(f"[red]{exc}[/red]")
