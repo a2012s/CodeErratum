@@ -113,15 +113,20 @@ def test_header_without_reason_stays_short():
 
 
 def _with_verdicts(roles: list[str], model: str = "gpt-a") -> list[Finding]:
-    """One finding the model asserted, plus another model's finding it judged.
+    """One finding per verdict, authored by `model` and judged by a falsifier.
 
-    A pure falsifier has no assertions, and `apply_measured_profiles` skips those on
-    purpose: precision only matters for a model that also takes reviewer seats.
+    A verdict is credited to the author it judges, not to the falsifier who
+    rendered it: this profile feeds reviewer routing, which needs the author's
+    hit rate rather than the judge's habit of saying "confirm".
     """
-    own = finding("自己报的", [model])
-    other = finding("别人报的", ["gpt-b"])
-    other.verdicts = [Verdict(model_id=model, role=role, reason="r") for role in roles]
-    return [own, other]
+    return [
+        finding(
+            f"自己报的{i}",
+            [model],
+            verdicts=[Verdict(model_id=f"judge{i}", role=role, reason="r")],
+        )
+        for i, role in enumerate(roles)
+    ]
 
 
 def test_no_verdicts_means_no_warning():
@@ -171,7 +176,9 @@ def test_verdicts_count_toward_precision_inputs(store):
     profile = store.model_profile_map()["gpt-a"]
     assert profile["n_confirmed"] == 1
     assert profile["n_refuted"] == 1
-    assert profile["n_assert"] == 1
+    assert profile["n_assert"] == 3  # one asserted finding per verdict
+    # The falsifiers never reported a finding, so they must not gain a profile.
+    assert "judge0" not in store.model_profile_map()
 
 
 def test_accumulates_across_runs(store):

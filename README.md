@@ -149,7 +149,7 @@ The docs drawer is the same server, one click away — module map and signature 
 
 Standard library only — no FastAPI, no bundler, no `node_modules`. The install story stays "three environment variables and you're done", and the UI adds what a terminal can't show: the three zones side by side, evidence strength per finding, the falsification trail, and accept/reject buttons that write straight into `feedback.db`.
 
-Pick the diff range, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only and rejects cross-origin POSTs, so a random web page cannot trigger a paid review through your browser.
+Pick the diff range, mode, unit cap and author model in the left panel; the run history below it reopens any past run. It binds loopback only, rejects non-loopback Hosts (DNS rebinding), and requires a same-origin `Origin` on every POST, so a random web page cannot trigger a paid review through your browser.
 
 ### Posting to a pull request
 

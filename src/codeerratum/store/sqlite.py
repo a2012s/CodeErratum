@@ -203,6 +203,11 @@ class ReviewStore:
         accumulate on every run while accept/reject depends on someone remembering
         to click — and a routing signal that needs manual input never gets enough
         samples to clear the n>=30 threshold.
+
+        A verdict is credited to the models that ASSERTED the finding, not to the
+        falsifier who rendered it. A dedicated falsifier never submits findings;
+        crediting it would give a perfect "precision" to a model that should not
+        be seated as a reviewer, while the actual authors keep an empty profile.
         """
         tally: dict[str, dict[str, int]] = {}
 
@@ -218,11 +223,14 @@ class ReviewStore:
                 bump(model_id, "a")
                 if unique:
                     bump(model_id, "u")
-            for verdict in f.verdicts:
-                if verdict.role == "confirm":
-                    bump(verdict.model_id, "c")
-                elif verdict.role == "refute":
-                    bump(verdict.model_id, "r")
+            # One finding is one precision sample for each asserting model, no
+            # matter how many falsifiers weighed in. Refute wins ties so a
+            # disputed finding never inflates its author's precision.
+            roles = {v.role for v in f.verdicts}
+            outcome = "r" if "refute" in roles else ("c" if "confirm" in roles else "")
+            if outcome:
+                for model_id in f.source_models:
+                    bump(model_id, outcome)
 
         if not tally:
             return

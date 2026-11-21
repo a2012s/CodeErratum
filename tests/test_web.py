@@ -85,7 +85,9 @@ def client(repo, monkeypatch):
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     base = f"http://127.0.0.1:{httpd.server_address[1]}"
-    with httpx.Client(base_url=base, timeout=30, trust_env=False) as c:
+    # A same-origin browser POST always carries Origin. Send it by default so
+    # tests exercise that path; explicit security tests override it.
+    with httpx.Client(base_url=base, timeout=30, trust_env=False, headers={"Origin": base}) as c:
         yield c
     httpd.shutdown()
     httpd.server_close()
@@ -177,6 +179,32 @@ def test_cross_origin_post_is_refused(client, repo):
     )
     assert resp.status_code == 403
     assert not (repo / ".codeerratum" / "runs").exists()
+
+
+def test_post_without_origin_is_refused(client, repo):
+    """A plain HTML form can send a JSON body as text/plain with no Origin at all.
+
+    Treating 'no Origin' as same-origin let any web page spend the user's tokens.
+    """
+    resp = client.post("/api/review", json={"diff": "HEAD"}, headers={"Origin": ""})
+    assert resp.status_code == 403
+    assert not (repo / ".codeerratum" / "runs").exists()
+
+
+def test_non_loopback_host_is_refused(client, repo):
+    """DNS rebinding: evil.com resolving to 127.0.0.1 must not read local state."""
+    assert client.get("/api/runs", headers={"Host": "evil.example"}).status_code == 403
+    assert client.post("/api/review", json={}, headers={"Host": "evil.example"}).status_code == 403
+
+
+def test_write_markdown_rejects_paths_outside_repo(client, repo):
+    for bad in ("../../escaped.md", "/tmp/escaped.md", "..\\escaped.md"):
+        resp = client.post(
+            "/api/review",
+            json={"diff": "HEAD", "write_markdown": True, "out": bad},
+        )
+        assert resp.status_code == 400, bad
+        assert "out must be a plain filename" in resp.json()["error"]
 
 
 def test_status_lookup_survives_rerun(repo, monkeypatch):

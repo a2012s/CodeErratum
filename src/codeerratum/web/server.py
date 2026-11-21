@@ -5,15 +5,17 @@ machine that has nothing installed but this package. ThreadingHTTPServer gives
 us "page stays responsive while a review runs" for free; a lock keeps two
 reviews from running at once (the same cost guard as `--max-units`).
 
-Security posture: binds 127.0.0.1 by default, rejects cross-origin POSTs (a
-malicious page must not be able to trigger a paid review through your browser),
-and validates run ids before touching the filesystem.
+Security posture: binds 127.0.0.1 by default, requires a same-origin loopback
+Host AND Origin on every POST (a malicious page must not be able to trigger a
+paid review through your browser, including via a DNS-rebound hostname), and
+validates run ids / output paths before touching the filesystem.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import sys
 import threading
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +38,7 @@ from ..review import MAX_HOUSE_RULES_CHARS
 STATIC_DIR = Path(__file__).parent / "static"
 RUN_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 FINDING_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
+LOOPBACK_HOST_RE = re.compile(r"^(?:127\.0\.0\.1|localhost|\[::1\]|::1)(?::\d+)?$", re.I)
 MAX_BODY = 2 * 1024 * 1024
 
 
@@ -209,11 +212,15 @@ class WebApp:
                     f"house_rules is too long ({len(house_rules)} chars, "
                     f"limit {MAX_HOUSE_RULES_CHARS * 2})"
                 )
-            out = (
-                Path(str(payload.get("out") or "review.md"))
-                if payload.get("write_markdown")
-                else None
-            )
+            out: Path | None = None
+            if payload.get("write_markdown"):
+                raw_out = str(payload.get("out") or "review.md")
+                # execute_review resolves this against the repo root. Without a
+                # plain-filename check, "../../.ssh/authorized_keys" or an
+                # absolute path would be a legal target for a local page to write.
+                if "/" in raw_out or "\\" in raw_out or raw_out in (".", "..", ""):
+                    raise PipelineError("out must be a plain filename in the repository root")
+                out = Path(raw_out)
             outcome = execute_review(
                 self.repo_root,
                 diff_spec=diff_spec,
@@ -286,12 +293,26 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
         def _error(self, code: int, message: str) -> None:
             self._json(code, {"error": message})
 
+        def _host_ok(self) -> bool:
+            """Stop DNS rebinding: evil.com pointing at 127.0.0.1 is not a local user."""
+            return bool(LOOPBACK_HOST_RE.match(self.headers.get("Host") or ""))
+
         def _origin_ok(self) -> bool:
-            """Reject cross-site POSTs so a random web page cannot spend your tokens."""
+            """Only same-origin, loopback POSTs may spend tokens or write state.
+
+            A missing Origin used to mean "safe" — it does not. A plain HTML form
+            can POST a text/plain body containing JSON without a preflight, and
+            the body parser accepts it. Require Origin explicitly, and require
+            it to match the loopback Host exactly.
+            """
+            host = self.headers.get("Host") or ""
+            if not LOOPBACK_HOST_RE.match(host):
+                return False
             origin = self.headers.get("Origin")
             if not origin:
-                return True
-            return urlsplit(origin).netloc == (self.headers.get("Host") or "")
+                return False
+            parts = urlsplit(origin)
+            return parts.scheme in ("http", "https") and parts.netloc == host
 
         def _body(self) -> dict:
             length = int(self.headers.get("Content-Length") or 0)
@@ -308,6 +329,9 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
         # -- routing ---------------------------------------------------
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+            if not self._host_ok():
+                self._error(HTTPStatus.FORBIDDEN, "non-loopback Host refused")
+                return
             path = urlsplit(self.path).path.rstrip("/") or "/"
             try:
                 if path in ("/", "/index.html"):
@@ -335,7 +359,11 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
             except LookupError as exc:
                 self._error(HTTPStatus.NOT_FOUND, str(exc))
             except Exception as exc:  # noqa: BLE001 - never kill the server on one request
-                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                # Exception text can carry absolute local paths. Keep it in the
+                # server log; a page loaded in a browser must not be able to
+                # enumerate the user's filesystem through error messages.
+                print(f"[web] GET {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal error; see server log")
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib naming
             path = urlsplit(self.path).path.rstrip("/") or "/"
@@ -367,7 +395,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
             except (PipelineError, ValueError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
             except Exception as exc:  # noqa: BLE001
-                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"{type(exc).__name__}: {exc}")
+                print(f"[web] POST {path}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal error; see server log")
 
     return Handler
 

@@ -52,14 +52,24 @@ def same_issue(a: Finding, b: Finding, threshold: float = 0.35, max_line_gap: in
 
 
 def agreement(verdicts: list[Verdict]) -> Agreement:
-    """Derive agreement from verdict roles — deliberately not a majority vote."""
-    asserts = [v for v in verdicts if v.role in ("assert", "confirm")]
-    refutes = [v for v in verdicts if v.role == "refute"]
-    if asserts and refutes:
+    """Derive agreement from *independent asserting models*, never a vote.
+
+    Two traps this avoids:
+      - A falsifier's ``confirm`` is a verdict on someone else's finding, not a
+        second reviewer. Counting it made every confirmed finding "unanimous",
+        so the unique zone — the whole point of heterogeneous review — stayed
+        permanently empty.
+      - The same model re-reporting a finding across several review units must
+        count once. Counting verdicts instead of model ids inflated a single
+        model's repeated output into "consensus".
+    """
+    assert_models = {v.model_id for v in verdicts if v.role == "assert"}
+    refute_models = {v.model_id for v in verdicts if v.role == "refute"}
+    if assert_models and refute_models:
         return "conflict"
-    if len(asserts) >= 2:
+    if len(assert_models) >= 2:
         return "unanimous"
-    if len(asserts) == 1:
+    if len(assert_models) == 1:
         return "unique"
     return "unverified"
 

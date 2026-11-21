@@ -332,7 +332,6 @@ def _print_drift(drifts) -> None:
     for d in drifts[:40]:
         table.add_row(labels.get(d.kind, d.kind), d.path, d.symbol or "—", _compact(d.detail))
     console.print(table)
-    console.print(table)
     if len(drifts) > 40:
         console.print(f"[yellow]另有 {len(drifts) - 40} 条未显示[/yellow]")
 

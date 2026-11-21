@@ -150,6 +150,19 @@ def test_agreement_logic():
     assert agreement([]) == "unverified"
 
 
+def test_agreement_ignores_falsifier_confirm_and_duplicate_asserts():
+    """A confirm is not a second reviewer; neither is the same model twice.
+
+    Reverting either rule puts every surviving finding in the consensus zone and
+    empties the unique zone — the one place the product shows heterogeneous value.
+    """
+    one = [Verdict(model_id="a", role="assert", reason="x")]
+    confirmed = one + [Verdict(model_id="falsifier", role="confirm", reason="still true")]
+    assert agreement(confirmed) == "unique"
+    repeated = one + [Verdict(model_id="a", role="assert", reason="x again")]
+    assert agreement(repeated) == "unique"
+
+
 def test_jaccard_and_cluster():
     assert jaccard("空列表取首元素崩溃", "空列表取首元素崩溃") == 1.0
     assert jaccard("abc", "xyz") == 0.0
