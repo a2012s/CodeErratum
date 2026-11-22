@@ -720,6 +720,75 @@ function applyStatus(id, status, reason) {
   renderRun();
 }
 
+// Shared review progress state. The server tracks the single in-flight review;
+// every tab polls it so a review started elsewhere still moves our button/log.
+let reviewStreaming = false;   // this tab owns an active SSE stream
+let reviewTracking = false;    // we are following a review started elsewhere
+
+function progressReset() {
+  $("progressLog").innerHTML = "";
+  $("progressBox").hidden = false;
+}
+function progressAddLine(text, cls = "") {
+  const div = document.createElement("div");
+  div.className = "ln" + (cls ? " " + cls : "");
+  div.textContent = text;
+  const log = $("progressLog");
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+function progressSetRunning(text) {
+  const head = $("progressHead");
+  if (!head.querySelector(".spinner")) {
+    head.insertAdjacentHTML("afterbegin", '<span class="spinner"></span>');
+  }
+  $("progressTitle").textContent = text;
+}
+function progressFinishHead(text) {
+  const spin = $("progressHead").querySelector(".spinner");
+  if (spin) spin.remove();
+  $("progressTitle").textContent = text;
+}
+function setRunBusy(busy) {
+  const btn = $("runBtn");
+  btn.disabled = busy;
+  btn.innerHTML = busy ? `<span class="spinner"></span> 审查中…` : "运行审查";
+}
+
+async function pollReviewStatus() {
+  if (reviewStreaming) return;  // SSE is this tab's source of truth
+  let st;
+  try { st = await api("/api/review/status"); } catch { return; }
+  if (st.running) {
+    reviewTracking = true;
+    setRunBusy(true);
+    $("progressBox").hidden = false;
+    const p = st.params || {};
+    const scope = [p.diff, p.paths ? `路径 ${p.paths}` : ""].filter(Boolean).join(" · ");
+    const secs = st.elapsed_s != null ? ` · ${st.elapsed_s}s` : "";
+    progressSetRunning(`审查中…${secs}${scope ? ` · ${scope}` : ""}`);
+    const log = $("progressLog");
+    const msgs = st.messages || [];
+    // Only rebuild when the count changes, so polling doesn't reset scroll.
+    if (log.childElementCount !== msgs.length) {
+      log.innerHTML = "";
+      msgs.forEach((m) => progressAddLine(m));
+    }
+  } else if (reviewTracking) {
+    reviewTracking = false;
+    setRunBusy(false);
+    if (st.status === "done") {
+      progressFinishHead("审查完成");
+      loadRuns(false);
+    } else if (st.status === "empty") {
+      progressFinishHead("无改动");
+    } else if (st.status === "error") {
+      progressFinishHead("审查失败");
+    }
+  }
+}
+setInterval(pollReviewStatus, 1500);
+
 $("runBtn").onclick = async () => {
   const btn = $("runBtn");
   const body = {
@@ -731,25 +800,26 @@ $("runBtn").onclick = async () => {
     write_markdown: $("writeMd").checked,
     house_rules: $("houseRules").value,
   };
-  btn.disabled = true;
-  const old = btn.innerHTML;
-  btn.innerHTML = `<span class="spinner"></span> 审查中…`;
-  const log = $("progressLog");
-  log.innerHTML = "";
-  $("progressBox").hidden = false;
-  const addLine = (text, cls = "") => {
-    const div = document.createElement("div");
-    div.className = "ln" + (cls ? " " + cls : "");
-    div.textContent = text;
-    log.appendChild(div);
-    log.scrollTop = log.scrollHeight;
-  };
-  const finishHead = (text) => {
-    const spin = $("progressHead").querySelector(".spinner");
-    if (spin) spin.remove();
-    $("progressTitle").textContent = text;
-  };
+  // Guard: if the server already has a review running (maybe started in another
+  // tab, or a dropped SSE whose server work is still going), don't fire another
+  // request — just start tracking that one's progress.
+  let preflight;
+  try { preflight = await api("/api/review/status"); } catch { preflight = null; }
+  if (preflight && preflight.running) {
+    reviewTracking = true;
+    setRunBusy(true);
+    $("progressBox").hidden = false;
+    progressSetRunning("审查中…（其他标签页或连接已启动）");
+    await pollReviewStatus();
+    return;  // leave the button busy; the poller clears it when the run ends
+  }
+
+  setRunBusy(true);
+  reviewStreaming = true;
+  progressReset();
+  progressSetRunning("审查中…");
   let runId = null;
+  let streamCompleted = false;  // a terminal frame arrived; server work is over
   try {
     // POST body can't go through EventSource, so read the SSE response as a
     // stream. Same-origin POST keeps the CSRF/Origin guard intact.
@@ -760,6 +830,14 @@ $("runBtn").onclick = async () => {
     });
     if (!res.ok) {
       const d = await res.json().catch(() => ({}));
+      // Lost the race to another request: track the winner instead of erroring.
+      if (res.status === 409) {
+        reviewTracking = true;
+        progressAddLine("已有审查正在进行中，正在跟踪其进度…");
+        progressSetRunning("审查中…");
+        await pollReviewStatus();
+        return;  // poller owns button state now
+      }
       throw new Error(d.error || res.statusText);
     }
     const reader = res.body.getReader();
@@ -773,22 +851,25 @@ $("runBtn").onclick = async () => {
         let ev;
         try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
         if (ev.type === "log") {
-          addLine(ev.message || "");
+          progressAddLine(ev.message || "");
         } else if (ev.type === "empty") {
-          addLine(ev.message || "没有可审查的改动", "done");
-          finishHead("无改动");
+          streamCompleted = true;
+          progressAddLine(ev.message || "没有可审查的改动", "done");
+          progressFinishHead("无改动");
         } else if (ev.type === "error") {
-          addLine("错误：" + (ev.error || "未知错误"), "err");
-          finishHead("审查失败");
+          streamCompleted = true;
+          progressAddLine("错误：" + (ev.error || "未知错误"), "err");
+          progressFinishHead("审查失败");
           showError(
             `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
             + `审查模式：${body.mode}\n\n${ev.error || "未知错误"}`,
             "审查失败"
           );
         } else if (ev.type === "done") {
+          streamCompleted = true;
           runId = ev.run_id;
-          addLine(`完成：${ev.findings} 条发现 · ${ev.calls} 次调用 · 均 ${ev.latency_ms_avg}ms`, "done");
-          finishHead("审查完成");
+          progressAddLine(`完成：${ev.findings} 条发现 · ${ev.calls} 次调用 · 均 ${ev.latency_ms_avg}ms`, "done");
+          progressFinishHead("审查完成");
         }
       }
     };
@@ -810,15 +891,20 @@ $("runBtn").onclick = async () => {
       await openRun(runId);
     }
   } catch (e) {
-    addLine("错误：" + e.message, "err");
-    finishHead("审查失败");
+    progressAddLine("错误：" + e.message, "err");
+    progressFinishHead("审查失败");
     showError(
       `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
       + `审查模式：${body.mode}\n\n${e.message}`,
       "审查失败"
     );
   } finally {
-    btn.disabled = false; btn.innerHTML = old;
+    reviewStreaming = false;
+    // If we got a terminal frame, the server has already released the lock:
+    // restore the button now. Otherwise (connection dropped mid-stream) the
+    // poller keeps tracking whatever the server is still doing.
+    if (streamCompleted) setRunBusy(false);
+    else { reviewTracking = true; await pollReviewStatus(); }
   }
 };
 

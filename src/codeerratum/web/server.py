@@ -59,6 +59,18 @@ class WebApp:
         self.repo_root = repo_root.resolve()
         self.registry = registry
         self._review_lock = threading.Lock()
+        # Shared progress state: any client can see the one running review, so a
+        # second tab (or a stale request) knows the button must read "审查中".
+        self._state_lock = threading.Lock()
+        self._review_state: dict = {
+            "running": False,
+            "status": "idle",
+            "messages": [],
+            "started_at": None,
+            "finished_at": None,
+            "run_id": None,
+            "params": {},
+        }
 
     @property
     def store(self):
@@ -369,6 +381,38 @@ class WebApp:
     def stats(self) -> dict:
         return self.store.stats()
 
+    def review_status(self) -> dict:
+        """Snapshot of the single in-flight review (or the last finished one).
+
+        Polled by every open tab so the run button and progress panel reflect a
+        review started elsewhere — including a request whose SSE connection was
+        dropped but whose server-side work is still going.
+        """
+        with self._state_lock:
+            state = dict(self._review_state)
+            state["messages"] = list(state["messages"])
+            state["params"] = dict(state["params"])
+            if state["started_at"] is not None and state["finished_at"] is None:
+                state["elapsed_s"] = round(time.monotonic() - state["started_at"], 1)
+            else:
+                state["elapsed_s"] = None
+            # monotonic clock has no wall-clock meaning over HTTP; expose a readable start.
+            state["started_at"] = (
+                time.strftime("%H:%M:%S", time.localtime(state["started_at_wall"]))
+                if state.get("started_at_wall")
+                else ""
+            )
+            state.pop("started_at_wall", None)
+            return state
+
+    def _note_progress(self, message: str) -> None:
+        with self._state_lock:
+            msgs = self._review_state["messages"]
+            msgs.append(message)
+            # Bound memory for long dual/committee runs with many units.
+            if len(msgs) > 400:
+                del msgs[:-400]
+
     # ---- writes ----------------------------------------------------------
 
     def prepare_review(self, payload: dict) -> dict:
@@ -418,14 +462,43 @@ class WebApp:
             "paths": paths,
         }
 
-    def acquire_review_lock(self) -> None:
+    def acquire_review_lock(self, params: dict | None = None) -> None:
         if not self._review_lock.acquire(blocking=False):
-            raise RuntimeError("a review is already running in this process")
+            raise RuntimeError("已有审查正在进行中，请等待其完成后再运行")
+        with self._state_lock:
+            self._review_state.update(
+                {
+                    "running": True,
+                    "status": "running",
+                    "messages": [],
+                    "started_at": time.monotonic(),
+                    "started_at_wall": time.time(),
+                    "finished_at": None,
+                    "run_id": None,
+                    "params": {
+                        "diff": (params or {}).get("diff_spec", ""),
+                        "mode": (params or {}).get("mode", ""),
+                        "max_units": (params or {}).get("max_units", 10),
+                        "paths": (params or {}).get("paths", ""),
+                    },
+                }
+            )
 
-    def release_review_lock(self) -> None:
+    def release_review_lock(self, status: str = "done", run_id: str | None = None) -> None:
+        with self._state_lock:
+            self._review_state["running"] = False
+            self._review_state["status"] = status
+            self._review_state["finished_at"] = time.monotonic()
+            if run_id:
+                self._review_state["run_id"] = run_id
         self._review_lock.release()
 
     def execute_prepared(self, params: dict, progress=None) -> dict:
+        def both(msg: str) -> None:
+            self._note_progress(msg)
+            if progress:
+                progress(msg)
+
         outcome = execute_review(
             self.repo_root,
             diff_spec=params["diff_spec"],
@@ -436,7 +509,7 @@ class WebApp:
             registry=self.registry,
             house_rules=params["house_rules"],
             paths=params["paths"],
-            progress=progress,
+            progress=both,
         )
         summary = outcome.summary()
         if outcome.out_path:
@@ -445,11 +518,20 @@ class WebApp:
 
     def start_review(self, payload: dict, progress=None) -> dict:
         params = self.prepare_review(payload)
-        self.acquire_review_lock()
+        self.acquire_review_lock(params)
+        final_status, run_id = "done", None
         try:
-            return self.execute_prepared(params, progress=progress)
+            summary = self.execute_prepared(params, progress=progress)
+            run_id = summary.get("run_id")
+            return summary
+        except NoChanges:
+            final_status = "empty"
+            raise
+        except Exception:
+            final_status = "error"
+            raise
         finally:
-            self.release_review_lock()
+            self.release_review_lock(status=final_status, run_id=run_id)
 
     def set_status(self, finding_id: str, status: str, reason: str = "") -> dict:
         if not FINDING_ID_RE.match(finding_id):
@@ -534,29 +616,34 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
             """
             try:
                 params = app.prepare_review(body)
-                app.acquire_review_lock()
+                app.acquire_review_lock(params)
             except RuntimeError as exc:  # lock contention
                 self._error(HTTPStatus.CONFLICT, str(exc))
                 return
             except (PipelineError, ValueError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
+            final_status, final_run_id = "done", None
             try:
                 self._sse_headers()
                 self._sse_event("log", {"message": "已连接进度流，准备审查…"})
                 summary = app.execute_prepared(
                     params, progress=lambda msg: self._sse_event("log", {"message": msg})
                 )
+                final_run_id = summary.get("run_id")
                 self._sse_event("done", summary)
             except NoChanges as exc:
+                final_status = "empty"
                 self._sse_event("empty", {"message": str(exc)})
             except (PipelineError, ValueError) as exc:
+                final_status = "error"
                 self._sse_event("error", {"error": str(exc)})
             except Exception as exc:  # noqa: BLE001 - keep the stream alive, hide local paths
+                final_status = "error"
                 print(f"[web] stream review: {type(exc).__name__}: {exc}", file=sys.stderr)
                 self._sse_event("error", {"error": "internal error; see server log"})
             finally:
-                app.release_review_lock()
+                app.release_review_lock(status=final_status, run_id=final_run_id)
 
         def _host_ok(self) -> bool:
             """Stop DNS rebinding: evil.com pointing at 127.0.0.1 is not a local user."""
@@ -610,6 +697,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, app.list_runs())
                 elif path == "/api/stats":
                     self._json(HTTPStatus.OK, app.stats())
+                elif path == "/api/review/status":
+                    self._json(HTTPStatus.OK, app.review_status())
                 elif path == "/api/docs":
                     self._json(HTTPStatus.OK, app.docs_overview())
                 elif m := re.fullmatch(r"/api/runs/([0-9a-f]+)", path):

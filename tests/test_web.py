@@ -90,6 +90,7 @@ def client(repo, monkeypatch):
     # A same-origin browser POST always carries Origin. Send it by default so
     # tests exercise that path; explicit security tests override it.
     with httpx.Client(base_url=base, timeout=30, trust_env=False, headers={"Origin": base}) as c:
+        c.app = app  # let tests drive the same WebApp the server uses (status/lock)
         yield c
     httpd.shutdown()
     httpd.server_close()
@@ -670,3 +671,48 @@ def test_ui_consumes_review_sse_stream():
     assert 'ev.type === "done"' in html
     assert 'ev.type === "error"' in html
     assert "getReader()" in html
+
+
+def test_review_status_reflects_running_review(client):
+    """The shared status endpoint exposes in-flight state and progress to all tabs."""
+    idle = client.get("/api/review/status").json()
+    assert idle["running"] is False
+    assert idle["status"] == "idle"
+
+    app = client.app
+    app.acquire_review_lock(
+        {"diff_spec": "HEAD", "mode": "dual", "max_units": 5, "paths": "src/api"}
+    )
+    try:
+        app._note_progress("[m1] 单元 1/2 完成（1 条发现）")
+        st = client.get("/api/review/status").json()
+        assert st["running"] is True
+        assert st["status"] == "running"
+        assert st["params"]["diff"] == "HEAD"
+        assert st["params"]["paths"] == "src/api"
+        assert st["messages"] == ["[m1] 单元 1/2 完成（1 条发现）"]
+        assert st["elapsed_s"] is not None
+        assert st["started_at"]  # readable wall-clock start
+
+        # A second review is refused with a Chinese message and a real 409.
+        resp = client.post("/api/review/stream", json={"diff": "HEAD"})
+        assert resp.status_code == 409
+        assert "已有审查" in resp.json()["error"]
+    finally:
+        app.release_review_lock(status="done", run_id="abc123")
+
+    done = client.get("/api/review/status").json()
+    assert done["running"] is False
+    assert done["status"] == "done"
+    assert done["run_id"] == "abc123"
+
+
+def test_ui_tracks_external_review_and_busy_guard():
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'api("/api/review/status")' in html  # polls shared status
+    assert "setInterval(pollReviewStatus" in html
+    assert "if (preflight && preflight.running)" in html  # second tab guard
+    assert "res.status === 409" in html  # race -> track, not error modal
+    assert "reviewStreaming = true" in html
