@@ -47,6 +47,17 @@
 
 ### Added
 
+- **多项目同时审查（便签页）**：`/` 改为项目外壳，一个项目一个便签，便签内嵌原来的完整界面，
+  另有「总览」把状态/进度/token 摊成卡片。后端新增 `ProjectHub`（`web/hub.py`）：每个项目一个
+  `WebApp`，审查锁、进度状态、配置与 `feedback.db` 全部按仓库隔离，路由挂在 `/p/<slug>/`；
+  根 `/api/*` 仍指向第一个项目，单仓库模式行为不变（未传 hub 时与旧版逐字节一致）。
+  新增 `GET/POST /api/projects`、`/api/projects/pick|find`、`/api/projects/<slug>/remove|open`。
+  项目列表持久化到 `~/.codeerratum/projects.json`，重启恢复并跳过失效路径。
+  并发用 `threading.BoundedSemaphore` 限制（默认 2 个项目，`--max-parallel` 可调），
+  超出进入 `queued` 状态、可取消排队；`BoundedSemaphore` 在 `execute_prepared` 里
+  兜底 release，异常路径不会漏槽位。前端页面通过 `data-base` 前缀所有 API 请求，
+  项目页里的「切换仓库」改为「项目总览」；拖拽落在项目标签页时用 `postMessage` 转给外壳。
+  新增 `tests/test_hub.py` 10 项测试（隔离、404、增删、持久化、排队与取消排队）。
 - **打开当前仓库文件夹**：仓库抽屉的当前仓库信息下方新增「打开当前仓库文件夹」按钮，
   调用 `POST /api/repo/open` 用系统文件管理器打开服务端已定位的 git 根（macOS `open` /
   Windows `explorer` / Linux `xdg-open` 或 `gio`）。目标不接受页面传入，避免被当成任意目录打开器；

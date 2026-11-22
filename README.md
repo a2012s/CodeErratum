@@ -161,6 +161,17 @@ When a review finishes, the progress panel reports **token usage**: input / outp
 
 The header's **Switch repo** button points the running UI at any local git repository. Three ways in: click **Browse local…** to open the native folder picker (running in this local process — a browser page cannot read a directory dialog's absolute path), drag a folder onto the window (matched by name against recent repos and a bounded home-directory search), or paste an absolute path (`~` works). A subdirectory snaps up to the git root; each repo reads its own `.codeerratum/config.json`, so saved model settings follow the target. Switching is refused while a review runs (artifacts are keyed to the repo path), and all three routes require the same same-origin Origin / Host guard. The drawer shows the current repo path; **Open current repo folder** reveals that directory in the OS file manager (Finder / Explorer / xdg-open). It only opens the server-resolved git root — the page cannot supply an arbitrary path — and failures surface in a copyable dialog.
 
+### Multiple projects (tabs)
+
+`/` is now a project shell: one tab ("便签") per project, each embedding the full single-project UI, plus an **Overview** that lays every project's status, current progress and token usage out as cards.
+
+- **Add** by absolute path, the native folder picker, or by dropping a folder anywhere in the window (a drop inside a project tab is forwarded to the shell). A subdirectory snaps up to its git root.
+- **Isolation**: each project keeps its own `.codeerratum/config.json`, `feedback.db`, run archive and review lock; `/p/<slug>/api/*` only touches that project, while root `/api/*` still points at the first one for compatibility.
+- **Persistence**: the list lives in `~/.codeerratum/projects.json` and is restored on restart; paths that no longer exist are skipped silently. Removing a project only removes the entry, never disk data.
+- **Concurrency**: at most 2 projects run a review at once by default (`--max-parallel`), because every project already fans out to N models — unbounded parallelism hits rate limits instead of finishing faster. Extra projects show **排队中** and can be cancelled from the card or the tab.
+- **Disconnects**: closing or reloading any tab never aborts a review; it finishes server-side and the tab or overview picks the result up.
+- Inside a project tab the **Switch repo** button becomes **Project overview**: the tab is pinned to one slug, so switching repos there would desync the two.
+
 The header's **Config** button shows the active mode and model endpoints and lets you edit them. Saving writes `.codeerratum/config.json` (mode 0600), which takes precedence over environment variables and survives a restart — the CLI reads the same file. API keys are never echoed to the browser; leave the key field blank to keep the stored value.
 
 Each model row has a **Check** button (plus **Check all**): it sends one minimal chat request (`max_tokens=1`, no retry, 10s timeout) to verify the endpoint is reachable, the key is accepted, and the model id resolves. A green tick shows the latency; a red cross explains why (401/403 auth, 404 endpoint/id, 429 rate limit, timeout). Editing any field clears the previous result. Checks are read-only, never echo the key, and require the same same-origin guard.

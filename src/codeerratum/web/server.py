@@ -69,6 +69,55 @@ def _write_sse(wfile, kind: str, payload: dict) -> bool:
     return True
 
 
+def resolve_git_root(candidate: Path) -> Path:
+    """Validate a directory and snap it to its git root, with a clear message."""
+    if not candidate.exists():
+        raise PipelineError(f"路径不存在：{candidate}")
+    if not candidate.is_dir():
+        raise PipelineError(f"不是文件夹：{candidate}")
+    root = find_repo_root(candidate)
+    if not (root / ".git").exists():
+        raise PipelineError(f"不是 git 仓库：{root}")
+    return root
+
+
+def pick_folder(title: str = "选择要审查的 git 仓库") -> Path:
+    """Open the native folder picker in this local process and return a git root.
+
+    A browser page cannot read a directory dialog's absolute path, so the dialog
+    must run here. Shared by single-repo switching and the multi-project hub.
+    """
+    system = sys.platform
+    if system == "darwin":
+        cmd = ["osascript", "-e", f'POSIX path of (choose folder with prompt "{title}")']
+    elif system == "win32":
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            f"$d.Description = '{title}'; "
+            "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }",
+        ]
+    else:
+        zenity = shutil.which("zenity")
+        if not zenity:
+            raise PipelineError("本系统未安装 zenity，无法弹出文件夹选择器；请粘贴路径")
+        cmd = [zenity, "--file-selection", "--directory", f"--title={title}"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise PipelineError("文件夹选择超时，请重试或粘贴路径") from exc
+    except OSError as exc:
+        raise PipelineError(f"无法打开文件夹选择器：{exc}") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        # macOS -128 / "User canceled." — not an error worth a toast.
+        raise PipelineError("已取消选择文件夹")
+    chosen = result.stdout.strip().rstrip(os.sep) or os.sep
+    return resolve_git_root(Path(chosen).expanduser().resolve())
+
+
 def _safe_error(exc: Exception, repo_root: Path) -> str:
     """Show the real reason in the browser without leaking local filesystem paths."""
     text = " ".join(str(exc).split())
@@ -81,9 +130,17 @@ def _safe_error(exc: Exception, repo_root: Path) -> str:
 class WebApp:
     """Request-independent application logic, so tests can call it without sockets."""
 
-    def __init__(self, repo_root: Path, registry: ModelRegistry | None = None) -> None:
+    def __init__(
+        self,
+        repo_root: Path,
+        registry: ModelRegistry | None = None,
+        gate: threading.BoundedSemaphore | None = None,
+    ) -> None:
         self.repo_root = repo_root.resolve()
         self.registry = registry
+        # Shared across projects by the hub: limits how many paid reviews run at
+        # once. None keeps single-project behaviour (no queueing).
+        self._gate = gate
         self._review_lock = threading.Lock()
         # Thread-safe stop flag. The orchestrator polls it from inside its own
         # asyncio loop and cancels in-flight model calls; a POST from any tab can
@@ -136,14 +193,7 @@ class WebApp:
 
     def _git_root(self, candidate: Path) -> Path:
         """Resolve a path to its git root, or raise with a clear message."""
-        if not candidate.exists():
-            raise PipelineError(f"路径不存在：{candidate}")
-        if not candidate.is_dir():
-            raise PipelineError(f"不是文件夹：{candidate}")
-        root = find_repo_root(candidate)
-        if not (root / ".git").exists():
-            raise PipelineError(f"不是 git 仓库：{root}")
-        return root
+        return resolve_git_root(candidate)
 
     def switch_repo(self, raw_path: str) -> dict:
         """Point the UI at another local git repository.
@@ -178,39 +228,7 @@ class WebApp:
         gap while still giving the user a real folder browser. Cancel returns a
         clear message rather than a stack trace.
         """
-        system = sys.platform
-        if system == "darwin":
-            cmd = [
-                "osascript",
-                "-e",
-                'POSIX path of (choose folder with prompt "选择要审查的 git 仓库")',
-            ]
-        elif system == "win32":
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                "Add-Type -AssemblyName System.Windows.Forms; "
-                "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
-                "$d.Description = '选择要审查的 git 仓库'; "
-                "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }",
-            ]
-        else:
-            zenity = shutil.which("zenity")
-            if not zenity:
-                raise PipelineError("本系统未安装 zenity，无法弹出文件夹选择器；请粘贴路径")
-            cmd = [zenity, "--file-selection", "--directory", "--title=选择要审查的 git 仓库"]
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
-        except subprocess.TimeoutExpired as exc:
-            raise PipelineError("文件夹选择超时，请重试或粘贴路径") from exc
-        except OSError as exc:
-            raise PipelineError(f"无法打开文件夹选择器：{exc}") from exc
-        if result.returncode != 0 or not result.stdout.strip():
-            # macOS -128 / "User canceled." — not an error worth a toast.
-            raise PipelineError("已取消选择文件夹")
-        chosen = result.stdout.strip().rstrip(os.sep) or os.sep
-        root = self._git_root(Path(chosen).expanduser().resolve())
+        root = pick_folder()
         return {"path": str(root), "repo": str(root)}
 
     def open_repo_folder(self) -> dict:
@@ -591,25 +609,50 @@ class WebApp:
                 self._review_state["messages"].append("已请求停止，正在中断模型调用…")
         return {"ok": True, "message": "已请求停止审查"}
 
+    def _set_status(self, status: str, message: str = "") -> None:
+        with self._state_lock:
+            self._review_state["status"] = status
+            if message:
+                self._review_state["messages"].append(message)
+
+    def _wait_for_slot(self) -> None:
+        """Block until the hub grants an execution slot (other projects may run).
+
+        Queued projects show status ``queued`` so their tab says 排队中 instead of
+        looking frozen. Stopping while queued aborts cleanly.
+        """
+        if self._gate is None:
+            return
+        self._set_status("queued", "排队中：等待其他项目释放执行位…")
+        while not self._gate.acquire(timeout=0.25):
+            if self._stop_event.is_set():
+                raise ReviewCancelled("已取消排队")
+        self._set_status("running")
+
     def execute_prepared(self, params: dict, progress=None) -> dict:
         def both(msg: str) -> None:
             self._note_progress(msg)
             if progress:
                 progress(msg)
 
-        outcome = execute_review(
-            self.repo_root,
-            diff_spec=params["diff_spec"],
-            mode=params["mode"],
-            max_units=params["max_units"],
-            author_model=params["author"],
-            out=params["out"],
-            registry=self.registry,
-            house_rules=params["house_rules"],
-            paths=params["paths"],
-            progress=both,
-            should_stop=self._stop_event.is_set,
-        )
+        self._wait_for_slot()
+        try:
+            outcome = execute_review(
+                self.repo_root,
+                diff_spec=params["diff_spec"],
+                mode=params["mode"],
+                max_units=params["max_units"],
+                author_model=params["author"],
+                out=params["out"],
+                registry=self.registry,
+                house_rules=params["house_rules"],
+                paths=params["paths"],
+                progress=both,
+                should_stop=self._stop_event.is_set,
+            )
+        finally:
+            if self._gate is not None:
+                self._gate.release()
         summary = outcome.summary()
         if outcome.out_path:
             summary["out_path"] = str(outcome.out_path)
@@ -669,7 +712,15 @@ def _split_zones(findings: list[dict], mode: str) -> dict:
     return zones
 
 
-def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
+def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
+    """Build the request handler.
+
+    ``hub`` is optional: without it this is the classic single-repo UI (``/`` is
+    the review page and ``/api/*`` targets ``app``). With it, ``/`` becomes the
+    project shell and every project lives under ``/p/<slug>/`` while the legacy
+    root API keeps pointing at the first project for compatibility.
+    """
+
     class Handler(BaseHTTPRequestHandler):
         server_version = "CodeErratumUI"
 
@@ -814,13 +865,72 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
 
         # -- routing ---------------------------------------------------
 
+        def _resolve_project(self, path: str):
+            """Split ``/p/<slug>/...`` into (project app, inner path, slug).
+
+            A non-hub server passes paths through untouched so single-repo
+            behaviour stays byte-identical for existing tests and scripts.
+            """
+            if hub is None:
+                return app, path, None
+            m = re.fullmatch(r"/p/([0-9a-f]{6,12})(/.*)?", path)
+            if not m:
+                return app, path, None
+            slug = m.group(1)
+            inner = (m.group(2) or "/").rstrip("/") or "/"
+            return hub.get(slug), inner, slug
+
+        def _hub_post(self, path: str, body: dict) -> None:
+            """Project registry writes: add, pick, find, remove, open folder."""
+            if path == "/api/projects":
+                self._json(HTTPStatus.OK, hub.add(str(body.get("path") or "")))
+                return
+            if path == "/api/projects/pick":
+                self._json(HTTPStatus.OK, hub.add_picked())
+                return
+            if path == "/api/projects/find":
+                hints = body.get("hints") or []
+                if not isinstance(hints, list):
+                    hints = []
+                found = hub.first_or_raise().find_repo_by_name(str(body.get("name") or ""), hints)
+                self._json(HTTPStatus.OK, found)
+                return
+            m = re.fullmatch(r"/api/projects/([0-9a-f]{6,12})/(remove|open)", path)
+            if not m:
+                raise LookupError(f"no route for {path}")
+            slug, action = m.group(1), m.group(2)
+            if action == "remove":
+                self._json(HTTPStatus.OK, hub.remove(slug))
+            else:
+                self._json(HTTPStatus.OK, hub.get(slug).open_repo_folder())
+
+        def _project_page(self, slug: str) -> bytes:
+            html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+            # The page's JS prefixes every request with this base, so the same
+            # file works at / (legacy) and under /p/<slug>/ inside a tab.
+            return html.replace(
+                '<html lang="zh-CN">',
+                f'<html lang="zh-CN" data-base="/p/{slug}">',
+                1,
+            ).encode("utf-8")
+
         def do_GET(self) -> None:  # noqa: N802 - stdlib naming
             if not self._host_ok():
                 self._error(HTTPStatus.FORBIDDEN, "non-loopback Host refused")
                 return
             path = urlsplit(self.path).path.rstrip("/") or "/"
             try:
-                if path in ("/", "/index.html"):
+                if hub is not None and path in ("/", "/index.html"):
+                    html = (STATIC_DIR / "projects.html").read_bytes()
+                    self._send(HTTPStatus.OK, html, "text/html; charset=utf-8")
+                    return
+                if hub is not None and path == "/api/projects":
+                    self._json(HTTPStatus.OK, hub.snapshot())
+                    return
+                app, path, slug = self._resolve_project(path)
+                if slug is not None and path in ("/", "/index.html"):
+                    self._send(HTTPStatus.OK, self._project_page(slug), "text/html; charset=utf-8")
+                elif path in ("/", "/index.html"):
                     html = (STATIC_DIR / "index.html").read_bytes()
                     self._send(HTTPStatus.OK, html, "text/html; charset=utf-8")
                 elif path == "/api/meta":
@@ -862,6 +972,10 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 body = self._body()
+                if hub is not None and path.startswith("/api/projects"):
+                    self._hub_post(path, body)
+                    return
+                app, path, _slug = self._resolve_project(path)
                 if path == "/api/review/stream":
                     self._stream_review(app, body)
                 elif path == "/api/review/stop":
@@ -913,7 +1027,12 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def make_server(app: WebApp, host: str = "127.0.0.1", port: int = 8765) -> ThreadingHTTPServer:
-    httpd = ThreadingHTTPServer((host, port), make_handler(app))
+def make_server(
+    app: WebApp,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    hub=None,
+) -> ThreadingHTTPServer:
+    httpd = ThreadingHTTPServer((host, port), make_handler(app, hub))
     httpd.daemon_threads = True
     return httpd

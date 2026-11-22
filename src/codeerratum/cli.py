@@ -361,18 +361,27 @@ def ui(
     port: int = typer.Option(8765, "--port", help="Loopback port for the local UI"),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address (keep it on loopback)"),
     no_browser: bool = typer.Option(False, "--no-browser", help="Do not open a browser tab"),
+    max_parallel: int = typer.Option(
+        2, "--max-parallel", help="How many projects may run a review at the same time"
+    ),
 ) -> None:
-    """Open the local web UI (run history, three-zone report, accept/reject)."""
-    from .web import WebApp, make_server
+    """Open the local web UI (multi-project tabs, run history, report, accept/reject)."""
+    from .web import ProjectHub, make_server
 
     repo_root = find_repo_root(repo)
     if not (repo_root / ".git").exists():
         console.print(f"[red]Error: {repo_root} is not a git repository[/red]")
         raise typer.Exit(1)
 
-    app_ui = WebApp(repo_root)
+    hub = ProjectHub(
+        state_file=Path.home() / ".codeerratum" / "projects.json",
+        max_parallel=max_parallel,
+    )
+    seed = hub.add(str(repo_root))
+    hub.restore()  # previously added projects come back after a restart
+    app_ui = hub.get(seed["slug"])
     try:
-        httpd = make_server(app_ui, host=host, port=port)
+        httpd = make_server(app_ui, host=host, port=port, hub=hub)
     except OSError as exc:
         console.print(f"[red]Cannot bind {host}:{port} — {exc}[/red]")
         raise typer.Exit(1) from exc

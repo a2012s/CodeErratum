@@ -732,7 +732,7 @@ def test_ui_consumes_review_sse_stream():
     from codeerratum.web.server import STATIC_DIR
 
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assert 'fetch("/api/review/stream"' in html
+    assert 'fetch(BASE + "/api/review/stream"' in html
     assert 'id="progressLog"' in html
     assert 'ev.type === "done"' in html
     assert 'ev.type === "error"' in html

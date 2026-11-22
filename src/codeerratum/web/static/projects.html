@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CodeErratum — 项目</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --panel-2: #f0f2f5; --border: #dfe3e8;
+    --text: #1b1f24; --muted: #616b76; --accent: #2f6fec; --accent-weak: #e6efff;
+    --ok: #157347; --ok-weak: #e3f4e8; --bad: #b42318; --bad-weak: #fde8e6;
+    --warn: #a15c00; --warn-weak: #fdf1dc;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1117; --panel: #161b22; --panel-2: #1c2330; --border: #2b3441;
+      --text: #e6edf3; --muted: #9aa7b4; --accent: #4d8dff; --accent-weak: #16233b;
+      --ok: #5ad39a; --ok-weak: #12321f; --bad: #ff7b72; --bad-weak: #3a1a16;
+      --warn: #e3a008; --warn-weak: #2e2410;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column;
+  }
+  button {
+    font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.05); }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+  button.danger:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+
+  header.top {
+    display: flex; align-items: center; gap: 12px; padding: 9px 16px;
+    background: var(--panel); border-bottom: 1px solid var(--border); flex: none;
+  }
+  .brand { font-weight: 650; letter-spacing: .2px; white-space: nowrap; }
+  .brand span { color: var(--accent); }
+  #tabs { display: flex; align-items: center; gap: 4px; overflow-x: auto; flex: 1; scrollbar-width: thin; }
+  .tab {
+    display: flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 8px 8px 0 0;
+    border: 1px solid transparent; border-bottom: none; cursor: pointer; white-space: nowrap;
+    color: var(--muted); font-size: 13px; background: transparent;
+  }
+  .tab:hover { color: var(--text); background: var(--panel-2); }
+  .tab.active { color: var(--text); background: var(--bg); border-color: var(--border); font-weight: 600; }
+  .tab .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); flex: none; }
+  .tab .dot.running { background: var(--accent); animation: pulse 1.4s infinite; }
+  .tab .dot.queued { background: var(--warn); }
+  .tab .dot.done { background: var(--ok); }
+  .tab .dot.error { background: var(--bad); }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  main { flex: 1; min-height: 0; position: relative; }
+  iframe.project { border: 0; width: 100%; height: 100%; display: block; background: var(--bg); }
+  iframe.project[hidden] { display: none; }
+
+  #overview { height: 100%; overflow-y: auto; padding: 18px 22px 40px; }
+  #overview[hidden] { display: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 15px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .card.running { border-color: var(--accent); }
+  .card.error { border-color: var(--bad); }
+  .card-head { display: flex; align-items: center; gap: 8px; }
+  .card-name { font-weight: 650; font-size: 14.5px; }
+  .card-path { color: var(--muted); font-size: 12px; word-break: break-all;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .chip {
+    font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: var(--panel-2);
+    color: var(--muted); white-space: nowrap;
+  }
+  .chip.running { background: var(--accent-weak); color: var(--accent); }
+  .chip.queued { background: var(--warn-weak); color: var(--warn); }
+  .chip.done { background: var(--ok-weak); color: var(--ok); }
+  .chip.error { background: var(--bad-weak); color: var(--bad); }
+  .card-progress { color: var(--muted); font-size: 12px; min-height: 18px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card-actions { display: flex; gap: 8px; margin-top: 2px; }
+  .empty { text-align: center; color: var(--muted); padding: 70px 20px; }
+  .empty h2 { color: var(--text); font-size: 17px; margin: 0 0 8px; }
+  .empty code { background: var(--panel-2); padding: 2px 6px; border-radius: 5px; }
+
+  #modal { position: fixed; inset: 0; background: rgba(10, 15, 22, .45); display: none;
+    align-items: center; justify-content: center; padding: 20px; z-index: 40; }
+  #modal.show { display: flex; }
+  .dialog { background: var(--panel); border-radius: 12px; padding: 18px 20px;
+    width: min(560px, 100%); box-shadow: 0 18px 60px rgba(0,0,0,.3); }
+  .dialog h3 { margin: 0 0 6px; font-size: 16px; }
+  .dialog p { margin: 0 0 12px; color: var(--muted); font-size: 12.5px; }
+  .dialog input {
+    width: 100%; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font: inherit; font-size: 13px;
+  }
+  .dialog input:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
+  .drop-hint { margin-top: 10px; border: 1px dashed var(--border); border-radius: 8px;
+    padding: 14px; text-align: center; color: var(--muted); font-size: 12.5px; }
+  #modalMsg { margin-top: 8px; font-size: 12.5px; color: var(--bad); min-height: 17px; }
+  #modalMsg.ok { color: var(--ok); }
+  .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+  .candidates { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 190px; overflow-y: auto; }
+  .candidates button { text-align: left; font-size: 12.5px; }
+  body.dragging::after {
+    content: "把文件夹拖到这里加入项目"; position: fixed; inset: 12px; z-index: 50;
+    border: 2px dashed var(--accent); border-radius: 14px; background: rgba(47,111,236,.08);
+    display: flex; align-items: center; justify-content: center; color: var(--accent);
+    font-size: 15px; font-weight: 600; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">CodeErratum <span>· 项目</span></div>
+  <div id="tabs"></div>
+  <button id="overviewBtn">总览</button>
+  <button class="primary" id="addBtn">+ 添加项目</button>
+</header>
+
+<main>
+  <div id="frames"></div>
+  <section id="overview" hidden>
+    <div class="cards" id="cards"></div>
+    <div class="empty" id="empty" hidden>
+      <h2>还没有项目</h2>
+      <p>点右上角「+ 添加项目」：粘贴绝对路径、用系统文件夹选择器，或把文件夹直接拖进窗口。</p>
+      <p>每个项目独立配置模型与运行历史，最多 <b id="maxParallel">2</b> 个项目同时审查。</p>
+    </div>
+  </section>
+</main>
+
+<div id="modal">
+  <div class="dialog">
+    <h3>添加项目</h3>
+    <p>填仓库内任意子目录会自动定位到 git 根。配置与历史按仓库隔离，不会改动磁盘上的代码。</p>
+    <input id="pathInput" placeholder="/Users/you/codes/my-project 或 ~/codes/my-project" autocomplete="off">
+    <div class="drop-hint">也可以点下面按钮用系统文件夹选择器，或把文件夹拖进窗口</div>
+    <div id="candidates" class="candidates" hidden></div>
+    <div id="modalMsg"></div>
+    <div class="dialog-actions">
+      <button id="pickBtn">浏览本地…</button>
+      <button id="cancelBtn">取消</button>
+      <button class="primary" id="confirmBtn">添加</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const STATUS_TEXT = {
+  idle: "未运行", running: "审查中", queued: "排队中", stopping: "停止中",
+  done: "已完成", error: "失败", empty: "无改动", cancelled: "已停止",
+};
+let PROJECTS = [];
+let ACTIVE = null;          // slug or "overview"
+const FRAMES = new Map();   // slug -> iframe (kept alive so reviews keep streaming)
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function statusClass(p) {
+  if (p.status === "running" || p.status === "stopping") return "running";
+  if (p.status === "queued") return "queued";
+  if (p.status === "error") return "error";
+  if (p.status === "done") return "done";
+  return "";
+}
+
+function renderTabs() {
+  const tabs = $("tabs");
+  tabs.innerHTML = "";
+  for (const p of PROJECTS) {
+    const el = document.createElement("div");
+    el.className = "tab" + (ACTIVE === p.slug ? " active" : "");
+    el.innerHTML = `<span class="dot ${statusClass(p)}"></span>${esc(p.name)}`;
+    el.title = p.path;
+    el.onclick = () => activate(p.slug);
+    tabs.appendChild(el);
+  }
+  $("overviewBtn").className = ACTIVE === "overview" ? "primary" : "";
+}
+
+function renderCards() {
+  const box = $("cards");
+  $("empty").hidden = PROJECTS.length > 0;
+  box.innerHTML = "";
+  for (const p of PROJECTS) {
+    const card = document.createElement("div");
+    card.className = "card " + statusClass(p);
+    const tokens = p.tokens
+      ? ` · ${p.tokens.total ?? 0} tokens` : "";
+    card.innerHTML = `
+      <div class="card-head">
+        <div class="card-name">${esc(p.name)}</div>
+        <span class="chip ${statusClass(p)}">${STATUS_TEXT[p.status] || p.status}</span>
+      </div>
+      <div class="card-path">${esc(p.path)}</div>
+      <div class="card-progress">${esc(p.progress || "—")}${tokens}</div>
+      <div class="card-actions">
+        <button data-act="open">打开</button>
+        ${p.running ? '<button data-act="stop" class="danger">停止</button>' : ""}
+        <button data-act="folder">文件夹</button>
+        <button data-act="remove" class="danger">移除</button>
+      </div>`;
+    card.querySelector('[data-act="open"]').onclick = () => activate(p.slug);
+    const stopBtn = card.querySelector('[data-act="stop"]');
+    if (stopBtn) {
+      stopBtn.onclick = () =>
+        api(`/p/${p.slug}/api/review/stop`, { method: "POST", body: "{}" })
+          .then(refresh)
+          .catch((e) => alert(e.message));
+    }
+    card.querySelector('[data-act="folder"]').onclick = () =>
+      api(`/api/projects/${p.slug}/open`, { method: "POST", body: "{}" })
+        .catch((e) => alert(e.message));
+    card.querySelector('[data-act="remove"]').onclick = async () => {
+      if (!confirm(`从列表移除「${p.name}」？\n只移除入口，磁盘代码与运行历史都会保留。`)) return;
+      try {
+        await api(`/api/projects/${p.slug}/remove`, { method: "POST", body: "{}" });
+        const f = FRAMES.get(p.slug);
+        if (f) { f.remove(); FRAMES.delete(p.slug); }
+        if (ACTIVE === p.slug) activate("overview");
+        await refresh();
+      } catch (e) { alert(e.message); }
+    };
+    box.appendChild(card);
+  }
+}
+
+function activate(slug) {
+  ACTIVE = slug;
+  $("overview").hidden = slug !== "overview";
+  for (const [s, frame] of FRAMES) frame.hidden = s !== slug;
+  if (slug !== "overview" && !FRAMES.has(slug)) {
+    const frame = document.createElement("iframe");
+    frame.className = "project";
+    frame.src = `/p/${slug}/`;
+    frame.title = slug;
+    $("frames").appendChild(frame);
+    FRAMES.set(slug, frame);
+  }
+  if (slug !== "overview") {
+    const p = PROJECTS.find((x) => x.slug === slug);
+    if (p) document.title = `${p.name} — CodeErratum`;
+  } else {
+    document.title = "CodeErratum — 项目";
+  }
+  history.replaceState(null, "", slug === "overview" ? "#overview" : `#p=${slug}`);
+  renderTabs();
+}
+
+async function refresh() {
+  let data;
+  try { data = await api("/api/projects"); } catch { return; }
+  PROJECTS = data.projects || [];
+  $("maxParallel").textContent = data.max_parallel ?? 2;
+  if (!ACTIVE) ACTIVE = PROJECTS.length ? PROJECTS[0].slug : "overview";
+  if (ACTIVE !== "overview" && !PROJECTS.some((p) => p.slug === ACTIVE)) ACTIVE = "overview";
+  renderTabs();
+  renderCards();
+  if (!$("overview").hidden) { /* cards re-rendered above */ }
+}
+
+// ---- add project -------------------------------------------------------
+function openModal() {
+  $("modal").classList.add("show");
+  $("modalMsg").textContent = "";
+  $("modalMsg").className = "";
+  $("candidates").hidden = true;
+  $("candidates").innerHTML = "";
+  $("pathInput").value = "";
+  setTimeout(() => $("pathInput").focus(), 30);
+}
+function closeModal() { $("modal").classList.remove("show"); }
+
+async function addByPath() {
+  const path = $("pathInput").value.trim();
+  if (!path) { msg("请填写或选择文件夹路径"); return; }
+  $("confirmBtn").disabled = true;
+  try {
+    const p = await api("/api/projects", { method: "POST", body: JSON.stringify({ path }) });
+    closeModal();
+    await refresh();
+    activate(p.slug);
+  } catch (e) {
+    msg(e.message);
+  } finally {
+    $("confirmBtn").disabled = false;
+  }
+}
+function msg(text, ok = false) {
+  $("modalMsg").textContent = text;
+  $("modalMsg").className = ok ? "ok" : "";
+}
+
+$("addBtn").onclick = openModal;
+$("cancelBtn").onclick = closeModal;
+$("confirmBtn").onclick = addByPath;
+$("pathInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addByPath(); });
+$("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closeModal(); });
+$("overviewBtn").onclick = () => activate("overview");
+
+$("pickBtn").onclick = async () => {
+  $("pickBtn").disabled = true;
+  msg("等待系统文件夹选择器…", true);
+  try {
+    const p = await api("/api/projects/pick", { method: "POST", body: "{}" });
+    closeModal();
+    await refresh();
+    activate(p.slug);
+  } catch (e) {
+    msg(e.message);
+  } finally {
+    $("pickBtn").disabled = false;
+  }
+};
+
+// ---- drag and drop -----------------------------------------------------
+let dragDepth = 0;
+window.addEventListener("dragenter", (e) => {
+  if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+  dragDepth += 1; document.body.classList.add("dragging");
+});
+window.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) document.body.classList.remove("dragging");
+});
+window.addEventListener("dragover", (e) => { if (e.dataTransfer) e.preventDefault(); });
+window.addEventListener("drop", async (e) => {
+  e.preventDefault();
+  dragDepth = 0; document.body.classList.remove("dragging");
+  const item = e.dataTransfer?.items?.[0];
+  if (!item) return;
+  // Only the leaf name is readable — resolve it server-side against recent repos and home.
+  const entry = item.webkitGetAsEntry?.();
+  resolveDroppedName(entry?.name || "");
+});
+
+async function resolveDroppedName(name) {
+  if (!name) return;
+  openModal();
+  msg("正在定位文件夹…", true);
+  try {
+    const found = await api("/api/projects/find", {
+      method: "POST", body: JSON.stringify({ name, hints: PROJECTS.map((p) => p.path) }),
+    });
+    const matches = found.matches || [];
+    if (!matches.length) { msg(`没找到名为 ${name} 的 git 仓库，请粘贴完整路径`); return; }
+    if (matches.length === 1) { $("pathInput").value = matches[0]; msg("已定位，点「添加」确认", true); return; }
+    msg(`找到 ${matches.length} 个同名仓库，选一个`);
+    const box = $("candidates");
+    box.hidden = false;
+    box.innerHTML = "";
+    for (const m of matches) {
+      const b = document.createElement("button");
+      b.textContent = m;
+      b.onclick = () => { $("pathInput").value = m; msg("已选中，点「添加」确认", true); };
+      box.appendChild(b);
+    }
+  } catch (err) { msg(err.message); }
+}
+
+// Drops inside a project iframe are forwarded here so the tab keeps its slug.
+window.addEventListener("message", (e) => {
+  if (e.origin !== location.origin) return;
+  const data = e.data;
+  if (data && data.type === "ce:add-project" && data.name) resolveDroppedName(data.name);
+});
+
+// ---- boot --------------------------------------------------------------
+(async () => {
+  const hash = location.hash.replace(/^#/, "");
+  await refresh();
+  if (hash.startsWith("p=")) {
+    const slug = hash.slice(2);
+    if (PROJECTS.some((p) => p.slug === slug)) activate(slug);
+    else activate(PROJECTS.length ? PROJECTS[0].slug : "overview");
+  } else {
+    activate(PROJECTS.length === 1 ? PROJECTS[0].slug : "overview");
+  }
+  setInterval(refresh, 2000);
+})();
+</script>
+</body>
+</html>

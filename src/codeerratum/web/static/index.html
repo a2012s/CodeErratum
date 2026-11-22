@@ -477,6 +477,9 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// Under the multi-project shell this page is served at /p/<slug>/ and the
+// server stamps data-base; every API call is relative to it. At / it is empty.
+const BASE = document.documentElement.dataset.base || "";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ZONE_LABEL = { unique: "独有发现", conflict: "冲突区", consensus: "共识区", all: "全部发现" };
@@ -489,7 +492,7 @@ const ZONE_HINT = {
 let STATE = { run: null, zone: null, meta: null };
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, {
+  const res = await fetch(BASE + path, {
     headers: { "Content-Type": "application/json" },
     ...opts,
   });
@@ -850,6 +853,11 @@ async function pollReviewStatus() {
       progressSetRunning("正在停止…");
       $("stopBtn").disabled = true;
       $("stopBtn").textContent = "停止中…";
+    } else if (st.status === "queued") {
+      progressSetRunning("排队中…等待其他项目释放执行位");
+      $("stopBtn").hidden = false;
+      $("stopBtn").disabled = false;
+      $("stopBtn").textContent = "取消排队";
     } else {
       progressSetRunning(`审查中…${secs}${scope ? ` · ${scope}` : ""}`);
     }
@@ -919,7 +927,7 @@ $("runBtn").onclick = async () => {
   try {
     // POST body can't go through EventSource, so read the SSE response as a
     // stream. Same-origin POST keeps the CSRF/Origin guard intact.
-    const res = await fetch("/api/review/stream", {
+    const res = await fetch(BASE + "/api/review/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1394,6 +1402,12 @@ async function handleFolderDrop(e) {
     showError("请拖拽文件夹（不是文件）到窗口；也可以点「切换仓库」用系统选择器", "无法识别拖拽内容");
     return;
   }
+  if (BASE) {
+    // Inside a project tab a drop means "add another project", not "switch this
+    // one" — forward it to the shell so the tab stays pinned to its slug.
+    window.parent.postMessage({ type: "ce:add-project", name }, location.origin);
+    return;
+  }
   try {
     const found = await api("/api/find-repo", {
       method: "POST",
@@ -1510,10 +1524,18 @@ function saveLayout(patch) {
   });
 })();
 
-$("repoBtn").onclick = () => {
-  if (!toggleDrawer("repoDrawer")) return;
-  renderRepoDrawer();
-};
+if (BASE) {
+  // In the multi-project shell a tab is pinned to one project: switching the
+  // repo here would desync the tab from its slug, so the button goes back to
+  // the project list instead.
+  $("repoBtn").textContent = "项目总览";
+  $("repoBtn").onclick = () => { location.href = "/"; };
+} else {
+  $("repoBtn").onclick = () => {
+    if (!toggleDrawer("repoDrawer")) return;
+    renderRepoDrawer();
+  };
+}
 
 $("configBtn").onclick = async () => {
   if (!toggleDrawer("configDrawer")) return;
