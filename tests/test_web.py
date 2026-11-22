@@ -619,3 +619,54 @@ def test_ui_defaults_and_mutually_exclusive_drawers():
     ):
         assert f'{drawer}: "{btn}"' in html
         assert f'toggleDrawer("{drawer}")' in html
+
+
+def test_review_stream_pushes_progress_then_done(client):
+    """The SSE route streams log frames during the review and ends with a summary."""
+    with client.stream("POST", "/api/review/stream", json={"diff": "HEAD", "max_units": 5}) as resp:
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        events = []
+        buf = ""
+        for chunk in resp.iter_text():
+            buf += chunk
+            while "\n\n" in buf:
+                frame, buf = buf.split("\n\n", 1)
+                data = next((ln[5:] for ln in frame.splitlines() if ln.startswith("data:")), None)
+                if data:
+                    events.append(json.loads(data))
+
+    kinds = [e["type"] for e in events]
+    assert "log" in kinds
+    assert kinds[-1] == "done", kinds
+    assert any("审查单元" in e.get("message", "") for e in events if e["type"] == "log")
+    done = events[-1]
+    assert done["findings"] == 1
+    assert done["run_id"]
+
+
+def test_review_stream_validation_error_is_json_before_headers(client):
+    """Bad input is a real 400, not an HTTP 200 with an error event."""
+    resp = client.post("/api/review/stream", json={"diff": "HEAD", "max_units": "not-an-int"})
+    assert resp.status_code == 400
+    assert "max_units" in resp.json()["error"]
+
+
+def test_review_stream_requires_same_origin(client):
+    resp = client.post(
+        "/api/review/stream",
+        json={"diff": "HEAD"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403
+
+
+def test_ui_consumes_review_sse_stream():
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'fetch("/api/review/stream"' in html
+    assert 'id="progressLog"' in html
+    assert 'ev.type === "done"' in html
+    assert 'ev.type === "error"' in html
+    assert "getReader()" in html

@@ -371,58 +371,85 @@ class WebApp:
 
     # ---- writes ----------------------------------------------------------
 
-    def start_review(self, payload: dict) -> dict:
+    def prepare_review(self, payload: dict) -> dict:
+        """Validate + normalize a review request. Does not take the lock.
+
+        Kept separate from execution so the SSE route can reject bad input with
+        a normal 400 before it has committed to sending an event stream.
+        """
+        diff_spec = str(payload.get("diff") or "HEAD~1").strip() or "HEAD~1"
+        mode = str(payload.get("mode") or "").strip().lower()
+        try:
+            max_units = int(payload.get("max_units", 10))
+        except (TypeError, ValueError) as exc:
+            raise PipelineError("max_units must be an integer") from exc
+        max_units = max(1, min(max_units, 50))
+        author = str(payload.get("author_model") or "").strip() or None
+        # Validate here so a bad path is a 400 with a clear message, not a
+        # git failure buried in a 500 after the review has started.
+        try:
+            paths = normalize_pathspec(str(payload.get("paths") or ""))
+        except DiffError as exc:
+            raise PipelineError(str(exc)) from exc
+        # Rules arrive as text, never as a path: the UI must not be able to read
+        # arbitrary local files, even though it only listens on loopback.
+        house_rules = str(payload.get("house_rules") or "")
+        if len(house_rules) > MAX_HOUSE_RULES_CHARS * 2:
+            raise PipelineError(
+                f"house_rules is too long ({len(house_rules)} chars, "
+                f"limit {MAX_HOUSE_RULES_CHARS * 2})"
+            )
+        out: Path | None = None
+        if payload.get("write_markdown"):
+            raw_out = str(payload.get("out") or "erratumReview.md")
+            # execute_review resolves this against the repo root. Without a
+            # plain-filename check, "../../.ssh/authorized_keys" or an
+            # absolute path would be a legal target for a local page to write.
+            if "/" in raw_out or "\\" in raw_out or raw_out in (".", "..", ""):
+                raise PipelineError("out must be a plain filename in the repository root")
+            out = Path(raw_out)
+        return {
+            "diff_spec": diff_spec,
+            "mode": mode,
+            "max_units": max_units,
+            "author": author,
+            "out": out,
+            "house_rules": house_rules,
+            "paths": paths,
+        }
+
+    def acquire_review_lock(self) -> None:
         if not self._review_lock.acquire(blocking=False):
             raise RuntimeError("a review is already running in this process")
+
+    def release_review_lock(self) -> None:
+        self._review_lock.release()
+
+    def execute_prepared(self, params: dict, progress=None) -> dict:
+        outcome = execute_review(
+            self.repo_root,
+            diff_spec=params["diff_spec"],
+            mode=params["mode"],
+            max_units=params["max_units"],
+            author_model=params["author"],
+            out=params["out"],
+            registry=self.registry,
+            house_rules=params["house_rules"],
+            paths=params["paths"],
+            progress=progress,
+        )
+        summary = outcome.summary()
+        if outcome.out_path:
+            summary["out_path"] = str(outcome.out_path)
+        return summary
+
+    def start_review(self, payload: dict, progress=None) -> dict:
+        params = self.prepare_review(payload)
+        self.acquire_review_lock()
         try:
-            diff_spec = str(payload.get("diff") or "HEAD~1").strip() or "HEAD~1"
-            mode = str(payload.get("mode") or "").strip().lower()
-            try:
-                max_units = int(payload.get("max_units", 10))
-            except (TypeError, ValueError) as exc:
-                raise PipelineError("max_units must be an integer") from exc
-            max_units = max(1, min(max_units, 50))
-            author = str(payload.get("author_model") or "").strip() or None
-            # Validate here so a bad path is a 400 with a clear message, not a
-            # git failure buried in a 500 after the review has started.
-            try:
-                paths = normalize_pathspec(str(payload.get("paths") or ""))
-            except DiffError as exc:
-                raise PipelineError(str(exc)) from exc
-            # Rules arrive as text, never as a path: the UI must not be able to read
-            # arbitrary local files, even though it only listens on loopback.
-            house_rules = str(payload.get("house_rules") or "")
-            if len(house_rules) > MAX_HOUSE_RULES_CHARS * 2:
-                raise PipelineError(
-                    f"house_rules is too long ({len(house_rules)} chars, "
-                    f"limit {MAX_HOUSE_RULES_CHARS * 2})"
-                )
-            out: Path | None = None
-            if payload.get("write_markdown"):
-                raw_out = str(payload.get("out") or "erratumReview.md")
-                # execute_review resolves this against the repo root. Without a
-                # plain-filename check, "../../.ssh/authorized_keys" or an
-                # absolute path would be a legal target for a local page to write.
-                if "/" in raw_out or "\\" in raw_out or raw_out in (".", "..", ""):
-                    raise PipelineError("out must be a plain filename in the repository root")
-                out = Path(raw_out)
-            outcome = execute_review(
-                self.repo_root,
-                diff_spec=diff_spec,
-                mode=mode,
-                max_units=max_units,
-                author_model=author,
-                out=out,
-                registry=self.registry,
-                house_rules=house_rules,
-                paths=paths,
-            )
-            summary = outcome.summary()
-            if outcome.out_path:
-                summary["out_path"] = str(outcome.out_path)
-            return summary
+            return self.execute_prepared(params, progress=progress)
         finally:
-            self._review_lock.release()
+            self.release_review_lock()
 
     def set_status(self, finding_id: str, status: str, reason: str = "") -> dict:
         if not FINDING_ID_RE.match(finding_id):
@@ -478,6 +505,58 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
 
         def _error(self, code: int, message: str) -> None:
             self._json(code, {"error": message})
+
+        def _sse_headers(self) -> None:
+            """Start an event stream. No Content-Length: events follow until done."""
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-store")
+            # Finite one-shot stream: closing after the terminal frame lets the
+            # browser's reader.resolve() instead of waiting forever on keep-alive.
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+
+        def _sse_event(self, kind: str, payload: dict) -> None:
+            """Write one SSE frame; flush so the browser sees progress immediately."""
+            data = json.dumps({"type": kind, **payload}, ensure_ascii=False)
+            self.wfile.write(f"event: {kind}\ndata: {data}\n\n".encode())
+            self.wfile.flush()
+
+        def _stream_review(self, app: WebApp, body: dict) -> None:
+            """Run a review while pushing progress frames over one SSE response.
+
+            Validation and lock contention are answered as ordinary JSON errors
+            *before* the stream starts, so the browser still gets a real 400/409.
+            Once the stream starts, failures travel as an ``error`` event.
+            """
+            try:
+                params = app.prepare_review(body)
+                app.acquire_review_lock()
+            except RuntimeError as exc:  # lock contention
+                self._error(HTTPStatus.CONFLICT, str(exc))
+                return
+            except (PipelineError, ValueError) as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            try:
+                self._sse_headers()
+                self._sse_event("log", {"message": "已连接进度流，准备审查…"})
+                summary = app.execute_prepared(
+                    params, progress=lambda msg: self._sse_event("log", {"message": msg})
+                )
+                self._sse_event("done", summary)
+            except NoChanges as exc:
+                self._sse_event("empty", {"message": str(exc)})
+            except (PipelineError, ValueError) as exc:
+                self._sse_event("error", {"error": str(exc)})
+            except Exception as exc:  # noqa: BLE001 - keep the stream alive, hide local paths
+                print(f"[web] stream review: {type(exc).__name__}: {exc}", file=sys.stderr)
+                self._sse_event("error", {"error": "internal error; see server log"})
+            finally:
+                app.release_review_lock()
 
         def _host_ok(self) -> bool:
             """Stop DNS rebinding: evil.com pointing at 127.0.0.1 is not a local user."""
@@ -560,7 +639,9 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 body = self._body()
-                if path == "/api/review":
+                if path == "/api/review/stream":
+                    self._stream_review(app, body)
+                elif path == "/api/review":
                     self._json(HTTPStatus.OK, app.start_review(body))
                 elif path == "/api/config":
                     self._json(HTTPStatus.OK, app.save_config(body))

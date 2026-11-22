@@ -342,8 +342,10 @@ def execute_review(
                 rejected_category_counts=rejected_counts or None,
                 house_rules=rules.text,
                 sources=sources,
+                progress=say,
             )
         )
+        say("生成报告并写入存储")
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 

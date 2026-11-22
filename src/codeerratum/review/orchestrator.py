@@ -10,6 +10,7 @@ Backward compatible: mode='quick' delegates to the single-model review_unit path
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 
 from ..context import build_context
@@ -46,13 +47,17 @@ async def _review_with(
     run_id: str,
     house_rules: str = "",
     sources: dict[str, str] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[dict[str, list[Finding]], list[dict], list[dict], list[dict]]:
     """Run one model over all units. Returns its findings + rejected + call stats + diags."""
+    say = progress or (lambda _msg: None)
     per_unit: dict[str, list[Finding]] = {}
     rejected: list[dict] = []
     calls: list[dict] = []
     diags_all: list[dict] = []
-    for unit in units:
+    total = len(units)
+    for idx, unit in enumerate(units, 1):
+        say(f"[{spec.model_id}] 审查单元 {idx}/{total} · {unit.primary_file}")
         try:
             findings, rej, completion, diags = await review_unit(
                 provider, spec.model_id, unit, repo_root, run_id, house_rules, sources
@@ -66,6 +71,7 @@ async def _review_with(
                     "error": str(exc),
                 }
             )
+            say(f"[{spec.model_id}] 单元 {idx}/{total} 调用失败：{type(exc).__name__}")
             continue
         per_unit.setdefault(unit.unit_id, []).extend(findings)
         for r in rej:
@@ -83,6 +89,7 @@ async def _review_with(
                 "raw_request_hash": completion.raw_request_hash,
             }
         )
+        say(f"[{spec.model_id}] 单元 {idx}/{total} 完成（{len(findings)} 条发现）")
     return per_unit, rejected, calls, diags_all
 
 
@@ -106,6 +113,7 @@ async def run_review(
     rejected_category_counts: dict[str, int] | None = None,
     house_rules: str = "",
     sources: dict[str, str] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
@@ -118,14 +126,26 @@ async def run_review(
     would start agreeing with the reviewer for the wrong reason, which destroys the
     independence the falsification round exists to provide.
     """
+    say = progress or (lambda _msg: None)
     reviewers, falsifier_spec = registry.route(mode, author_model=author_model)  # type: ignore[arg-type]
+    say(f"启动 {len(reviewers)} 个审查模型并行评审 {len(units)} 个单元")
 
     providers = {m.model_id: _make_provider(m) for m in reviewers}
     tasks = [
-        _review_with(providers[m.model_id], m, units, repo_root, run_id, house_rules, sources)
+        _review_with(
+            providers[m.model_id],
+            m,
+            units,
+            repo_root,
+            run_id,
+            house_rules,
+            sources,
+            progress=say,
+        )
         for m in reviewers
     ]
     results = await asyncio.gather(*tasks)
+    say("所有模型评审完成，开始聚类合并")
 
     per_model_reviews: dict[str, dict[str, list[Finding]]] = {}
     all_rejected: list[dict] = []
@@ -170,6 +190,8 @@ async def run_review(
 
     units_by_id = {u.unit_id: u for u in units}
     targets = [f for f in merged if should_falsify(f)]
+    if targets:
+        say(f"证伪轮：{len(targets)} 条高价值发现交叉验证")
     for f in targets:
         source_models = set(f.source_models)
         source_unit = units_by_id.get(f.unit_id)
@@ -204,10 +226,12 @@ async def run_review(
                     "usage": completion.usage.model_dump(),
                 }
             )
+            say(f"证伪 {chosen_model}：{verdict.verdict} · {f.claim[:40]}")
         except Exception as exc:  # noqa: BLE001
             all_calls.append(
                 {"model": chosen_model, "role": "falsify", "verdict": "error", "error": str(exc)}
             )
+            say(f"证伪 {chosen_model}：调用失败 · {f.claim[:40]}")
 
     # Recompute agreement after falsification and drop fully-refuted findings that
     # were only ever asserted by a single model (a unique claim that got broken).

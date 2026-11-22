@@ -297,6 +297,25 @@
     border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; vertical-align: -2px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
+  /* Live review progress (SSE). */
+  #progressBox {
+    margin-top: 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel-2); overflow: hidden;
+  }
+  #progressBox[hidden] { display: none; }
+  #progressHead {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    font-size: 12.5px; font-weight: 600; border-bottom: 1px solid var(--border);
+  }
+  #progressHead .spinner { color: var(--accent); }
+  #progressLog {
+    margin: 0; padding: 8px 10px; max-height: 190px; overflow-y: auto;
+    font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  #progressLog .ln { padding: 1px 0; }
+  #progressLog .ln.done { color: var(--ok); }
+  #progressLog .ln.err { color: var(--bad); }
   @media (max-width: 860px) {
     .layout { grid-template-columns: 1fr; height: auto; }
     aside.sidebar { border-right: none; border-bottom: 1px solid var(--border); }
@@ -354,6 +373,10 @@
       <div class="hint" id="rulesHint">留空则自动读取 <code>.codeerratum/rules.md</code>（若存在）。规范只会追加，不能覆盖格式与锚点硬规则。</div>
     </details>
     <button class="primary" id="runBtn">运行审查</button>
+    <div id="progressBox" hidden>
+      <div id="progressHead"><span class="spinner"></span><span id="progressTitle">审查进行中…</span></div>
+      <div id="progressLog"></div>
+    </div>
     <div id="models" class="chips"></div>
     <div class="runs-title">历史运行</div>
     <ul id="runs"></ul>
@@ -711,12 +734,84 @@ $("runBtn").onclick = async () => {
   btn.disabled = true;
   const old = btn.innerHTML;
   btn.innerHTML = `<span class="spinner"></span> 审查中…`;
+  const log = $("progressLog");
+  log.innerHTML = "";
+  $("progressBox").hidden = false;
+  const addLine = (text, cls = "") => {
+    const div = document.createElement("div");
+    div.className = "ln" + (cls ? " " + cls : "");
+    div.textContent = text;
+    log.appendChild(div);
+    log.scrollTop = log.scrollHeight;
+  };
+  const finishHead = (text) => {
+    const spin = $("progressHead").querySelector(".spinner");
+    if (spin) spin.remove();
+    $("progressTitle").textContent = text;
+  };
+  let runId = null;
   try {
-    const s = await api("/api/review", { method: "POST", body: JSON.stringify(body) });
-    toast(`完成：${s.findings} 条发现，${s.calls} 次模型调用，均 ${s.latency_ms_avg}ms`);
-    await loadRuns(false);
-    await openRun(s.run_id);
+    // POST body can't go through EventSource, so read the SSE response as a
+    // stream. Same-origin POST keeps the CSRF/Origin guard intact.
+    const res = await fetch("/api/review/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      throw new Error(d.error || res.statusText);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const frames = [];
+    const flushFrames = async () => {
+      for (const frame of frames.splice(0)) {
+        const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+        if (!dataLine) continue;
+        let ev;
+        try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
+        if (ev.type === "log") {
+          addLine(ev.message || "");
+        } else if (ev.type === "empty") {
+          addLine(ev.message || "没有可审查的改动", "done");
+          finishHead("无改动");
+        } else if (ev.type === "error") {
+          addLine("错误：" + (ev.error || "未知错误"), "err");
+          finishHead("审查失败");
+          showError(
+            `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
+            + `审查模式：${body.mode}\n\n${ev.error || "未知错误"}`,
+            "审查失败"
+          );
+        } else if (ev.type === "done") {
+          runId = ev.run_id;
+          addLine(`完成：${ev.findings} 条发现 · ${ev.calls} 次调用 · 均 ${ev.latency_ms_avg}ms`, "done");
+          finishHead("审查完成");
+        }
+      }
+    };
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffer.indexOf("\n\n")) >= 0) {
+        frames.push(buffer.slice(0, cut));
+        buffer = buffer.slice(cut + 2);
+      }
+      await flushFrames();
+    }
+    if (buffer.trim()) { frames.push(buffer); await flushFrames(); }
+    if (runId) {
+      toast("审查完成");
+      await loadRuns(false);
+      await openRun(runId);
+    }
   } catch (e) {
+    addLine("错误：" + e.message, "err");
+    finishHead("审查失败");
     showError(
       `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
       + `审查模式：${body.mode}\n\n${e.message}`,
