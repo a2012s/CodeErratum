@@ -22,6 +22,10 @@ from .executor import review_unit
 from .falsification import falsify_finding, should_falsify
 
 
+class ReviewCancelled(Exception):
+    """The user stopped the run. Distinct from a failure: no error dialog, no report."""
+
+
 def _make_provider(spec: ModelSpec) -> OpenAICompatProvider:
     provider = OpenAICompatProvider(spec.base_url, spec.api_key)
     # family is set per-instance so two OpenAI-compatible endpoints from different
@@ -114,6 +118,7 @@ async def run_review(
     house_rules: str = "",
     sources: dict[str, str] | None = None,
     progress: Callable[[str], None] | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
@@ -127,159 +132,205 @@ async def run_review(
     independence the falsification round exists to provide.
     """
     say = progress or (lambda _msg: None)
-    reviewers, falsifier_spec = registry.route(mode, author_model=author_model)  # type: ignore[arg-type]
-    say(f"启动 {len(reviewers)} 个审查模型并行评审 {len(units)} 个单元")
+    active: set[asyncio.Task] = set()
 
-    providers = {m.model_id: _make_provider(m) for m in reviewers}
-    tasks = [
-        _review_with(
-            providers[m.model_id],
-            m,
-            units,
-            repo_root,
-            run_id,
-            house_rules,
-            sources,
-            progress=say,
-        )
-        for m in reviewers
-    ]
-    results = await asyncio.gather(*tasks)
-    say("所有模型评审完成，开始聚类合并")
+    async def watch_stop() -> None:
+        """Cancel every in-flight model call the moment stop is requested."""
+        while True:
+            if should_stop and should_stop():
+                for task in list(active):
+                    if not task.done():
+                        task.cancel()
+                return
+            await asyncio.sleep(0.15)
 
-    per_model_reviews: dict[str, dict[str, list[Finding]]] = {}
-    all_rejected: list[dict] = []
-    all_calls: list[dict] = []
-    all_diags: list[dict] = []
-    for m, (per_unit, rej, calls, diags) in zip(reviewers, results, strict=True):
-        per_model_reviews[m.model_id] = per_unit
-        all_rejected.extend(rej)
-        all_calls.extend(calls)
-        all_diags.extend(diags)
+    watcher = asyncio.create_task(watch_stop())
+    try:
+        reviewers, falsifier_spec = registry.route(mode, author_model=author_model)  # type: ignore[arg-type]
+        say(f"启动 {len(reviewers)} 个审查模型并行评审 {len(units)} 个单元")
 
-    if mode == "quick":
-        merged = _flatten(per_model_reviews[reviewers[0].model_id], reviewers[0].model_id)
-        for f in merged:
-            f.agreement = "unverified" if not f.verdicts else "unique"
-        merged = rank_findings(merged, rejected_category_counts)
-        return (
-            FindingCollection(
-                run_id=run_id,
-                repo=str(repo_root),
-                commit="",
-                model_id=reviewers[0].model_id,
-                spec_level="L1",
-                mode="quick",
-                reviewer_models=[reviewers[0].model_id],
-                findings=merged,
-                rejected=all_rejected,
-            ),
-            all_calls,
-            all_diags,
-        )
+        providers = {m.model_id: _make_provider(m) for m in reviewers}
+        review_tasks = [
+            asyncio.create_task(
+                _review_with(
+                    providers[m.model_id],
+                    m,
+                    units,
+                    repo_root,
+                    run_id,
+                    house_rules,
+                    sources,
+                    progress=say,
+                )
+            )
+            for m in reviewers
+        ]
+        active.update(review_tasks)
+        results = await asyncio.gather(*review_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                if isinstance(result, asyncio.CancelledError):
+                    raise ReviewCancelled("审查已被用户停止") from result
+                raise result
+        say("所有模型评审完成，开始聚类合并")
 
-    # Multi-model: cluster + merge across models.
-    per_model_flat = {mid: _flatten(per_unit, mid) for mid, per_unit in per_model_reviews.items()}
-    merged, raw_counts = cluster_findings(per_model_flat)
+        per_model_reviews: dict[str, dict[str, list[Finding]]] = {}
+        all_rejected: list[dict] = []
+        all_calls: list[dict] = []
+        all_diags: list[dict] = []
+        for m, (per_unit, rej, calls, diags) in zip(reviewers, results, strict=True):
+            per_model_reviews[m.model_id] = per_unit
+            all_rejected.extend(rej)
+            all_calls.extend(calls)
+            all_diags.extend(diags)
 
-    # Falsification: a third vendor if available, else cross-falsify between reviewers.
-    if falsifier_spec is not None:
-        falsifier_provider = _make_provider(falsifier_spec)
-    else:
-        falsifier_provider = None
+        if mode == "quick":
+            merged = _flatten(per_model_reviews[reviewers[0].model_id], reviewers[0].model_id)
+            for f in merged:
+                f.agreement = "unverified" if not f.verdicts else "unique"
+            merged = rank_findings(merged, rejected_category_counts)
+            return (
+                FindingCollection(
+                    run_id=run_id,
+                    repo=str(repo_root),
+                    commit="",
+                    model_id=reviewers[0].model_id,
+                    spec_level="L1",
+                    mode="quick",
+                    reviewer_models=[reviewers[0].model_id],
+                    findings=merged,
+                    rejected=all_rejected,
+                ),
+                all_calls,
+                all_diags,
+            )
 
-    units_by_id = {u.unit_id: u for u in units}
-    targets = [f for f in merged if should_falsify(f)]
-    if targets:
-        say(f"证伪轮：{len(targets)} 条高价值发现交叉验证")
-    for f in targets:
-        source_models = set(f.source_models)
-        source_unit = units_by_id.get(f.unit_id)
-        context, facts = _context_for(source_unit, repo_root, sources) if source_unit else ("", "")
-        # Pick a falsifier from a family not among the sources; prefer the dedicated
-        # third vendor, otherwise the reviewer with a different family than source.
-        chosen_provider: Provider | None = None
-        chosen_model = ""
-        if falsifier_spec is not None and falsifier_spec.model_id not in source_models:
-            chosen_provider = falsifier_provider
-            chosen_model = falsifier_spec.model_id
+        # Multi-model: cluster + merge across models.
+        per_model_flat = {
+            mid: _flatten(per_unit, mid) for mid, per_unit in per_model_reviews.items()
+        }
+        merged, raw_counts = cluster_findings(per_model_flat)
+
+        # Falsification: a third vendor if available, else cross-falsify between reviewers.
+        if falsifier_spec is not None:
+            falsifier_provider = _make_provider(falsifier_spec)
         else:
-            for m in reviewers:
-                if m.model_id not in source_models:
-                    chosen_provider = providers[m.model_id]
-                    chosen_model = m.model_id
-                    break
-        if chosen_provider is None:
-            continue  # every reviewer reported it and no third vendor — leave agreement as-is
-        try:
-            verdict, completion = await falsify_finding(
-                chosen_provider, chosen_model, f, context, facts
-            )
-            all_calls.append(
-                {
-                    "model": chosen_model,
-                    "family": chosen_provider.family,
-                    "unit_id": f.unit_id,
-                    "role": "falsify",
-                    "verdict": verdict.verdict,
-                    "latency_ms": completion.latency_ms,
-                    "usage": completion.usage.model_dump(),
-                }
-            )
-            say(f"证伪 {chosen_model}：{verdict.verdict} · {f.claim[:40]}")
-        except Exception as exc:  # noqa: BLE001
-            all_calls.append(
-                {"model": chosen_model, "role": "falsify", "verdict": "error", "error": str(exc)}
-            )
-            say(f"证伪 {chosen_model}：调用失败 · {f.claim[:40]}")
+            falsifier_provider = None
 
-    # Recompute agreement after falsification and drop fully-refuted findings that
-    # were only ever asserted by a single model (a unique claim that got broken).
-    from .aggregator import agreement as calc_agreement
-
-    surviving: list[Finding] = []
-    for f in merged:
-        f.agreement = calc_agreement(f.verdicts)
-        refutes = [v for v in f.verdicts if v.role == "refute"]
-        asserts = [v for v in f.verdicts if v.role in ("assert", "confirm")]
-        if len(sources_of(f)) <= 1 and refutes and not any(v.role == "confirm" for v in f.verdicts):
-            # single-source claim that the falsifier broke with a counterexample
-            all_rejected.append(
-                {
-                    "unit_id": f.unit_id,
-                    "model": ",".join(f.source_models),
-                    "reason": "refuted",
-                    "claim": f.claim,
-                }
+        units_by_id = {u.unit_id: u for u in units}
+        targets = [f for f in merged if should_falsify(f)]
+        if targets:
+            say(f"证伪轮：{len(targets)} 条高价值发现交叉验证")
+        for f in targets:
+            if should_stop and should_stop():
+                raise ReviewCancelled("审查已被用户停止")
+            source_models = set(f.source_models)
+            source_unit = units_by_id.get(f.unit_id)
+            context, facts = (
+                _context_for(source_unit, repo_root, sources) if source_unit else ("", "")
             )
-            continue
-        if not asserts and not refutes:
-            continue
-        surviving.append(f)
+            # Pick a falsifier from a family not among the sources; prefer the dedicated
+            # third vendor, otherwise the reviewer with a different family than source.
+            chosen_provider: Provider | None = None
+            chosen_model = ""
+            if falsifier_spec is not None and falsifier_spec.model_id not in source_models:
+                chosen_provider = falsifier_provider
+                chosen_model = falsifier_spec.model_id
+            else:
+                for m in reviewers:
+                    if m.model_id not in source_models:
+                        chosen_provider = providers[m.model_id]
+                        chosen_model = m.model_id
+                        break
+            if chosen_provider is None:
+                continue  # every reviewer reported it and no third vendor — leave agreement as-is
+            try:
+                falsify_task = asyncio.create_task(
+                    falsify_finding(chosen_provider, chosen_model, f, context, facts)
+                )
+                active.add(falsify_task)
+                verdict, completion = await falsify_task
+                all_calls.append(
+                    {
+                        "model": chosen_model,
+                        "family": chosen_provider.family,
+                        "unit_id": f.unit_id,
+                        "role": "falsify",
+                        "verdict": verdict.verdict,
+                        "latency_ms": completion.latency_ms,
+                        "usage": completion.usage.model_dump(),
+                    }
+                )
+                say(f"证伪 {chosen_model}：{verdict.verdict} · {f.claim[:40]}")
+            except Exception as exc:  # noqa: BLE001
+                all_calls.append(
+                    {
+                        "model": chosen_model,
+                        "role": "falsify",
+                        "verdict": "error",
+                        "error": str(exc),
+                    }
+                )
+                say(f"证伪 {chosen_model}：调用失败 · {f.claim[:40]}")
 
-    surviving = rank_findings(surviving, rejected_category_counts)
+        # Recompute agreement after falsification and drop fully-refuted findings that
+        # were only ever asserted by a single model (a unique claim that got broken).
+        from .aggregator import agreement as calc_agreement
 
-    comparison = {
-        "mode": mode,
-        "raw_counts": raw_counts,
-        "after_clustering": len(merged),
-        "after_falsification": len(surviving),
-        "zones": {k: len(v) for k, v in _zone_split(surviving).items()},
-    }
-    collection = FindingCollection(
-        run_id=run_id,
-        repo=str(repo_root),
-        commit="",
-        model_id=",".join(m.model_id for m in reviewers),
-        spec_level="L1",
-        mode=mode,
-        reviewer_models=[m.model_id for m in reviewers],
-        falsifier_model=falsifier_spec.model_id if falsifier_spec else None,
-        comparison=comparison,
-        findings=surviving,
-        rejected=all_rejected,
-    )
-    return collection, all_calls, all_diags
+        surviving: list[Finding] = []
+        for f in merged:
+            f.agreement = calc_agreement(f.verdicts)
+            refutes = [v for v in f.verdicts if v.role == "refute"]
+            asserts = [v for v in f.verdicts if v.role in ("assert", "confirm")]
+            if (
+                len(sources_of(f)) <= 1
+                and refutes
+                and not any(v.role == "confirm" for v in f.verdicts)
+            ):
+                # single-source claim that the falsifier broke with a counterexample
+                all_rejected.append(
+                    {
+                        "unit_id": f.unit_id,
+                        "model": ",".join(f.source_models),
+                        "reason": "refuted",
+                        "claim": f.claim,
+                    }
+                )
+                continue
+            if not asserts and not refutes:
+                continue
+            surviving.append(f)
+
+        surviving = rank_findings(surviving, rejected_category_counts)
+
+        comparison = {
+            "mode": mode,
+            "raw_counts": raw_counts,
+            "after_clustering": len(merged),
+            "after_falsification": len(surviving),
+            "zones": {k: len(v) for k, v in _zone_split(surviving).items()},
+        }
+        collection = FindingCollection(
+            run_id=run_id,
+            repo=str(repo_root),
+            commit="",
+            model_id=",".join(m.model_id for m in reviewers),
+            spec_level="L1",
+            mode=mode,
+            reviewer_models=[m.model_id for m in reviewers],
+            falsifier_model=falsifier_spec.model_id if falsifier_spec else None,
+            comparison=comparison,
+            findings=surviving,
+            rejected=all_rejected,
+        )
+        return collection, all_calls, all_diags
+    except asyncio.CancelledError as exc:
+        if should_stop and should_stop():
+            raise ReviewCancelled("审查已被用户停止") from exc
+        raise
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
 
 
 def sources_of(f: Finding) -> list[str]:

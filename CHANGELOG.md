@@ -12,6 +12,14 @@
 
 ### Added
 
+- **审查中停止**：进度面板标题栏新增「停止审查」按钮，点一次即向服务端发 `POST /api/review/stop`。
+  WebApp 用线程安全 Event 传递停止信号，编排层在 asyncio 循环内轮询并 cancel 所有在途模型调用
+  （httpx 请求被真正中断，不会等几十秒才响应），SSE 推 `cancelled` 帧收尾，状态记为 `cancelled`
+  而非失败——不弹错误框、不写半截报告。重复点击幂等，无审查可停时返回 409，跨标签页可停同一场审查。
+  新增 4 项测试（含在途调用确实被取消的单元验证）。
+- **token 消耗统计**：每次模型调用的 usage 本来就逐条采集，现在汇总进运行 summary 与 SSE `done` 帧：
+  输入 / 输出 / 缓存 token 总量 + 按模型分解（调用次数与各自小计），进度面板完成后逐行显示。
+  `GET /api/review/status` 也带上最后一次运行的 token 汇总，跨标签页跟踪时同样可见。新增 2 项测试。
 - **审查进度实时推送（SSE）**：点「运行审查」后侧栏展开进度日志，逐条显示 diff 切分、模型/单元
   评审、证伪、报告落盘，不再只靠一个转圈干等。新增 `POST /api/review/stream` 走 `text/event-stream`，
   进度回调贯穿 pipeline → orchestrator（每模型每单元完成即上报）；`log` / `done` / `empty` / `error`

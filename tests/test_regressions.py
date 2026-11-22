@@ -586,6 +586,7 @@ def test_pipeline_reads_the_diff_revisions_blobs(tmp_path, monkeypatch):
         house_rules="",
         sources=None,
         progress=None,
+        should_stop=None,
     ):
         captured["sources"] = sources
         return (
@@ -642,6 +643,7 @@ def test_rejected_history_reaches_the_ranker(tmp_path, monkeypatch):
         house_rules="",
         sources=None,
         progress=None,
+        should_stop=None,
     ):
         captured["counts"] = rejected_category_counts
         return (

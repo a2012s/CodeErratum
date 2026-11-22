@@ -308,6 +308,9 @@
     font-size: 12.5px; font-weight: 600; border-bottom: 1px solid var(--border);
   }
   #progressHead .spinner { color: var(--accent); }
+  #stopBtn { margin-left: auto; font-size: 11.5px; padding: 3px 9px; }
+  #stopBtn[hidden] { display: none; }
+  #stopBtn:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
   #progressLog {
     margin: 0; padding: 8px 10px; max-height: 190px; overflow-y: auto;
     font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -374,7 +377,10 @@
     </details>
     <button class="primary" id="runBtn">运行审查</button>
     <div id="progressBox" hidden>
-      <div id="progressHead"><span class="spinner"></span><span id="progressTitle">审查进行中…</span></div>
+      <div id="progressHead">
+        <span class="spinner"></span><span id="progressTitle">审查进行中…</span>
+        <button class="ghost" id="stopBtn" hidden>停止审查</button>
+      </div>
       <div id="progressLog"></div>
     </div>
     <div id="models" class="chips"></div>
@@ -753,7 +759,38 @@ function setRunBusy(busy) {
   const btn = $("runBtn");
   btn.disabled = busy;
   btn.innerHTML = busy ? `<span class="spinner"></span> 审查中…` : "运行审查";
+  const stop = $("stopBtn");
+  stop.hidden = !busy;
+  stop.disabled = false;
+  stop.textContent = "停止审查";
 }
+function tokenSummary(tk) {
+  if (!tk || tk.total == null) return [];
+  const n = (v) => Number(v || 0).toLocaleString("zh-CN");
+  const lines = [
+    `token 消耗：${n(tk.input)} 输入 + ${n(tk.output)} 输出 = ${n(tk.total)} 合计`
+    + (tk.cached ? `（含缓存 ${n(tk.cached)}）` : ""),
+  ];
+  for (const [model, r] of Object.entries(tk.by_model || {})) {
+    lines.push(`  ${model}：${r.calls} 次 · ${n(r.input)} 入 / ${n(r.output)} 出 = ${n(r.total)}`);
+  }
+  return lines;
+}
+$("stopBtn").onclick = async () => {
+  const b = $("stopBtn");
+  b.disabled = true;
+  b.textContent = "停止中…";
+  try {
+    const r = await api("/api/review/stop", { method: "POST", body: "{}" });
+    progressAddLine(r.message || "已请求停止", "err");
+    progressSetRunning("正在停止…");
+  } catch (e) {
+    // The review may have finished between the click and the request.
+    progressAddLine("停止失败：" + e.message, "err");
+    b.disabled = false;
+    b.textContent = "停止审查";
+  }
+};
 
 async function pollReviewStatus() {
   if (reviewStreaming) return;  // SSE is this tab's source of truth
@@ -766,7 +803,13 @@ async function pollReviewStatus() {
     const p = st.params || {};
     const scope = [p.diff, p.paths ? `路径 ${p.paths}` : ""].filter(Boolean).join(" · ");
     const secs = st.elapsed_s != null ? ` · ${st.elapsed_s}s` : "";
-    progressSetRunning(`审查中…${secs}${scope ? ` · ${scope}` : ""}`);
+    if (st.status === "stopping") {
+      progressSetRunning("正在停止…");
+      $("stopBtn").disabled = true;
+      $("stopBtn").textContent = "停止中…";
+    } else {
+      progressSetRunning(`审查中…${secs}${scope ? ` · ${scope}` : ""}`);
+    }
     const log = $("progressLog");
     const msgs = st.messages || [];
     // Only rebuild when the count changes, so polling doesn't reset scroll.
@@ -778,10 +821,14 @@ async function pollReviewStatus() {
     reviewTracking = false;
     setRunBusy(false);
     if (st.status === "done") {
+      tokenSummary(st.tokens).forEach((l) => progressAddLine(l, "done"));
       progressFinishHead("审查完成");
       loadRuns(false);
     } else if (st.status === "empty") {
       progressFinishHead("无改动");
+    } else if (st.status === "cancelled") {
+      progressAddLine("审查已停止", "done");
+      progressFinishHead("审查已停止");
     } else if (st.status === "error") {
       progressFinishHead("审查失败");
     }
@@ -856,6 +903,10 @@ $("runBtn").onclick = async () => {
           streamCompleted = true;
           progressAddLine(ev.message || "没有可审查的改动", "done");
           progressFinishHead("无改动");
+        } else if (ev.type === "cancelled") {
+          streamCompleted = true;
+          progressAddLine(ev.message || "审查已停止", "done");
+          progressFinishHead("审查已停止");
         } else if (ev.type === "error") {
           streamCompleted = true;
           progressAddLine("错误：" + (ev.error || "未知错误"), "err");
@@ -869,6 +920,7 @@ $("runBtn").onclick = async () => {
           streamCompleted = true;
           runId = ev.run_id;
           progressAddLine(`完成：${ev.findings} 条发现 · ${ev.calls} 次调用 · 均 ${ev.latency_ms_avg}ms`, "done");
+          tokenSummary(ev.tokens).forEach((l) => progressAddLine(l, "done"));
           progressFinishHead("审查完成");
         }
       }

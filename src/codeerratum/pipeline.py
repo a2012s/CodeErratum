@@ -23,7 +23,13 @@ from .config_store import load as load_saved_config
 from .ingest import DiffError, get_commit, get_diff, new_side_sources, split_diff
 from .models import FindingCollection, ModelRegistry, ReviewUnit
 from .report import render_markdown
-from .review import MAX_HOUSE_RULES_CHARS, run_review, sanitize_house_rules, truncate_house_rules
+from .review import (
+    MAX_HOUSE_RULES_CHARS,
+    ReviewCancelled,
+    run_review,
+    sanitize_house_rules,
+    truncate_house_rules,
+)
 from .spec import detect as detect_spec_level
 from .store import ReviewStore
 
@@ -72,6 +78,40 @@ class ReviewOutcome:
             return 0.0
         return sum(c.get("latency_ms", 0) or 0 for c in self.calls) / len(self.calls)
 
+    def token_totals(self) -> dict:
+        """Sum per-call usage into one report, split by model for cost attribution.
+
+        Usage was already captured on every call (``completion.usage.model_dump()``);
+        it was just never rolled up. Cached tokens are counted inside input tokens
+        by the providers, so they are reported separately but not added again.
+        """
+        total_in = total_out = total_cached = 0
+        by_model: dict[str, dict[str, int]] = {}
+        for call in self.calls:
+            usage = call.get("usage") or {}
+            i = int(usage.get("input_tokens", 0) or 0)
+            o = int(usage.get("output_tokens", 0) or 0)
+            cached = int(usage.get("cached_tokens", 0) or 0)
+            total_in += i
+            total_out += o
+            total_cached += cached
+            model = str(call.get("model") or "unknown")
+            row = by_model.setdefault(
+                model, {"input": 0, "output": 0, "cached": 0, "total": 0, "calls": 0}
+            )
+            row["input"] += i
+            row["output"] += o
+            row["cached"] += cached
+            row["total"] += i + o
+            row["calls"] += 1
+        return {
+            "input": total_in,
+            "output": total_out,
+            "cached": total_cached,
+            "total": total_in + total_out,
+            "by_model": by_model,
+        }
+
     def summary(self) -> dict:
         return {
             "run_id": self.run_id,
@@ -87,6 +127,7 @@ class ReviewOutcome:
             "calls": len(self.calls),
             "static_diags": len(self.diags),
             "latency_ms_avg": round(self.latency_ms_avg, 1),
+            "tokens": self.token_totals(),
             "zones": {k: len(v) for k, v in self.collection.zoned().items()},
             "comparison": self.collection.comparison,
             "notes": self.collection.notes,
@@ -232,6 +273,7 @@ def execute_review(
     progress: Callable[[str], None] | None = None,
     house_rules: str = "",
     paths: str = "",
+    should_stop: Callable[[], bool] | None = None,
 ) -> ReviewOutcome:
     """Run the whole pipeline and persist artifacts + feedback rows.
 
@@ -239,9 +281,19 @@ def execute_review(
     directory always keeps its own ``review.md`` so the UI can serve a run
     without touching the working tree. ``paths`` narrows the diff to a git
     pathspec (e.g. ``src/api``), so a review can target one folder without
-    staging changes first.
+    staging changes first. ``should_stop`` is polled by the orchestrator; when
+    it turns true, in-flight model calls are cancelled and ReviewCancelled is
+    raised instead of persisting a partial report.
     """
-    say = progress or (lambda _msg: None)
+    emit = progress or (lambda _msg: None)
+
+    def say(message: str) -> None:
+        # Check at every lifecycle message too, not just inside model calls —
+        # diff splitting / report writing have no other cancellation point.
+        if should_stop and should_stop():
+            raise ReviewCancelled("审查已被停止")
+        emit(message)
+
     repo_root = repo_root.resolve()
     if not (repo_root / ".git").exists():
         raise NotARepository(f"{repo_root} is not a git repository")
@@ -343,6 +395,7 @@ def execute_review(
                 house_rules=rules.text,
                 sources=sources,
                 progress=say,
+                should_stop=should_stop,
             )
         )
         say("生成报告并写入存储")

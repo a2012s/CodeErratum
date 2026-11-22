@@ -8,7 +8,7 @@ from .executor import (
     truncate_house_rules,
 )
 from .falsification import LLMFalsify, falsify_finding, should_falsify
-from .orchestrator import run_review
+from .orchestrator import ReviewCancelled, run_review
 from .schema import LLMReview
 
 __all__ = [
@@ -26,4 +26,5 @@ __all__ = [
     "cluster_findings",
     "rank_findings",
     "run_review",
+    "ReviewCancelled",
 ]

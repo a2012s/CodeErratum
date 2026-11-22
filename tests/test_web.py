@@ -716,3 +716,135 @@ def test_ui_tracks_external_review_and_busy_guard():
     assert "if (preflight && preflight.running)" in html  # second tab guard
     assert "res.status === 409" in html  # race -> track, not error modal
     assert "reviewStreaming = true" in html
+
+
+def test_token_totals_rolls_up_usage_by_model():
+    from codeerratum.pipeline import ReviewOutcome
+
+    outcome = ReviewOutcome(
+        run_id="r",
+        run_dir=Path("/tmp"),
+        collection=FindingCollection(
+            run_id="r", repo="x", commit="", model_id="m1,m2", spec_level="L1"
+        ),
+        units_total=3,
+        units_selected=3,
+        calls=[
+            {
+                "model": "m1",
+                "usage": {"input_tokens": 100, "output_tokens": 20, "cached_tokens": 10},
+            },
+            {"model": "m1", "usage": {"input_tokens": 50, "output_tokens": 30, "cached_tokens": 0}},
+            {"model": "m2", "usage": {"input_tokens": 10, "output_tokens": 5, "cached_tokens": 0}},
+        ],
+    )
+    tokens = outcome.token_totals()
+    assert (tokens["input"], tokens["output"], tokens["cached"], tokens["total"]) == (
+        160,
+        55,
+        10,
+        215,
+    )
+    assert tokens["by_model"]["m1"] == {
+        "input": 150,
+        "output": 50,
+        "cached": 10,
+        "total": 200,
+        "calls": 2,
+    }
+    assert tokens["by_model"]["m2"]["total"] == 15
+    assert outcome.summary()["tokens"] == tokens
+
+
+def test_stop_review_signals_running_review_and_tracks_state(client):
+    app = client.app
+    app.acquire_review_lock({"diff_spec": "HEAD", "mode": "dual", "max_units": 5})
+    try:
+        assert not app._stop_event.is_set()
+        resp = client.post("/api/review/stop", json={})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+        assert app._stop_event.is_set()
+
+        st = client.get("/api/review/status").json()
+        assert st["running"] is True
+        assert st["status"] == "stopping"
+        assert any("已请求停止" in m for m in st["messages"])
+
+        # Repeated clicks are idempotent — one message, no duplicate state churn.
+        client.post("/api/review/stop", json={})
+        st = client.get("/api/review/status").json()
+        assert sum("已请求停止" in m for m in st["messages"]) == 1
+    finally:
+        app.release_review_lock(status="cancelled")
+
+    st = client.get("/api/review/status").json()
+    assert st["status"] == "cancelled"
+    assert st["running"] is False
+    # Stopping with nothing running is a real 409, not a silent success.
+    assert client.post("/api/review/stop", json={}).status_code == 409
+
+
+def test_review_stream_emits_cancelled_frame(client, monkeypatch):
+    from codeerratum.review import ReviewCancelled
+
+    def boom(*_args, **_kwargs):
+        raise ReviewCancelled("审查已被用户停止")
+
+    monkeypatch.setattr(client.app, "execute_prepared", boom)
+    with client.stream("POST", "/api/review/stream", json={"diff": "HEAD"}) as resp:
+        assert resp.status_code == 200
+        body = resp.read().decode("utf-8")
+    assert "event: cancelled" in body
+    assert "审查已被用户停止" in body
+    assert "event: error" not in body
+    assert client.get("/api/review/status").json()["status"] == "cancelled"
+
+
+def test_run_review_cancels_inflight_model_calls(monkeypatch, tmp_path):
+    """The stop flag reaches inside asyncio and cancels a call already in flight."""
+    import asyncio
+    import threading
+
+    import codeerratum.review.orchestrator as orch
+    from codeerratum.review import ReviewCancelled
+
+    class Spec:
+        model_id = "slow-model"
+
+    class Registry:
+        def route(self, mode, author_model=None):
+            return [Spec()], None
+
+    async def slow_review(*_args, **_kwargs):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(orch, "_make_provider", lambda _spec: object())
+    monkeypatch.setattr(orch, "_review_with", slow_review)
+    stop = threading.Event()
+
+    async def scenario():
+        task = asyncio.create_task(
+            orch.run_review(Registry(), "quick", [], tmp_path, "r", should_stop=stop.is_set)
+        )
+        await asyncio.sleep(0.4)
+        stop.set()
+        try:
+            await asyncio.wait_for(task, timeout=3)
+        except ReviewCancelled:
+            return True
+        return False
+
+    assert asyncio.run(scenario()) is True
+
+
+def test_ui_exposes_stop_button_and_token_totals():
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="stopBtn"' in html
+    assert 'api("/api/review/stop"' in html
+    assert 'ev.type === "cancelled"' in html
+    assert 'st.status === "cancelled"' in html
+    assert "tokenSummary(ev.tokens)" in html
+    assert "token 消耗" in html

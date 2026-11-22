@@ -38,6 +38,7 @@ from ..pipeline import (
     STATE_DIR,
     NoChanges,
     PipelineError,
+    ReviewCancelled,
     execute_review,
     find_repo_root,
     resolve_house_rules,
@@ -59,6 +60,10 @@ class WebApp:
         self.repo_root = repo_root.resolve()
         self.registry = registry
         self._review_lock = threading.Lock()
+        # Thread-safe stop flag. The orchestrator polls it from inside its own
+        # asyncio loop and cancels in-flight model calls; a POST from any tab can
+        # set it without touching that loop from the wrong thread.
+        self._stop_event = threading.Event()
         # Shared progress state: any client can see the one running review, so a
         # second tab (or a stale request) knows the button must read "审查中".
         self._state_lock = threading.Lock()
@@ -70,6 +75,7 @@ class WebApp:
             "finished_at": None,
             "run_id": None,
             "params": {},
+            "tokens": None,
         }
 
     @property
@@ -465,6 +471,7 @@ class WebApp:
     def acquire_review_lock(self, params: dict | None = None) -> None:
         if not self._review_lock.acquire(blocking=False):
             raise RuntimeError("已有审查正在进行中，请等待其完成后再运行")
+        self._stop_event.clear()
         with self._state_lock:
             self._review_state.update(
                 {
@@ -481,17 +488,36 @@ class WebApp:
                         "max_units": (params or {}).get("max_units", 10),
                         "paths": (params or {}).get("paths", ""),
                     },
+                    "tokens": None,
                 }
             )
 
-    def release_review_lock(self, status: str = "done", run_id: str | None = None) -> None:
+    def release_review_lock(
+        self,
+        status: str = "done",
+        run_id: str | None = None,
+        tokens: dict | None = None,
+    ) -> None:
         with self._state_lock:
             self._review_state["running"] = False
             self._review_state["status"] = status
             self._review_state["finished_at"] = time.monotonic()
             if run_id:
                 self._review_state["run_id"] = run_id
+            if tokens is not None:
+                self._review_state["tokens"] = tokens
         self._review_lock.release()
+
+    def stop_review(self) -> dict:
+        """Ask the one running review to stop. Any tab may call this."""
+        with self._state_lock:
+            if not self._review_state["running"]:
+                raise RuntimeError("当前没有正在进行的审查")
+            self._stop_event.set()
+            if self._review_state["status"] != "stopping":
+                self._review_state["status"] = "stopping"
+                self._review_state["messages"].append("已请求停止，正在中断模型调用…")
+        return {"ok": True, "message": "已请求停止审查"}
 
     def execute_prepared(self, params: dict, progress=None) -> dict:
         def both(msg: str) -> None:
@@ -510,6 +536,7 @@ class WebApp:
             house_rules=params["house_rules"],
             paths=params["paths"],
             progress=both,
+            should_stop=self._stop_event.is_set,
         )
         summary = outcome.summary()
         if outcome.out_path:
@@ -519,19 +546,23 @@ class WebApp:
     def start_review(self, payload: dict, progress=None) -> dict:
         params = self.prepare_review(payload)
         self.acquire_review_lock(params)
-        final_status, run_id = "done", None
+        final_status, run_id, final_tokens = "done", None, None
         try:
             summary = self.execute_prepared(params, progress=progress)
             run_id = summary.get("run_id")
+            final_tokens = summary.get("tokens")
             return summary
         except NoChanges:
             final_status = "empty"
             raise
+        except ReviewCancelled:
+            final_status = "cancelled"
+            return {"cancelled": True, "error": "审查已被用户停止"}
         except Exception:
             final_status = "error"
             raise
         finally:
-            self.release_review_lock(status=final_status, run_id=run_id)
+            self.release_review_lock(status=final_status, run_id=run_id, tokens=final_tokens)
 
     def set_status(self, finding_id: str, status: str, reason: str = "") -> dict:
         if not FINDING_ID_RE.match(finding_id):
@@ -623,7 +654,7 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
             except (PipelineError, ValueError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
-            final_status, final_run_id = "done", None
+            final_status, final_run_id, final_tokens = "done", None, None
             try:
                 self._sse_headers()
                 self._sse_event("log", {"message": "已连接进度流，准备审查…"})
@@ -631,7 +662,11 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     params, progress=lambda msg: self._sse_event("log", {"message": msg})
                 )
                 final_run_id = summary.get("run_id")
+                final_tokens = summary.get("tokens")
                 self._sse_event("done", summary)
+            except ReviewCancelled as exc:
+                final_status = "cancelled"
+                self._sse_event("cancelled", {"message": str(exc) or "审查已被用户停止"})
             except NoChanges as exc:
                 final_status = "empty"
                 self._sse_event("empty", {"message": str(exc)})
@@ -643,7 +678,9 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 print(f"[web] stream review: {type(exc).__name__}: {exc}", file=sys.stderr)
                 self._sse_event("error", {"error": "internal error; see server log"})
             finally:
-                app.release_review_lock(status=final_status, run_id=final_run_id)
+                app.release_review_lock(
+                    status=final_status, run_id=final_run_id, tokens=final_tokens
+                )
 
         def _host_ok(self) -> bool:
             """Stop DNS rebinding: evil.com pointing at 127.0.0.1 is not a local user."""
@@ -730,6 +767,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 body = self._body()
                 if path == "/api/review/stream":
                     self._stream_review(app, body)
+                elif path == "/api/review/stop":
+                    self._json(HTTPStatus.OK, app.stop_review())
                 elif path == "/api/review":
                     self._json(HTTPStatus.OK, app.start_review(body))
                 elif path == "/api/config":
