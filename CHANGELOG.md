@@ -26,6 +26,12 @@
 
 ### Fixed
 
+- **错误提示改为模态对话框**：原先所有错误走 2~5 秒自动消失的 toast，看不清也复制不了。
+  现在错误统一进入带遮罩的对话框，需点「关闭」（或 Esc / 点遮罩）才消失；错误文本框可选中，
+  另有「复制错误」按钮。审查失败附带 diff 范围、路径与模式，模型检测失败列出每个端点原因。
+- **单提交仓库默认 diff 报错**：UI 输入框默认 `HEAD~1`，仓库只有一个提交时 git 直接报
+  `fatal: ambiguous argument 'HEAD~1'`。默认值改为 `HEAD`（本地未提交改动），
+  后端遇到该情形给出中文提示并保留原始 git 错误供复制。新增 2 项测试。
 - **模型画像重复计数**：`save_run` 与 `save_comparison` 各自写一遍 `model_profile`，
   dual/committee 下每次运行的 `n_assert` 被算两遍；且证伪轮的 `confirm` 仍记在证伪者头上，
   一个从不提交发现的模型会拿到 100% precision。现在 `update_profiles` 是唯一写入者，
