@@ -223,6 +223,20 @@
   }
   .recent-repo:hover { border-color: var(--accent); }
   .recent-repo .go { margin-left: auto; color: var(--accent); flex: none; }
+  #dropOverlay {
+    position: fixed; inset: 0; z-index: 60; display: none;
+    align-items: center; justify-content: center;
+    background: rgba(20,24,30,.55); backdrop-filter: blur(2px);
+  }
+  #dropOverlay.show { display: flex; }
+  #dropOverlay .box {
+    border: 2px dashed var(--accent); border-radius: 16px;
+    background: var(--panel); color: var(--text); padding: 36px 52px;
+    font-size: 18px; font-weight: 600; text-align: center;
+    box-shadow: 0 12px 40px rgba(0,0,0,.25);
+  }
+  #dropOverlay .box .sub { font-size: 13px; color: var(--muted); font-weight: 400; margin-top: 8px; }
+  #dropMatches .recent-repo { overflow-wrap: anywhere; }
   table.cfg { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 8px; }
   table.cfg th { font-size: 11.5px; font-weight: 500; color: var(--muted); text-align: left; }
   table.cfg th:nth-child(1) { width: 25%; }
@@ -352,6 +366,9 @@
   <h3>模块文档 · 签名漂移</h3>
   <div id="docsBody"></div>
 </aside>
+<div id="dropOverlay"><div class="box">松开以定位 git 仓库
+  <div class="sub">按文件夹名在本机查找，不上传任何文件</div>
+</div></div>
 <div id="toast"></div>
 
 <script>
@@ -803,13 +820,19 @@ function renderRepoDrawer() {
   const recent = recentRepos().filter((p) => p !== cur);
   const parts = [
     `<div class="cfg-note">当前仓库：<code>${esc(cur)}</code><br>
-      浏览器不允许网页读取文件夹选择器，因此请粘贴本地绝对路径（支持 <code>~</code>）。
+      三种方式选仓库：① 点「浏览本地…」弹出系统文件夹选择器；
+      ② 把文件夹直接拖到本窗口；③ 粘贴绝对路径（支持 <code>~</code>）。
       填仓库内任意子目录会自动定位到 git 根目录。切换只影响当前服务进程，不会改动磁盘上的代码。</div>`,
     `<div class="field" style="margin:14px 0 8px">
-      <label for="repoPath">本地仓库绝对路径</label>
-      <input id="repoPath" placeholder="/Users/me/my-project 或 ~/my-project" spellcheck="false">
+      <label for="repoPath">本地仓库路径</label>
+      <input id="repoPath" placeholder="点「浏览本地」或粘贴 /Users/me/my-project" spellcheck="false">
+      <div class="hint">拖拽只暴露文件夹名，会在家目录下按名字定位 git 仓库（最多 5 层）。多匹配时列出候选。</div>
     </div>`,
-    `<div class="actions"><button class="primary" id="repoSwitch">切换</button></div>`,
+    `<div class="actions">
+      <button class="ghost" id="repoBrowse">浏览本地…</button>
+      <span class="spacer"></span>
+      <button class="primary" id="repoSwitch">切换</button>
+    </div>`,
     `<div class="cfg-note bad" id="repoErr" style="margin-top:10px" hidden></div>`,
   ];
   if (recent.length) {
@@ -821,6 +844,7 @@ function renderRepoDrawer() {
   $("repoBody").innerHTML = parts.join("");
   $("repoSwitch").onclick = () => doSwitchRepo($("repoPath").value.trim());
   $("repoPath").onkeydown = (e) => { if (e.key === "Enter") doSwitchRepo($("repoPath").value.trim()); };
+  $("repoBrowse").onclick = browseRepo;
   $("repoBody").querySelectorAll(".recent-repo").forEach((b) => {
     b.onclick = () => doSwitchRepo(b.dataset.path);
   });
@@ -848,6 +872,98 @@ async function doSwitchRepo(path) {
     btn.disabled = false;
   }
 }
+
+async function browseRepo() {
+  const btn = $("repoBrowse");
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = "选择中…";
+  try {
+    const picked = await api("/api/pick-repo", { method: "POST", body: "{}" });
+    $("repoPath").value = picked.path;
+    await doSwitchRepo(picked.path);
+  } catch (e) {
+    const err = $("repoErr");
+    if (err) { err.textContent = e.message; err.hidden = false; }
+    // Cancel is not an error worth interrupting the user for.
+    if (!/取消/.test(e.message)) toast("选择失败：" + e.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+}
+
+function showDropMatches(name, matches) {
+  $("repoDrawer").hidden = false;
+  $("configDrawer").hidden = true;
+  const box = $("repoBody");
+  if (!matches.length) {
+    box.innerHTML = `<div class="cfg-note bad">按文件夹名「${esc(name)}」没找到 git 仓库。
+      请用「浏览本地…」手动选择，或粘贴完整绝对路径。</div>
+      <div class="actions" style="margin-top:12px"><button class="ghost" id="dmBack">返回</button></div>`;
+    $("dmBack").onclick = renderRepoDrawer;
+    return;
+  }
+  const title = matches.length === 1 ? "找到 1 个仓库，已定位" : `找到 ${matches.length} 个同名仓库，请选一个`;
+  box.innerHTML = `<div class="cfg-note">拖入文件夹：<code>${esc(name)}</code><br>${esc(title)}</div>
+    <div id="dropMatches">${matches.map((p) =>
+      `<button class="recent-repo" data-path="${esc(p)}">${esc(p)}<span class="go">→</span></button>`
+    ).join("")}</div>`;
+  box.querySelectorAll("#dropMatches .recent-repo").forEach((b) => {
+    b.onclick = () => doSwitchRepo(b.dataset.path);
+  });
+  if (matches.length === 1) doSwitchRepo(matches[0]);
+}
+
+async function handleFolderDrop(e) {
+  const items = [...(e.dataTransfer.items || [])];
+  let name = "";
+  for (const it of items) {
+    const entry = typeof it.webkitGetAsEntry === "function" ? it.webkitGetAsEntry() : null;
+    if (entry && entry.isDirectory) { name = entry.name; break; }
+    if (!name && it.kind === "file") {
+      const f = it.getAsFile();
+      if (f && !f.name.includes(".")) { name = f.name; break; }
+    }
+  }
+  if (!name) {
+    toast("请拖拽文件夹（不是文件）到窗口", true);
+    return;
+  }
+  try {
+    const found = await api("/api/find-repo", {
+      method: "POST",
+      body: JSON.stringify({ name, hints: recentRepos() }),
+    });
+    showDropMatches(found.name, found.matches || []);
+  } catch (err) {
+    toast("按名字定位失败：" + err.message, true);
+  }
+}
+
+(function setupDropZone() {
+  const overlay = $("dropOverlay");
+  let depth = 0;
+  const hasFolder = (e) => [...(e.dataTransfer?.items || [])].some(
+    (it) => it.kind === "file" || typeof it.webkitGetAsEntry === "function"
+  );
+  window.addEventListener("dragenter", (e) => {
+    if (!hasFolder(e)) return;
+    e.preventDefault(); depth++;
+    overlay.classList.add("show");
+  });
+  window.addEventListener("dragover", (e) => { if (hasFolder(e)) e.preventDefault(); });
+  window.addEventListener("dragleave", (e) => {
+    if (!hasFolder(e)) return;
+    e.preventDefault(); depth = Math.max(0, depth - 1);
+    if (!depth) overlay.classList.remove("show");
+  });
+  window.addEventListener("drop", (e) => {
+    e.preventDefault(); depth = 0;
+    overlay.classList.remove("show");
+    handleFolderDrop(e);
+  });
+})();
 
 $("repoBtn").onclick = () => {
   const d = $("repoDrawer");

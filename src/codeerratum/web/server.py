@@ -14,9 +14,13 @@ validates run ids / output paths before touching the filesystem.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -83,23 +87,8 @@ class WebApp:
         """Full (masked) configuration for the settings drawer."""
         return public_config(self.repo_root)
 
-    def switch_repo(self, raw_path: str) -> dict:
-        """Point the UI at another local git repository.
-
-        The browser cannot read a folder picker's absolute path (and must not be
-        able to enumerate the filesystem), so the user pastes a path instead.
-        A git worktree may be nested — accept any directory inside one and snap
-        to its root, the same rule `codeerratum ui --repo` uses. Refuse to switch
-        while a review holds the lock: artifacts are keyed to `self.repo_root`,
-        so changing it mid-run would write findings into the wrong repository.
-        """
-        value = str(raw_path or "").strip()
-        if not value:
-            raise PipelineError("请填写本地文件夹路径")
-        candidate = Path(value).expanduser()
-        if not candidate.is_absolute():
-            raise PipelineError("请填写绝对路径（支持 ~ 开头的家目录）")
-        candidate = candidate.resolve()
+    def _git_root(self, candidate: Path) -> Path:
+        """Resolve a path to its git root, or raise with a clear message."""
         if not candidate.exists():
             raise PipelineError(f"路径不存在：{candidate}")
         if not candidate.is_dir():
@@ -107,6 +96,24 @@ class WebApp:
         root = find_repo_root(candidate)
         if not (root / ".git").exists():
             raise PipelineError(f"不是 git 仓库：{root}")
+        return root
+
+    def switch_repo(self, raw_path: str) -> dict:
+        """Point the UI at another local git repository.
+
+        Three ways in: paste an absolute path, use the native folder picker
+        (`pick_repo`), or drop a folder on the page (`find_repo_by_name`). All
+        funnel through here so validation and the mid-review guard live in one
+        place. The browser can never read a folder picker's absolute path, so
+        the native dialog runs in this local process instead.
+        """
+        value = str(raw_path or "").strip()
+        if not value:
+            raise PipelineError("请填写本地文件夹路径")
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise PipelineError("请填写绝对路径（支持 ~ 开头的家目录）")
+        root = self._git_root(candidate.resolve())
         if not self._review_lock.acquire(blocking=False):
             raise RuntimeError("审查进行中，不能切换仓库")
         try:
@@ -114,6 +121,111 @@ class WebApp:
         finally:
             self._review_lock.release()
         return self.meta()
+
+    def pick_repo(self) -> dict:
+        """Open the OS folder picker in this local process; return the choice.
+
+        A browser page cannot obtain an absolute path from a file/directory
+        dialog — that would let any site enumerate the disk. Running the native
+        dialog here (the server is a local, loopback-only process) closes that
+        gap while still giving the user a real folder browser. Cancel returns a
+        clear message rather than a stack trace.
+        """
+        system = sys.platform
+        if system == "darwin":
+            cmd = [
+                "osascript",
+                "-e",
+                'POSIX path of (choose folder with prompt "选择要审查的 git 仓库")',
+            ]
+        elif system == "win32":
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName System.Windows.Forms; "
+                "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+                "$d.Description = '选择要审查的 git 仓库'; "
+                "if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }",
+            ]
+        else:
+            zenity = shutil.which("zenity")
+            if not zenity:
+                raise PipelineError("本系统未安装 zenity，无法弹出文件夹选择器；请粘贴路径")
+            cmd = [zenity, "--file-selection", "--directory", "--title=选择要审查的 git 仓库"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise PipelineError("文件夹选择超时，请重试或粘贴路径") from exc
+        except OSError as exc:
+            raise PipelineError(f"无法打开文件夹选择器：{exc}") from exc
+        if result.returncode != 0 or not result.stdout.strip():
+            # macOS -128 / "User canceled." — not an error worth a toast.
+            raise PipelineError("已取消选择文件夹")
+        chosen = result.stdout.strip().rstrip(os.sep) or os.sep
+        root = self._git_root(Path(chosen).expanduser().resolve())
+        return {"path": str(root), "repo": str(root)}
+
+    def find_repo_by_name(self, raw_name: str, hints: list[str] | None = None) -> dict:
+        """Resolve a dropped folder name to git repos on disk.
+
+        A drag-and-drop `File`/`DirectoryEntry` exposes only the leaf name, never
+        an absolute path. Search a bounded set of likely roots (recent repos,
+        the current repo's neighbourhood, the home directory) so dropping a
+        folder still lands on the right repository without a disk-wide walk.
+        """
+        name = str(raw_name or "").strip().strip("/\\")
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            raise PipelineError("拖入的文件夹名无效")
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+
+        def consider(p: Path) -> None:
+            resolved = p.resolve()
+            if resolved in seen or not resolved.is_dir():
+                return
+            seen.add(resolved)
+            if resolved.name == name and (resolved / ".git").exists():
+                candidates.append(resolved)
+
+        for hint in (hints or [])[:6]:
+            try:
+                hint_path = Path(str(hint)).expanduser().resolve()
+                consider(hint_path / name)
+                consider(hint_path.parent / name)
+            except (OSError, ValueError):
+                continue
+        consider(self.repo_root.parent / name)
+
+        # Bounded descent from home: hidden dirs, caches and dependency trees
+        # are pruned so this stays fast on a real machine.
+        home = Path.home()
+        max_depth, deadline = 5, time.monotonic() + 4.0
+        skip = {
+            "Library",
+            "node_modules",
+            ".git",
+            ".venv",
+            "venv",
+            "__pycache__",
+            "site-packages",
+            ".cache",
+            ".npm",
+            ".cargo",
+            ".Trash",
+            "Applications",
+        }
+        for current, dirs, _files in os.walk(home, topdown=True, followlinks=False):
+            if time.monotonic() > deadline or len(candidates) >= 20:
+                break
+            base = Path(current)
+            depth = len(base.relative_to(home).parts)
+            dirs[:] = [
+                d for d in dirs if not d.startswith(".") and d not in skip and depth < max_depth
+            ]
+            for d in dirs:
+                consider(base / d)
+        return {"name": name, "matches": [str(p) for p in candidates[:20]]}
 
     def save_config(self, payload: dict) -> dict:
         return save_config_file(self.repo_root, payload)
@@ -426,6 +538,16 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, app.save_config(body))
                 elif path == "/api/repo":
                     self._json(HTTPStatus.OK, app.switch_repo(str(body.get("path") or "")))
+                elif path == "/api/pick-repo":
+                    self._json(HTTPStatus.OK, app.pick_repo())
+                elif path == "/api/find-repo":
+                    hints = body.get("hints") or []
+                    if not isinstance(hints, list):
+                        hints = []
+                    self._json(
+                        HTTPStatus.OK,
+                        app.find_repo_by_name(str(body.get("name") or ""), hints),
+                    )
                 elif m := re.fullmatch(r"/api/findings/([0-9a-f]+)/status", path):
                     self._json(
                         HTTPStatus.OK,

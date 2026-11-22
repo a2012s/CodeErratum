@@ -484,3 +484,66 @@ def test_switch_repo_refused_during_review(client, repo, tmp_path):
     finally:
         app._review_lock.release()
     assert app.repo_root == repo.resolve()
+
+
+def test_find_repo_by_name_from_recent_hints(client, tmp_path):
+    """A dropped folder name resolves via recently used repo hints."""
+    other = _git_repo(tmp_path / "projects" / "dropped-repo", "m.py")
+    body = {"name": "dropped-repo", "hints": [str(tmp_path / "projects")]}
+    found = client.post("/api/find-repo", json=body).json()
+    assert str(other.resolve()) in found["matches"]
+
+
+def test_find_repo_by_name_rejects_path_like_names(client):
+    resp = client.post("/api/find-repo", json={"name": "../../etc"})
+    assert resp.status_code == 400
+    assert "无效" in resp.json()["error"]
+
+
+def test_find_repo_by_name_ignores_plain_folders(client, tmp_path):
+    (tmp_path / "not-a-repo").mkdir()
+    found = client.post(
+        "/api/find-repo", json={"name": "not-a-repo", "hints": [str(tmp_path)]}
+    ).json()
+    assert found["matches"] == []
+
+
+def test_pick_repo_returns_git_root(client, monkeypatch):
+    """The native dialog's chosen path is snapped to its git root."""
+    import subprocess as sp
+
+    repo_alt = _git_repo(
+        Path(tempfile.mkdtemp(prefix="ce-pick-")) / "proj",
+        "m.py",
+    )
+    (repo_alt / "src").mkdir()
+
+    class Done:
+        returncode = 0
+        stdout = str(repo_alt / "src") + "\n"
+        stderr = ""
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Done())
+    app = WebApp(repo_alt)
+    result = app.pick_repo()
+    assert result["path"] == str(repo_alt.resolve())
+
+
+def test_pick_repo_cancel_is_clean(client, monkeypatch):
+    import subprocess as sp
+
+    class Canceled:
+        returncode = 1
+        stdout = ""
+        stderr = "User canceled."
+
+    monkeypatch.setattr(sp, "run", lambda *a, **k: Canceled())
+    app = WebApp(Path(client.get("/api/meta").json()["repo"]))
+    with pytest.raises(Exception, match="取消"):
+        app.pick_repo()
+
+
+def test_pick_and_find_require_same_origin(client):
+    for path in ("/api/pick-repo", "/api/find-repo"):
+        resp = client.post(path, json={}, headers={"Origin": "http://evil.example"})
+        assert resp.status_code == 403
