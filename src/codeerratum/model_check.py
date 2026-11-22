@@ -21,7 +21,8 @@ def _explain(exc: Exception, timeout: float) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return f"连接超时（{timeout:g}s）"
     if isinstance(exc, httpx.ConnectError):
-        return "无法连接端点（地址或网络不可达）"
+        reason = str(exc).strip().replace("\n", " ")[:160]
+        return f"无法连接端点（地址或网络不可达）{f'：{reason}' if reason else ''}"
     if isinstance(exc, httpx.TransportError):
         return f"网络错误：{type(exc).__name__}"
     return f"请求失败：{type(exc).__name__}"
