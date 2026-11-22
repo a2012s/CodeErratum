@@ -401,6 +401,8 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Quitting stops the review immediately and cancels in-flight model calls. "
         "Tokens already used are not refunded.",
     ),
+    "desk.close_busy_quit": ("退出并中断", "Quit and stop"),
+    "desk.close_busy_cancel": ("继续审查", "Keep reviewing"),
     "desk.parent_gone": (
         "启动本服务的进程已退出，服务随之停止",
         "The process that launched this server exited; stopping",

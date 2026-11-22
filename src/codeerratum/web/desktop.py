@@ -29,21 +29,32 @@ DEFAULT_HEIGHT = 860
 DEFAULT_MIN_SIZE = (980, 640)
 STORAGE_DIR = Path.home() / ".codeerratum" / "webview"
 
+# Set by close_window() (watchdog / SIGTERM) so the closing handler knows this
+# is a forced teardown, not a user click. A forced close must never wait on a
+# dialog: nobody is there to answer it, and the parent is already gone.
+_FORCED = threading.Event()
+
 
 def guard_close_while_busy(window, is_busy: Callable[[], bool]) -> Callable[[], bool | None]:
-    """Build a pywebview ``closing`` handler that asks before killing a paid run.
+    """Build a ``closing`` handler that asks before killing a paid run.
 
-    pywebview treats a handler that returns ``False`` as "cancel the close";
-    ``None`` means "no opinion" and keeps the normal close path. The check is
-    deliberately a callback, not a captured snapshot: a run can start after the
-    window opens, and the guard must see it at the moment the user clicks.
+    NEVER call ``window.create_confirmation_dialog()`` from here. On macOS its
+    implementation posts the NSAlert to the main runloop via ``callAfter`` and
+    then blocks on a semaphore — but the closing event itself is dispatched
+    synchronously from ``applicationShouldTerminate_``/``windowShouldClose_``
+    **on that same main thread**. The alert waits for a runloop that is blocked
+    on the alert: a guaranteed deadlock (0.5.0 hang, 43 s unresponsive).
+
+    The safe path is pywebview's own ``confirm_close`` property: its
+    ``should_close()`` reads it right after the closing handlers and, when set,
+    runs ``NSAlert.runModal()`` inline on the main thread — no semaphore, no
+    self-wait. The handler only flips the flag and returns ``None`` so the
+    built-in flow continues. The check is a callback, not a snapshot: a run can
+    start after the window opens.
     """
     def _on_closing() -> bool | None:
-        if not is_busy():
-            return None
-        return window.create_confirmation_dialog(
-            t("desk.close_busy_title"), t("desk.close_busy_message")
-        )
+        window.confirm_close = bool(is_busy()) and not _FORCED.is_set()
+        return None
 
     return _on_closing
 
@@ -72,6 +83,16 @@ def open_window(
         # Default is False, which makes findings and paths unselectable — the
         # whole point of the report page is copying lines out of it.
         text_select=True,
+        # The built-in should_close() uses these strings when confirm_close is
+        # flipped by our closing handler. Overriding the defaults keeps the
+        # question about *reviews* rather than pywebview's generic quit text.
+        localization={
+            "global.quitConfirmation": (
+                t("desk.close_busy_title") + "\n\n" + t("desk.close_busy_message")
+            ),
+            "global.quit": t("desk.close_busy_quit"),
+            "global.cancel": t("desk.close_busy_cancel"),
+        },
     )
     if is_busy is not None:
         # Only the user's close button / Cmd+Q goes through this handler.
@@ -96,6 +117,7 @@ def close_window() -> None:
         import webview
     except ImportError:
         return
+    _FORCED.set()
     for window in list(getattr(webview, "windows", None) or []):
         try:
             window.destroy()

@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.1] — 2026-11-23
+
+### Fixed
+
+- **0.5.0 的关窗确认框会让应用卡死 48 秒（macOS 主线程死锁）**：Cmd+Q 触发的栈停在
+  `applicationShouldTerminate_ → should_close → events.closing.set()`，紧接着是
+  `lock_PyThread_acquire_lock → _PySemaphore_Wait → __psynch_cvwait`——主线程在等一个
+  永远不会执行的回调。根因是 pywebview 的 `create_confirmation_dialog()` 在 macOS 上把
+  NSAlert 用 `AppHelper.callAfter()` 排到主线程 runloop，然后 `semaphore.acquire()` 阻塞；
+  而 closing handler 本身就同步跑在那个 runloop 的退出处理里——弹窗等 runloop，runloop
+  等弹窗，自锁。现在 handler 只翻转 pywebview 官方的 `window.confirm_close` 标志，由
+  pywebview 自己的 `should_close()` 在主线程内联 `NSAlert.runModal()`，无信号量、不自等；
+  确认框文案通过 `localization` 覆盖成中英双语的审查专用提示。看门狗/信号触发的强制关闭
+  设置 `_FORCED` 标志，即使审查在跑也不弹框——那种情况下没有人在屏幕前回答。
+  测试改为断言 handler 不再调用任何对话框方法，并覆盖强制关闭路径。全量 365 passed，
+  遗留 5 项为改动前既有的基线失败。
+
 ## [0.5.0] — 2026-11-23
 
 ### Added

@@ -262,46 +262,74 @@ class _FakeClosingEvent:
 class _FakeWindow:
     def __init__(self):
         self.events = type("Events", (), {"closing": _FakeClosingEvent()})()
-        self.asked: list[tuple[str, str]] = []
-        self.answer = False
+        self.confirm_close = False
 
-    def create_confirmation_dialog(self, title, message):
-        self.asked.append((title, message))
-        return self.answer
+
+@pytest.fixture(autouse=True)
+def _clear_forced_close():
+    """Forced-close state is module-level; never leak it between tests."""
+    desktop._FORCED.clear()
+    yield
+    desktop._FORCED.clear()
 
 
 def test_close_guard_only_asks_while_busy():
+    """The handler flips confirm_close and never calls a blocking dialog.
+
+    Regression (0.5.0 hang): calling create_confirmation_dialog() from a
+    closing handler deadlocks macOS — the dialog waits for the main runloop
+    that the handler itself is blocking. A fake without that method proves the
+    handler stays on the safe path.
+    """
     win = _FakeWindow()
     busy = [False]
     guard = desktop.guard_close_while_busy(win, lambda: busy[0])
 
-    with language("zh"):
-        assert guard() is None, "idle close needs no question"
-        assert win.asked == []
-        busy[0] = True
-        assert guard() is False, "Cancel must keep the window open"
-        assert len(win.asked) == 1
-        assert "审查" in win.asked[0][0]
+    assert guard() is None, "handler never decides the close itself"
+    assert win.confirm_close is False, "idle close needs no question"
+    busy[0] = True
+    assert guard() is None
+    assert win.confirm_close is True, "busy close hands off to confirm_close"
+    busy[0] = False
+    assert guard() is None
+    assert win.confirm_close is False, "flag must reset for the next close"
 
-    win.answer = True
-    with language("en"):
-        assert guard() is True, "OK must let the close proceed"
-        assert "Review" in win.asked[-1][0]
+
+def test_forced_close_never_asks(monkeypatch):
+    """Watchdog/SIGTERM teardown must not stop at a dialog nobody can answer."""
+    win = _FakeWindow()
+    guard = desktop.guard_close_while_busy(win, lambda: True)
+    desktop._FORCED.set()
+    assert guard() is None
+    assert win.confirm_close is False
 
 
 def test_open_window_registers_the_closing_guard(monkeypatch, tmp_path):
     win = _FakeWindow()
+    captured: dict = {}
+
+    def fake_create_window(title, url, **kw):
+        captured.update(kw)
+        return win
+
     fake_webview = type(sys)("webview")
-    fake_webview.create_window = lambda *a, **kw: win
+    fake_webview.create_window = fake_create_window
     fake_webview.start = lambda **kw: None
     monkeypatch.setitem(sys.modules, "webview", fake_webview)
     monkeypatch.setattr(desktop, "STORAGE_DIR", tmp_path / "storage")
 
-    desktop.open_window("http://127.0.0.1:1/", "t", is_busy=lambda: True)
+    with language("zh"):
+        desktop.open_window("http://127.0.0.1:1/", "t", is_busy=lambda: True)
 
     assert len(win.events.closing.handlers) == 1
-    assert win.events.closing.handlers[0]() is False
-    assert win.asked
+    win.events.closing.handlers[0]()
+    assert win.confirm_close is True
+    # The built-in dialog's text must describe the review, not pywebview's
+    # generic "Do you really want to quit?".
+    loc = captured["localization"]
+    assert "审查" in loc["global.quitConfirmation"]
+    assert loc["global.quit"] == "退出并中断"
+    assert loc["global.cancel"] == "继续审查"
 
     # Without a busy callback the shell stays exactly as before: no handler.
     plain = _FakeWindow()
