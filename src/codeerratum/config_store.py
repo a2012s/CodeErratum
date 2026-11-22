@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 
 from .config import Config
+from .i18n import t
 from .models import ModelRegistry, ModelSpec
 
 CONFIG_REL = Path(".codeerratum") / "config.json"
@@ -95,7 +96,7 @@ def public(repo_root: Path) -> dict:
         info["config_error"] = str(exc)
         return info
     if config is None:
-        info["config_error"] = "未配置模型：设置环境变量，或在界面里保存配置到 " + str(CONFIG_REL)
+        info["config_error"] = t("config.no_models", path=CONFIG_REL)
         return info
     info.update(
         configured=True,

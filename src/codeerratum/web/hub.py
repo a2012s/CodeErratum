@@ -17,6 +17,7 @@ import json
 import threading
 from pathlib import Path
 
+from ..i18n import t
 from ..pipeline import PipelineError
 from .server import WebApp, pick_folder, resolve_git_root
 
@@ -48,10 +49,10 @@ class ProjectHub:
     def add(self, raw_path: str) -> dict:
         value = str(raw_path or "").strip()
         if not value:
-            raise PipelineError("请填写本地文件夹路径")
+            raise PipelineError(t("server.repo_path_required"))
         candidate = Path(value).expanduser()
         if not candidate.is_absolute():
-            raise PipelineError("请填写绝对路径（支持 ~ 开头的家目录）")
+            raise PipelineError(t("server.repo_abs_required"))
         return self.add_root(resolve_git_root(candidate.resolve()))
 
     def add_root(self, root: Path) -> dict:
@@ -64,15 +65,15 @@ class ProjectHub:
             return self._entry(slug)
 
     def add_picked(self) -> dict:
-        return self.add_root(pick_folder("选择要加入审查的项目"))
+        return self.add_root(pick_folder(t("hub.add_title")))
 
     def remove(self, slug: str) -> dict:
         with self._lock:
             app = self._apps.get(slug)
             if app is None:
-                raise LookupError("项目不存在")
+                raise LookupError(t("hub.project_missing"))
             if app.review_status()["running"]:
-                raise RuntimeError("该项目正在审查，先停止再移除")
+                raise RuntimeError(t("hub.project_busy"))
             del self._apps[slug]
             self._order.remove(slug)
             self._save()
@@ -84,7 +85,7 @@ class ProjectHub:
         with self._lock:
             app = self._apps.get(slug)
         if app is None:
-            raise LookupError("项目不存在")
+            raise LookupError(t("hub.project_missing"))
         return app
 
     def default_app(self) -> WebApp | None:
@@ -94,7 +95,7 @@ class ProjectHub:
     def first_or_raise(self) -> WebApp:
         app = self.default_app()
         if app is None:
-            raise PipelineError("还没有项目，请先添加一个本地仓库")
+            raise PipelineError(t("hub.no_projects"))
         return app
 
     # ---- views -----------------------------------------------------------

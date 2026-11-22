@@ -80,6 +80,7 @@
     background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
   }
   button.ghost { background: transparent; }
+  #langSel { padding: 5px 7px; font-size: 12.5px; background: transparent; }
   button.ghost.active {
     background: var(--accent-weak); border-color: var(--accent); color: var(--accent);
   }
@@ -121,6 +122,7 @@
   }
   .rules textarea:focus { outline: none; border-color: var(--accent); }
   .hint { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 6px; }
+  .hint.warn { color: var(--warn); font-weight: 600; }
   .hint code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
@@ -359,70 +361,75 @@
   <div class="brand"><span class="mark">E</span> CodeErratum <span class="ver">UI</span></div>
   <div class="repo" id="repoLabel">…</div>
   <div class="spacer"></div>
-  <button class="ghost" id="repoBtn">切换仓库</button>
-  <button class="ghost" id="configBtn">配置</button>
-  <button class="ghost" id="docsBtn">文档</button>
-  <button class="ghost" id="statsBtn">统计</button>
+  <select id="langSel" aria-label="界面语言 / Interface language">
+    <option value="zh">中文</option>
+    <option value="en">English</option>
+  </select>
+  <button class="ghost" id="repoBtn" data-en="Switch repo">切换仓库</button>
+  <button class="ghost" id="configBtn" data-en="Config">配置</button>
+  <button class="ghost" id="docsBtn" data-en="Docs">文档</button>
+  <button class="ghost" id="statsBtn" data-en="Stats">统计</button>
 </header>
 
 <main class="layout">
   <aside class="sidebar">
     <div class="field">
-      <label for="diff">git diff 范围</label>
+      <label for="diff" data-en="git diff range">git diff 范围</label>
       <input id="diff" value="HEAD" spellcheck="false">
-      <div class="hint"><code>HEAD</code> = 本地未提交改动（含已暂存）；
+      <div class="hint" data-en="<code>HEAD</code> = local uncommitted changes (staged included); <code>HEAD~1</code> = the previous commit; <code>HEAD~3..HEAD</code> = the last three commits. New files must be <code>git add</code>-ed (no commit needed) to enter the diff."><code>HEAD</code> = 本地未提交改动（含已暂存）；
         <code>HEAD~1</code> = 上一个提交；<code>HEAD~3..HEAD</code> = 最近三个提交。
         新文件需先 <code>git add</code>（不必 commit）才会进入 diff。</div>
     </div>
     <div class="field">
-      <label for="paths">路径过滤（可选，如 src/api）</label>
-      <input id="paths" placeholder="留空则审查全部改动" spellcheck="false">
-      <div class="hint">只审该目录下的改动，不必先 git add。多个路径用空格分隔。</div>
+      <label for="paths" data-en="Path filter (optional, e.g. src/api)">路径过滤（可选，如 src/api）</label>
+      <input id="paths" placeholder="留空则审查全部改动" data-en-ph="Leave empty to review every change" spellcheck="false">
+      <div class="hint" data-en="Only review changes under that folder; no git add needed. Separate several paths with spaces.">只审该目录下的改动，不必先 git add。多个路径用空格分隔。</div>
     </div>
     <div class="row2">
       <div class="field">
-        <label for="mode">模式</label>
+        <label for="mode" data-en="Mode">模式</label>
         <select id="mode">
-          <option value="quick">quick · 单模型</option>
-          <option value="dual">dual · 双模型+证伪</option>
-          <option value="committee">committee · 三模型</option>
+          <option value="quick" data-en="quick · one model">quick · 单模型</option>
+          <option value="dual" data-en="dual · two models + falsify">dual · 双模型+证伪</option>
+          <option value="committee" data-en="committee · three models">committee · 三模型</option>
         </select>
       </div>
       <div class="field">
-        <label for="maxUnits">上限</label>
+        <label for="maxUnits" data-en="Limit">上限</label>
         <input id="maxUnits" type="number" value="10" min="1" max="50">
       </div>
     </div>
-    <label class="check"><input type="checkbox" id="writeMd" checked> 同时写 erratumReview.md 到仓库根</label>
+    <div class="hint" id="maxUnitsHint">审查单元数，1–50；超出会按上限执行并提示。</div>
+    <label class="check"><input type="checkbox" id="writeMd" checked> <span data-en="Also write erratumReview.md to the repo root">同时写 erratumReview.md 到仓库根</span></label>
     <div class="field">
-      <label for="authorModel">作者模型（可选，排除出审查席位）</label>
-      <input id="authorModel" placeholder="写这段代码的模型 id" spellcheck="false">
+      <label for="authorModel" data-en="Author model (optional, kept out of the reviewer seats)">作者模型（可选，排除出审查席位）</label>
+      <input id="authorModel" placeholder="写这段代码的模型 id" data-en-ph="model id that wrote this code" spellcheck="false">
     </div>
     <details class="rules">
-      <summary>项目规范（可选）<span id="rulesBadge" class="badge-quiet"></span></summary>
+      <summary><span data-en="Project rules (optional)">项目规范（可选）</span><span id="rulesBadge" class="badge-quiet"></span></summary>
       <textarea id="houseRules" rows="5" spellcheck="false"
-        placeholder="只写「该看什么 / 该跳过什么」，例如：&#10;- 本项目不用 type hints，缺注解不算问题&#10;- 日志里 f-string 的性能开销已权衡过，不要报"></textarea>
+        placeholder="只写「该看什么 / 该跳过什么」，例如：&#10;- 本项目不用 type hints，缺注解不算问题&#10;- 日志里 f-string 的性能开销已权衡过，不要报" data-en-ph="Only say what to look at / what to skip, e.g.&#10;- This project does not use type hints; missing annotations are not a finding&#10;- The f-string cost in logging was already weighed; do not report it"></textarea>
       <div class="hint" id="rulesHint">留空则自动读取 <code>.codeerratum/rules.md</code>（若存在）。规范只会追加，不能覆盖格式与锚点硬规则。</div>
     </details>
-    <button class="primary" id="runBtn">运行审查</button>
+    <button class="primary" id="runBtn" data-en="Run review">运行审查</button>
     <div id="progressBox" hidden>
       <div id="progressHead">
         <span class="spinner"></span><span id="progressTitle">审查进行中…</span>
-        <button class="ghost" id="stopBtn" hidden>停止审查</button>
+        <button class="ghost" id="stopBtn" hidden data-en="Stop review">停止审查</button>
       </div>
       <div id="progressLog"></div>
-      <div id="logResize" title="拖动调整日志高度"></div>
+      <div id="logResize" title="拖动调整日志高度" data-en-title="Drag to change the log height"></div>
     </div>
     <div id="models" class="chips"></div>
-    <div class="runs-title">历史运行</div>
+    <div class="runs-title" data-en="Run history">历史运行</div>
     <ul id="runs"></ul>
   </aside>
 
   <div class="splitter" id="splitter" role="separator" aria-orientation="vertical"
-       aria-label="拖动调整左右宽度" title="拖动调整左右面板宽度（双击复位）"></div>
+       aria-label="拖动调整左右宽度" title="拖动调整左右面板宽度（双击复位）" data-en-title="Drag to change the panel widths (double-click resets)"></div>
 
   <section class="content">
-    <div class="empty" id="empty">
+    <div class="empty" id="empty" data-en="Fill in a diff range on the left, then press Run review.<br>Past runs open from the list there: three zones, accept or reject one by one.<br><span class=&quot;small&quot;>CLI equivalent: <kbd>codeerratum review --diff HEAD~1</kbd></span>">
       左侧填 diff 范围，点「运行审查」。<br>
       已有运行记录时，从这里选一条打开：三区分流、逐条采纳/驳回。<br>
       <span class="small">命令行等价：<kbd>codeerratum review --diff HEAD~1</kbd></span>
@@ -442,35 +449,35 @@
 </main>
 
 <aside class="drawer" id="drawer" hidden>
-  <h3>使用统计</h3>
+  <h3 data-en="Usage stats">使用统计</h3>
   <div id="statsBody"></div>
 </aside>
 
 <aside class="drawer config" id="repoDrawer" hidden>
-  <h3>选择本地仓库</h3>
+  <h3 data-en="Choose a local repository">选择本地仓库</h3>
   <div id="repoBody"></div>
 </aside>
 
 <aside class="drawer config" id="configDrawer" hidden>
-  <h3>模型配置</h3>
+  <h3 data-en="Model config">模型配置</h3>
   <div id="configBody"></div>
 </aside>
 
 <aside class="drawer wide" id="docsDrawer" hidden>
-  <h3>模块文档 · 签名漂移</h3>
+  <h3 data-en="Module docs · signature drift">模块文档 · 签名漂移</h3>
   <div id="docsBody"></div>
 </aside>
-<div id="dropOverlay"><div class="box">松开以定位 git 仓库
-  <div class="sub">按文件夹名在本机查找，不上传任何文件</div>
+<div id="dropOverlay"><div class="box"><span data-en="Drop to locate a git repository">松开以定位 git 仓库</span>
+  <div class="sub" data-en="Matched by folder name on this machine; nothing is uploaded">按文件夹名在本机查找，不上传任何文件</div>
 </div></div>
 <div id="toast"></div>
 <div id="errOverlay" hidden>
   <div class="errBox" role="dialog" aria-modal="true" aria-labelledby="errTitle">
-    <div class="errHead" id="errTitle">操作失败</div>
+    <div class="errHead" id="errTitle" data-en="Something went wrong">操作失败</div>
     <div class="errBody"><textarea id="errText" readonly spellcheck="false"></textarea></div>
     <div class="errFoot">
-      <button class="ghost" id="errCopy">复制错误</button>
-      <button class="primary" id="errClose">关闭</button>
+      <button class="ghost" id="errCopy" data-en="Copy error">复制错误</button>
+      <button class="primary" id="errClose" data-en="Close">关闭</button>
     </div>
   </div>
 </div>
@@ -480,6 +487,267 @@ const $ = (id) => document.getElementById(id);
 // Under the multi-project shell this page is served at /p/<slug>/ and the
 // server stamps data-base; every API call is relative to it. At / it is empty.
 const BASE = document.documentElement.dataset.base || "";
+
+/* ---- Language: Chinese (default) and English. -----------------------------
+   Markup is authored in Chinese; STR maps those exact strings to English, so a
+   missing entry degrades to Chinese instead of showing a raw key. Static markup
+   carries its English in data-en / data-en-ph / data-en-title. The choice lives
+   in localStorage and rides every request as X-Lang, so server-side progress
+   lines and errors come back in the same language. */
+const LANG_KEY = "codeerratum.lang";
+let LANG = (() => {
+  try {
+    return (localStorage.getItem(LANG_KEY) || "zh").toLowerCase().startsWith("en") ? "en" : "zh";
+  } catch { return "zh"; }
+})();
+const STR = {
+  // report zones
+  "独有发现": "Unique findings",
+  "冲突区": "Conflict",
+  "共识区": "Consensus",
+  "全部发现": "All findings",
+  "仅一家报出、且未被证伪推翻 —— 最值得看的部分": "Only one model reported it and falsification did not refute it — the most valuable part",
+  "两家意见相反，需人工裁决": "The models disagree; a human has to decide",
+  "多家一致，可信度最高但新信息最少": "All models agree — highest confidence, least new information",
+  "quick 单模型模式": "quick single-model mode",
+  // errors and toasts
+  "操作失败": "Something went wrong",
+  "已复制": "Copied",
+  "复制错误": "Copy error",
+  "关闭": "Close",
+  "连接失败": "Connection failed",
+  "无法连接后端: {msg}": "Cannot reach the backend: {msg}",
+  "浏览器拒绝剪贴板访问，已选中文本，请按 ⌘/Ctrl+C": "The browser blocked clipboard access; the text is selected — press ⌘/Ctrl+C",
+  "浏览器拒绝剪贴板访问，请手动复制": "The browser blocked clipboard access; copy it manually",
+  // relative time
+  "刚刚": "just now",
+  "{n} 分钟前": "{n} min ago",
+  "{n} 小时前": "{n} h ago",
+  "{n} 天前": "{n} d ago",
+  // meta chips
+  "未配置模型：{err}": "No model configured: {err}",
+  "配置来源": "Config source",
+  "来源：{src}": "Source: {src}",
+  "配置文件": "config file",
+  "环境变量": "environment",
+  // project rules
+  "已检测到 {path} · {chars} 字": "Detected {path} · {chars} chars",
+  "留空则使用已检测到的 <code>{path}</code>（sha {sha}）。 在上面填写会整体替换它。": "Leave this empty to use the detected <code>{path}</code> (sha {sha}). Text typed above replaces it entirely.",
+  "未检测到 <code>{path}</code>。 在上面填写即只对本次运行生效。规范只会追加，不能覆盖格式与锚点硬规则。": "No <code>{path}</code> detected. Text typed above applies to this run only; rules are appended and never override the format or anchor rules.",
+  // run list and run header
+  "还没有运行记录": "No runs yet",
+  "{n} 条": "{n}",
+  "打不开该运行: {msg}": "Cannot open that run: {msg}",
+  "读取运行失败": "Could not read the run",
+  "运行 {id}": "Run {id}",
+  "{n} 条发现": "{n} findings",
+  "{n} 条被拒": "{n} rejected",
+  "规格 {level}": "spec {level}",
+  "证伪者 {model}": "falsifier {model}",
+  "项目规范会改变审查侧重点，两次结果不同先看这里": "Project rules shift what reviewers look for; check here first when two runs disagree",
+  "规范 {chars} 字 · {sha}": "rules {chars} chars · {sha}",
+  "{n} 条发现被定位校验丢弃（防幻觉）": "{n} findings dropped by anchor validation (anti-hallucination)",
+  "这个分区没有发现": "No findings in this zone",
+  // finding cards
+  "证据 {value}": "evidence {value}",
+  " · 硬证据": " · hard evidence",
+  "修改建议": "Suggested fix",
+  "验收": "Acceptance",
+  "复制": "Copy",
+  "证伪轮": "Falsification",
+  "待裁决": "Open",
+  "已采纳": "Accepted",
+  "已驳回": "Rejected",
+  "采纳": "Accept",
+  "驳回理由（写清为什么是误报）": "Rejection reason (explain why it is a false positive)",
+  "驳回": "Reject",
+  "重置": "Reset",
+  "驳回要写理由，否则统计没有意义": "A rejection needs a reason, otherwise the stats mean nothing",
+  "无法保存裁决": "Cannot save the verdict",
+  "保存裁决失败": "Could not save the verdict",
+  "已重置": "Reset",
+  "已复制验收命令": "Acceptance command copied",
+  // review progress and run lifecycle
+  "审查中…": "Reviewing…",
+  "运行审查": "Run review",
+  "停止审查": "Stop review",
+  "停止中…": "Stopping…",
+  "正在停止…": "Stopping…",
+  "停止失败：{msg}": "Stop failed: {msg}",
+  "已请求停止": "Stop requested",
+  "取消排队": "Leave queue",
+  "排队中…等待其他项目释放执行位": "Queued… waiting for another project to free its slot",
+  "路径 {paths}": "path {paths}",
+  "审查中…（其他标签页或连接已启动）": "Reviewing… (started by another tab or a dropped connection)",
+  "已有审查正在进行中，正在跟踪其进度…": "A review is already running; following its progress…",
+  "审查完成": "Review finished",
+  "无改动": "No changes",
+  "审查已停止": "Review stopped",
+  "未知错误": "Unknown error",
+  "错误：{msg}": "Error: {msg}",
+  "审查失败：{msg}": "Review failed: {msg}",
+  "审查失败": "Review failed",
+  "其他标签页或断线前启动的审查失败。\n\n{reason}": "A review started in another tab (or before the connection dropped) failed.\n\n{reason}",
+  "没有可审查的改动": "Nothing to review",
+  "完成：{n} 条发现 · {calls} 次调用 · 均 {ms}ms": "Done: {n} findings · {calls} calls · {ms}ms avg",
+  "审查范围：{diff}{paths}\n审查模式：{mode}\n\n{error}": "Diff range: {diff}{paths}\nMode: {mode}\n\n{error}",
+  "(空)": "(empty)",
+  "token 消耗：{input} 输入 + {output} 输出 = {total} 合计": "Tokens: {input} in + {output} out = {total} total",
+  "（含缓存 {cached}）": " (cached {cached})",
+  "{model}：{calls} 次 · {input} 入 / {output} 出 = {total}": "{model}: {calls} calls · {input} in / {output} out = {total}",
+  // unit cap hint
+  "审查单元数，1–{cap}；超出会按上限执行并提示。": "Review units, 1–{cap}; anything above the cap is clamped and reported.",
+  "超出 1–{cap}，服务端会按 {used} 执行，并在进度里提示。": "Outside 1–{cap}; the server runs {used} and says so in the progress log.",
+  "最多 {actual} 个审查单元。": "Up to {actual} review units.",
+  "最多 {actual} 个审查单元（已到上限）。": "Up to {actual} review units (at the cap).",
+  // stats drawer
+  "审查运行数": "Runs",
+  "发现总数": "Findings",
+  "采纳率": "Acceptance rate",
+  "尚无人工裁决": "no verdicts yet",
+  "按分类": "By category",
+  "分类": "Category",
+  "总数": "Total",
+  // docs drawer
+  "解析 AST…": "Parsing AST…",
+  "模块": "Modules",
+  "公开符号": "Public symbols",
+  "基线": "Baseline",
+  "未生成": "not generated",
+  "还没有基线。先跑 <code>codeerratum docs</code> 生成，之后这里显示签名漂移。": "No baseline yet. Run <code>codeerratum docs</code> to create one; signature drift shows up here afterwards.",
+  "漂移 {n} 处": "Drift: {n}",
+  "类型": "Kind",
+  "文件": "File",
+  "符号": "Symbol",
+  "无签名漂移": "No signature drift",
+  "模块（{n}）": "Modules ({n})",
+  "公开/全部": "Public / all",
+  "模块新增": "Module added",
+  "模块删除": "Module removed",
+  "符号新增": "Symbol added",
+  "符号删除": "Symbol removed",
+  "签名变更": "Signature changed",
+  // config drawer
+  "quick · 单模型": "quick · one model",
+  "dual · 双模型 + 证伪": "dual · two models + falsify",
+  "committee · 三模型": "committee · three models",
+  "(未命名模型)": "(unnamed model)",
+  "自动推断": "auto",
+  "无": "none",
+  "检测": "Check",
+  "删除这一行": "Remove this row",
+  "检测该模型是否可用（发一个最小请求，不写入配置）": "Check the model with one minimal request; nothing is written to the config",
+  "检测中": "Checking",
+  "✓ 可用": "✓ Available",
+  "✗ 不可用": "✗ Unavailable",
+  "✗ 检测失败": "✗ Check failed",
+  "模型检测失败": "Model check failed",
+  "（HTTP {status}）": " (HTTP {status})",
+  "本地配置文件 <code>{path}</code>（保存后重启仍生效）": "Local config file <code>{path}</code> (survives a restart)",
+  "环境变量（尚未保存；点「保存配置」后写入本地文件）": "Environment variables (not saved yet; Save config writes them to a local file)",
+  "未配置": "not configured",
+  "当前来源：{src}": "Current source: {src}",
+  "审查模式": "Review mode",
+  "dual 需 2 个不同 model_id、committee 需 3 个（同厂不同版本也算）；family 只作标签，空着会自动推断。证伪者优先用未参与审查的模型，否则由其他评审者交叉验证。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。 点「检测」发一个最小请求验证端点（不写入配置）：绿勾可用，红叉会弹出可复制的原因；改动字段后结果自动失效。": "dual needs 2 distinct model_ids, committee needs 3 (different versions from the same vendor count); family is only a label and is inferred when left blank. The falsifier prefers a model that did not review, otherwise the other reviewers cross-check. An empty api_key keeps the stored value; the placeholder is a redacted hint, not the real key. Check sends one minimal request (nothing is written): green tick means it works, a red cross opens a copyable reason, and editing a field invalidates the result.",
+  "+ 添加模型": "+ Add model",
+  "检测全部": "Check all",
+  "保存配置": "Save config",
+  "配置已保存到 {path}": "Config saved to {path}",
+  "保存配置失败": "Could not save the config",
+  "读取配置…": "Loading config…",
+  // repo drawer
+  "当前仓库：{path}": "Current repo: {path}",
+  "打开当前仓库文件夹": "Open repo folder",
+  "本地仓库路径": "Local repo path",
+  "点「浏览本地」或粘贴 /Users/me/my-project": "Click Browse local… or paste /Users/me/my-project",
+  "拖拽只暴露文件夹名，会在家目录下按名字定位 git 仓库（最多 5 层）。多匹配时列出候选。": "A drop only reveals the folder name; the server matches it against git repos under your home directory (5 levels deep) and lists candidates when several match.",
+  "浏览本地…": "Browse local…",
+  "切换": "Switch",
+  "最近使用": "Recent",
+  "请填写本地仓库文件夹的绝对路径，或用「浏览本地…」选择": "Enter the absolute path of a local repo folder, or use Browse local…",
+  "没有选择仓库": "No repository selected",
+  "已切换到 {path}": "Switched to {path}",
+  "目标路径：{path}": "Target path: {path}",
+  "切换仓库失败": "Could not switch repositories",
+  "已在文件管理器中打开当前仓库": "Opened the repo folder in your file manager",
+  "打开文件夹失败": "Could not open the folder",
+  "选择中…": "Choosing…",
+  "选择仓库失败": "Could not choose a repository",
+  "返回": "Back",
+  "拖入文件夹：{name}": "Dropped folder: {name}",
+  "找到 1 个仓库，已定位": "Found 1 repository — located",
+  "找到 {n} 个同名仓库，请选一个": "Found {n} repositories with that name — pick one",
+  "请拖拽文件夹（不是文件）到窗口；也可以点「切换仓库」用系统选择器": "Drop a folder (not a file) here, or use Switch repo for the native picker",
+  "无法识别拖拽内容": "Unrecognised drop",
+  "文件夹名：{name}": "Folder name: {name}",
+  "定位仓库失败": "Could not locate the repository",
+  "项目总览": "Project overview",
+  "三种方式选仓库：① 点「浏览本地…」弹出系统文件夹选择器；② 把文件夹直接拖到本窗口；③ 粘贴绝对路径（支持 <code>~</code>）。填仓库内任意子目录会自动定位到 git 根目录。切换只影响当前服务进程，不会改动磁盘上的代码。点「打开当前仓库文件夹」可在系统文件管理器中查看这个目录。": "Three ways to pick a repo: 1) Browse local… opens the native folder picker; 2) drag a folder onto this window; 3) paste an absolute path (<code>~</code> works). Any subdirectory snaps up to the git root. Switching only affects this server process and never touches the code on disk. Open repo folder reveals it in your file manager.",
+  "按文件夹名「{name}」没找到 git 仓库。 请用「浏览本地…」手动选择，或粘贴完整绝对路径。": "No git repository named “{name}” was found. Use Browse local… to pick one, or paste the full absolute path.",
+};
+
+function T(zh, vars) {
+  let text = LANG === "en" ? (STR[zh] ?? zh) : zh;
+  if (vars) {
+    for (const [k, v] of Object.entries(vars)) text = text.split(`{${k}}`).join(String(v));
+  }
+  return text;
+}
+// Force an English rendering for a string whose translation depends on context.
+function TR(zh, en) { return LANG === "en" ? en : zh; }
+// Chinese has no plural; English does, and "1 findings" reads like a bug.
+function count(n, zhUnit, enOne, enMany) {
+  if (LANG !== "en") return `${n} ${zhUnit}`;
+  return `${n} ${n === 1 ? enOne : enMany}`;
+}
+
+function saveLang(next) {
+  LANG = next === "en" ? "en" : "zh";
+  try { localStorage.setItem(LANG_KEY, LANG); } catch { /* private mode */ }
+  applyLang();
+}
+
+function applyLang() {
+  document.documentElement.lang = LANG === "en" ? "en" : "zh-CN";
+  document.title = LANG === "en" ? "CodeErratum — Review results" : "CodeErratum — 审查结果";
+  document.querySelectorAll("[data-en]").forEach((el) => {
+    if (el.dataset.zh === undefined) el.dataset.zh = el.innerHTML;
+    el.innerHTML = LANG === "en" ? el.dataset.en : el.dataset.zh;
+  });
+  document.querySelectorAll("[data-en-ph]").forEach((el) => {
+    if (el.dataset.zhPh === undefined) el.dataset.zhPh = el.getAttribute("placeholder") || "";
+    el.setAttribute("placeholder", LANG === "en" ? el.dataset.enPh : el.dataset.zhPh);
+  });
+  document.querySelectorAll("[data-en-title]").forEach((el) => {
+    if (el.dataset.zhTitle === undefined) el.dataset.zhTitle = el.getAttribute("title") || "";
+    el.setAttribute("title", LANG === "en" ? el.dataset.enTitle : el.dataset.zhTitle);
+  });
+  if ($("langSel")) $("langSel").value = LANG;
+  // Inside a project tab the repo button is not a switcher (the slug pins the
+  // project), so the static data-en must not win over the JS label.
+  if (BASE) $("repoBtn").textContent = T("项目总览");
+  // Repaint whatever is on screen so no half-translated view survives a switch.
+  if (typeof STATE !== "undefined" && STATE.meta) renderMeta();
+  if (typeof STATE !== "undefined" && STATE.run) renderRun();
+  if (typeof loadRuns === "function" && BOOTED) loadRuns(false);
+  if (typeof syncUnitsHint === "function") syncUnitsHint();
+  if (typeof DRAWERS !== "undefined") {
+    const open = Object.keys(DRAWERS).find((id) => !$(id).hidden);
+    if (open) { showOnlyDrawer(""); $(DRAWERS[open]).click(); }
+  }
+}
+let BOOTED = false;
+
+// The multi-project shell hosts this page in an iframe; switching language there
+// must repaint the tab too, without reloading it (a reload would drop the log).
+window.addEventListener("message", (e) => {
+  if (e.origin !== location.origin) return;
+  const next = e.data && e.data.type === "ce:lang" ? e.data.lang : "";
+  if (!next || next === LANG) return;
+  LANG = next === "en" ? "en" : "zh";
+  try { localStorage.setItem(LANG_KEY, LANG); } catch { /* private mode */ }
+  applyLang();
+});
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const ZONE_LABEL = { unique: "独有发现", conflict: "冲突区", consensus: "共识区", all: "全部发现" };
@@ -493,7 +761,7 @@ let STATE = { run: null, zone: null, meta: null };
 
 async function api(path, opts = {}) {
   const res = await fetch(BASE + path, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Lang": LANG },
     ...opts,
   });
   const data = await res.json().catch(() => ({}));
@@ -510,7 +778,7 @@ function toast(msg, bad = false) {
 }
 
 // Errors never auto-dismiss: they open a modal with selectable, copyable text.
-function showError(message, title = "操作失败") {
+function showError(message, title = T("操作失败")) {
   $("errTitle").textContent = title;
   $("errText").value = String(message ?? "");
   $("errOverlay").hidden = false;
@@ -526,12 +794,12 @@ $("errCopy").onclick = async () => {
   const btn = $("errCopy");
   try {
     await navigator.clipboard.writeText($("errText").value);
-    btn.textContent = "已复制";
-    setTimeout(() => { btn.textContent = "复制错误"; }, 1500);
+    btn.textContent = T("已复制");
+    setTimeout(() => { btn.textContent = T("复制错误"); }, 1500);
   } catch {
     $("errText").focus();
     $("errText").select();
-    toast("浏览器拒绝剪贴板访问，已选中文本，请按 ⌘/Ctrl+C");
+    toast(T("浏览器拒绝剪贴板访问，已选中文本，请按 ⌘/Ctrl+C"));
   }
 };
 
@@ -540,10 +808,10 @@ function ago(iso) {
   const d = new Date(iso);
   if (isNaN(d)) return iso;
   const s = (Date.now() - d.getTime()) / 1000;
-  if (s < 60) return "刚刚";
-  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
-  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
-  return `${Math.floor(s / 86400)} 天前`;
+  if (s < 60) return T("刚刚");
+  if (s < 3600) return T("{n} 分钟前", { n: Math.floor(s / 60) });
+  if (s < 86400) return T("{n} 小时前", { n: Math.floor(s / 3600) });
+  return T("{n} 天前", { n: Math.floor(s / 86400) });
 }
 
 function renderMeta() {
@@ -552,11 +820,14 @@ function renderMeta() {
   $("repoLabel").textContent = m.repo;
   const box = $("models");
   if (!m.configured) {
-    box.innerHTML = `<span class="chip" style="color:var(--bad);border-color:var(--bad)">未配置模型：${esc((m.config_error || "").split("\n")[0])}</span>`;
+    const err = (m.config_error || "").split("\n")[0];
+    box.innerHTML = `<span class="chip" style="color:var(--bad);border-color:var(--bad)">${esc(T("未配置模型：{err}", { err }))}</span>`;
   } else {
     box.innerHTML = m.models
       .map((x) => `<span class="chip model">${esc(x.model_id)} · ${esc(x.family)}</span>`).join("")
-      + `<span class="chip" title="配置来源">来源：${esc(m.source === "file" ? "配置文件" : "环境变量")}</span>`;
+      + `<span class="chip" title="${esc(T("配置来源"))}">${esc(T("来源：{src}", {
+        src: m.source === "file" ? T("配置文件") : T("环境变量"),
+      }))}</span>`;
     $("mode").value = m.mode;
   }
   renderRulesHint(m.house_rules);
@@ -565,9 +836,10 @@ function renderMeta() {
 async function boot() {
   try {
     STATE.meta = await api("/api/meta");
-  } catch (e) { showError("无法连接后端: " + e.message, "连接失败"); return; }
+  } catch (e) { showError(T("无法连接后端: {msg}", { msg: e.message }), T("连接失败")); return; }
   renderMeta();
   await loadRuns(true);
+  BOOTED = true;
 }
 
 function renderRulesHint(info) {
@@ -575,13 +847,15 @@ function renderRulesHint(info) {
   const badge = $("rulesBadge");
   const hint = $("rulesHint");
   if (info.applied) {
-    badge.textContent = `已检测到 ${info.path} · ${info.chars} 字`;
-    hint.innerHTML = `留空则使用已检测到的 <code>${esc(info.path)}</code>（sha ${esc(info.sha)}）。`
-      + " 在上面填写会整体替换它。";
+    badge.textContent = T("已检测到 {path} · {chars} 字", { path: info.path, chars: info.chars });
+    hint.innerHTML = T("留空则使用已检测到的 <code>{path}</code>（sha {sha}）。 在上面填写会整体替换它。", {
+      path: esc(info.path), sha: esc(info.sha),
+    });
   } else {
     badge.textContent = "";
-    hint.innerHTML = `未检测到 <code>${esc(info.path || ".codeerratum/rules.md")}</code>。`
-      + " 在上面填写即只对本次运行生效。规范只会追加，不能覆盖格式与锚点硬规则。";
+    hint.innerHTML = T("未检测到 <code>{path}</code>。 在上面填写即只对本次运行生效。规范只会追加，不能覆盖格式与锚点硬规则。", {
+      path: esc(info.path || ".codeerratum/rules.md"),
+    });
   }
 }
 
@@ -589,12 +863,12 @@ async function loadRuns(autoOpen) {
   const { runs } = await api("/api/runs");
   const ul = $("runs");
   if (!runs.length) {
-    ul.innerHTML = `<li class="small" style="cursor:default">还没有运行记录</li>`;
+    ul.innerHTML = `<li class="small" style="cursor:default">${esc(T("还没有运行记录"))}</li>`;
     return;
   }
   ul.innerHTML = runs.map((r) => `
     <li data-run="${esc(r.run_id)}" class="${STATE.run && STATE.run.run_id === r.run_id ? "active" : ""}">
-      <div class="r1"><span class="mono">${esc(r.run_id)}</span><span>${r.n_findings ?? 0} 条</span></div>
+      <div class="r1"><span class="mono">${esc(r.run_id)}</span><span>${esc(count(r.n_findings ?? 0, "条", "finding", "findings"))}</span></div>
       <div class="r2">${esc(ago(r.created_at))} · ${esc(r.model_id || "")}</div>
     </li>`).join("");
   ul.querySelectorAll("li[data-run]").forEach((li) => {
@@ -612,24 +886,24 @@ async function openRun(id) {
     renderRun();
     document.querySelectorAll("ul#runs li").forEach((li) =>
       li.classList.toggle("active", li.dataset.run === id));
-  } catch (e) { showError("打不开该运行: " + e.message, "读取运行失败"); }
+  } catch (e) { showError(T("打不开该运行: {msg}", { msg: e.message }), T("读取运行失败")); }
 }
 
 function renderRun() {
   const run = STATE.run;
   $("empty").hidden = true;
   $("runView").hidden = false;
-  $("runTitle").textContent = "运行 " + run.run_id;
+  $("runTitle").textContent = T("运行 {id}", { id: run.run_id });
   $("runWhen").textContent = `${ago(run.created_at)} · commit ${(run.commit || "?").slice(0, 8)}`;
 
   const chips = [
     `<span class="chip">${esc(run.mode)}</span>`,
-    `<span class="chip">${run.totals.findings} 条发现</span>`,
-    `<span class="chip">${run.totals.rejected} 条被拒</span>`,
-    run.spec_level ? `<span class="chip">规格 ${esc(run.spec_level)}</span>` : "",
-    run.falsifier ? `<span class="chip">证伪者 ${esc(run.falsifier)}</span>` : "",
+    `<span class="chip">${esc(count(run.totals.findings, "条发现", "finding", "findings"))}</span>`,
+    `<span class="chip">${esc(count(run.totals.rejected, "条被拒", "rejected", "rejected"))}</span>`,
+    run.spec_level ? `<span class="chip">${esc(T("规格 {level}", { level: run.spec_level }))}</span>` : "",
+    run.falsifier ? `<span class="chip">${esc(T("证伪者 {model}", { model: run.falsifier }))}</span>` : "",
     run.house_rules && run.house_rules.applied
-      ? `<span class="chip" title="项目规范会改变审查侧重点，两次结果不同先看这里">规范 ${esc(run.house_rules.chars)} 字 · ${esc(run.house_rules.sha)}</span>`
+      ? `<span class="chip" title="${esc(T("项目规范会改变审查侧重点，两次结果不同先看这里"))}">${esc(T("规范 {chars} 字 · {sha}", { chars: run.house_rules.chars, sha: run.house_rules.sha }))}</span>`
       : "",
   ];
   run.models.forEach((m) => chips.push(`<span class="chip model">${esc(m)}</span>`));
@@ -644,7 +918,9 @@ function renderRun() {
   const rejected = run.rejected || [];
   $("rejectedBox").innerHTML = rejected.length ? `
     <details class="rejected-details">
-      <summary>${rejected.length} 条发现被定位校验丢弃（防幻觉）</summary>
+      <summary>${esc(LANG === "en"
+        ? `${count(rejected.length, "", "finding", "findings")} dropped by anchor validation (anti-hallucination)`
+        : T("{n} 条发现被定位校验丢弃（防幻觉）", { n: rejected.length }))}</summary>
       <div class="rejected-list">${rejected.map((r) => `
         <div class="rejected-item">
           <span class="mono">${esc(r.reason || "unknown")}</span>
@@ -654,8 +930,8 @@ function renderRun() {
     </details>` : "";
 
   $("tabs").innerHTML = Object.entries(run.zones).map(([k, v]) => `
-    <button class="tab ${k === STATE.zone ? "active" : ""}" data-zone="${k}" title="${esc(ZONE_HINT[k] || "")}">
-      ${ZONE_LABEL[k] || k}<span class="n">${v.length}</span>
+    <button class="tab ${k === STATE.zone ? "active" : ""}" data-zone="${k}" title="${esc(T(ZONE_HINT[k] || ""))}">
+      ${esc(T(ZONE_LABEL[k] || k))}<span class="n">${v.length}</span>
     </button>`).join("");
   $("tabs").querySelectorAll(".tab").forEach((b) => {
     b.onclick = () => { STATE.zone = b.dataset.zone; renderRun(); };
@@ -664,7 +940,7 @@ function renderRun() {
   const list = run.zones[STATE.zone] || [];
   $("cards").innerHTML = list.length
     ? list.map(cardHTML).join("")
-    : `<div class="empty" style="margin-top:8vh">这个分区没有发现</div>`;
+    : `<div class="empty" style="margin-top:8vh">${esc(T("这个分区没有发现"))}</div>`;
   bindCards();
 }
 
@@ -676,7 +952,7 @@ function cardHTML(f) {
   const extraAnchors = (f.anchors || []).slice(1)
     .map((x) => `<span class="chip mono">${esc(x.file)}:${x.start_line}</span>`).join("");
   const ev = (f.evidence || []).map((e) =>
-    `<span class="chip ${e.strength === "hard" ? "hard" : ""}" title="${esc(e.summary)}">${esc(e.kind)}${e.strength === "hard" ? " · 硬证据" : ""}</span>`).join("");
+    `<span class="chip ${e.strength === "hard" ? "hard" : ""}" title="${esc(e.summary)}">${esc(e.kind)}${e.strength === "hard" ? esc(T(" · 硬证据")) : ""}</span>`).join("");
   const verdicts = (f.verdicts || []).map((v) =>
     `<div>${esc(v.model_id)} · <b>${esc(v.role)}</b> — ${esc(v.reason)}</div>`).join("");
   const sug = f.suggestion || {};
@@ -689,29 +965,29 @@ function cardHTML(f) {
     <div class="card-head">
       <span class="sev ${esc(f.severity)}">${esc(f.severity)}</span>
       <div class="claim">${esc(f.claim)}</div>
-      <span class="badge ${status}">${{ open: "待裁决", accepted: "已采纳", rejected: "已驳回" }[status] || status}</span>
+      <span class="badge ${status}">${esc(T({ open: "待裁决", accepted: "已采纳", rejected: "已驳回" }[status] || status))}</span>
     </div>
     <div class="card-body">
       <div class="loc">
         <span class="path">${esc(a.file)}:${a.start_line}</span>
         ${a.symbol ? `<span class="mono">${esc(a.symbol)}</span>` : ""}
         <span>${esc(f.category)} · ${esc(f.lens)}</span>
-        <span class="chip">证据 ${esc(f.verification || "unverified")}</span>
+        <span class="chip">${esc(T("证据 {value}", { value: f.verification || "unverified" }))}</span>
         ${extraAnchors}
       </div>
       ${snippet ? `<pre class="snippet">${snippet}</pre>` : ""}
       <div class="detail">${esc(f.detail || "")}</div>
       ${ev ? `<div class="ev">${ev}</div>` : ""}
-      <div class="kv">修改建议</div>
+      <div class="kv">${esc(T("修改建议"))}</div>
       ${sugBody}
-      ${sug.acceptance ? `<div class="accept"><span class="small">验收</span><code>${esc(sug.acceptance)}</code>
-        <button class="ghost" data-copy="${esc(sug.acceptance)}">复制</button></div>` : ""}
-      ${verdicts ? `<div class="kv">证伪轮</div><div class="verdicts">${verdicts}</div>` : ""}
+      ${sug.acceptance ? `<div class="accept"><span class="small">${esc(T("验收"))}</span><code>${esc(sug.acceptance)}</code>
+        <button class="ghost" data-copy="${esc(sug.acceptance)}">${esc(T("复制"))}</button></div>` : ""}
+      ${verdicts ? `<div class="kv">${esc(T("证伪轮"))}</div><div class="verdicts">${verdicts}</div>` : ""}
       <div class="actions">
-        <button data-act="accepted">采纳</button>
-        <input class="reason" placeholder="驳回理由（写清为什么是误报）">
-        <button data-act="rejected">驳回</button>
-        <button class="ghost" data-act="open">重置</button>
+        <button data-act="accepted">${esc(T("采纳"))}</button>
+        <input class="reason" placeholder="${esc(T("驳回理由（写清为什么是误报）"))}">
+        <button data-act="rejected">${esc(T("驳回"))}</button>
+        <button class="ghost" data-act="open">${esc(T("重置"))}</button>
       </div>
     </div>
   </article>`;
@@ -732,7 +1008,7 @@ function bindCards() {
       btn.onclick = async () => {
         const status = btn.dataset.act;
         const reason = card.querySelector(".reason").value.trim();
-        if (status === "rejected" && !reason) { showError("驳回要写理由，否则统计没有意义", "无法保存裁决"); return; }
+        if (status === "rejected" && !reason) { showError(T("驳回要写理由，否则统计没有意义"), T("无法保存裁决")); return; }
         btn.disabled = true;
         try {
           const r = await api(`/api/findings/${id}/status`, {
@@ -740,15 +1016,15 @@ function bindCards() {
             body: JSON.stringify({ status, reason }),
           });
           applyStatus(r.id, r.status, r.reason);
-          toast(status === "accepted" ? "已采纳" : status === "rejected" ? "已驳回" : "已重置");
-        } catch (e) { showError(e.message, "保存裁决失败"); }
+          toast(status === "accepted" ? T("已采纳") : status === "rejected" ? T("已驳回") : T("已重置"));
+        } catch (e) { showError(e.message, T("保存裁决失败")); }
         finally { btn.disabled = false; }
       };
     });
     const copyBtn = card.querySelector("[data-copy]");
     if (copyBtn) copyBtn.onclick = async () => {
-      try { await navigator.clipboard.writeText(copyBtn.dataset.copy); toast("已复制验收命令"); }
-      catch { toast("浏览器拒绝剪贴板访问，请手动复制"); }
+      try { await navigator.clipboard.writeText(copyBtn.dataset.copy); toast(T("已复制验收命令")); }
+      catch { toast(T("浏览器拒绝剪贴板访问，请手动复制")); }
     };
   });
 }
@@ -774,10 +1050,12 @@ function progressReset() {
 // Colour by importance. Explicit levels from callers (done/err) always win;
 // otherwise infer from the message so both SSE frames and polled history agree.
 function logLevel(text) {
-  if (/失败|错误|异常|超时|error|exception|failed|timed?\s*out/i.test(text)) return "err";
-  if (/证据不足|insufficient_context|未审|跳过|截断|降级|谨慎|警告|仅审查|refuted|abstain/i.test(text)) return "warn";
-  if (/^完成|审查完成|所有模型评审完成|生成报告|confirmed|通过/.test(text)) return "ok";
-  if (/证伪轮|启动|Mode:|Split diff|Spec level:|Project rules|开始聚类|审查范围/i.test(text)) return "hi";
+  // Keywords for both languages: the server writes progress in the language the
+  // tab asked for, so an English run must colour exactly like a Chinese one.
+  if (/失败|错误|异常|超时|error|exception|failed|timed?\s*out|refused/i.test(text)) return "err";
+  if (/证据不足|insufficient_context|insufficient|未审|跳过|截断|降级|谨慎|警告|仅审查|超出|refuted|abstain|skipped|truncated|out of range|capped|reviewing \d+ of \d+/i.test(text)) return "warn";
+  if (/^完成|^done:|审查完成|所有模型评审完成|all model reviews|生成报告|writing the report|confirmed|通过/i.test(text)) return "ok";
+  if (/证伪轮|falsification round|启动|starting \d+|Mode:|Split diff|Spec level:|Project rules|开始聚类|审查范围|diff range/i.test(text)) return "hi";
   return "";
 }
 function progressAddLine(text, cls = "") {
@@ -804,37 +1082,40 @@ function progressFinishHead(text) {
 function setRunBusy(busy) {
   const btn = $("runBtn");
   btn.disabled = busy;
-  btn.innerHTML = busy ? `<span class="spinner"></span> 审查中…` : "运行审查";
+  btn.innerHTML = busy ? `<span class="spinner"></span> ${esc(T("审查中…"))}` : esc(T("运行审查"));
   const stop = $("stopBtn");
   stop.hidden = !busy;
   stop.disabled = false;
-  stop.textContent = "停止审查";
+  stop.textContent = T("停止审查");
 }
 function tokenSummary(tk) {
   if (!tk || tk.total == null) return [];
-  const n = (v) => Number(v || 0).toLocaleString("zh-CN");
+  const n = (v) => Number(v || 0).toLocaleString(LANG === "en" ? "en-US" : "zh-CN");
   const lines = [
-    `token 消耗：${n(tk.input)} 输入 + ${n(tk.output)} 输出 = ${n(tk.total)} 合计`
-    + (tk.cached ? `（含缓存 ${n(tk.cached)}）` : ""),
+    T("token 消耗：{input} 输入 + {output} 输出 = {total} 合计", {
+      input: n(tk.input), output: n(tk.output), total: n(tk.total),
+    }) + (tk.cached ? T("（含缓存 {cached}）", { cached: n(tk.cached) }) : ""),
   ];
   for (const [model, r] of Object.entries(tk.by_model || {})) {
-    lines.push(`  ${model}：${r.calls} 次 · ${n(r.input)} 入 / ${n(r.output)} 出 = ${n(r.total)}`);
+    lines.push("  " + T("{model}：{calls} 次 · {input} 入 / {output} 出 = {total}", {
+      model, calls: r.calls, input: n(r.input), output: n(r.output), total: n(r.total),
+    }));
   }
   return lines;
 }
 $("stopBtn").onclick = async () => {
   const b = $("stopBtn");
   b.disabled = true;
-  b.textContent = "停止中…";
+  b.textContent = T("停止中…");
   try {
     const r = await api("/api/review/stop", { method: "POST", body: "{}" });
-    progressAddLine(r.message || "已请求停止", "err");
-    progressSetRunning("正在停止…");
+    progressAddLine(r.message || T("已请求停止"), "err");
+    progressSetRunning(T("正在停止…"));
   } catch (e) {
     // The review may have finished between the click and the request.
-    progressAddLine("停止失败：" + e.message, "err");
+    progressAddLine(T("停止失败：{msg}", { msg: e.message }), "err");
     b.disabled = false;
-    b.textContent = "停止审查";
+    b.textContent = T("停止审查");
   }
 };
 
@@ -847,19 +1128,19 @@ async function pollReviewStatus() {
     setRunBusy(true);
     $("progressBox").hidden = false;
     const p = st.params || {};
-    const scope = [p.diff, p.paths ? `路径 ${p.paths}` : ""].filter(Boolean).join(" · ");
+    const scope = [p.diff, p.paths ? T("路径 {paths}", { paths: p.paths }) : ""].filter(Boolean).join(" · ");
     const secs = st.elapsed_s != null ? ` · ${st.elapsed_s}s` : "";
     if (st.status === "stopping") {
-      progressSetRunning("正在停止…");
+      progressSetRunning(T("正在停止…"));
       $("stopBtn").disabled = true;
-      $("stopBtn").textContent = "停止中…";
+      $("stopBtn").textContent = T("停止中…");
     } else if (st.status === "queued") {
-      progressSetRunning("排队中…等待其他项目释放执行位");
+      progressSetRunning(T("排队中…等待其他项目释放执行位"));
       $("stopBtn").hidden = false;
       $("stopBtn").disabled = false;
-      $("stopBtn").textContent = "取消排队";
+      $("stopBtn").textContent = T("取消排队");
     } else {
-      progressSetRunning(`审查中…${secs}${scope ? ` · ${scope}` : ""}`);
+      progressSetRunning(T("审查中…") + secs + (scope ? ` · ${scope}` : ""));
     }
     const log = $("progressLog");
     const msgs = st.messages || [];
@@ -873,25 +1154,62 @@ async function pollReviewStatus() {
     setRunBusy(false);
     if (st.status === "done") {
       tokenSummary(st.tokens).forEach((l) => progressAddLine(l, "done"));
-      progressFinishHead("审查完成");
+      progressFinishHead(T("审查完成"));
       loadRuns(false);
     } else if (st.status === "empty") {
-      progressFinishHead("无改动");
+      progressFinishHead(T("无改动"));
     } else if (st.status === "cancelled") {
-      progressAddLine("审查已停止", "done");
-      progressFinishHead("审查已停止");
+      progressAddLine(T("审查已停止"), "done");
+      progressFinishHead(T("审查已停止"));
     } else if (st.status === "error") {
-      const reason = st.error || (st.messages || []).slice(-1)[0] || "未知错误";
-      progressAddLine("错误：" + reason, "err");
-      progressFinishHead("审查失败：" + reason);
+      const reason = st.error || (st.messages || []).slice(-1)[0] || T("未知错误");
+      progressAddLine(T("错误：{msg}", { msg: reason }), "err");
+      progressFinishHead(T("审查失败：{msg}", { msg: reason }));
       showError(
-        `其他标签页或断线前启动的审查失败。\n\n${reason}`,
-        "审查失败"
+        T("其他标签页或断线前启动的审查失败。\n\n{reason}", { reason }),
+        T("审查失败")
       );
     }
   }
 }
 setInterval(pollReviewStatus, 1500);
+
+// The server is the authority on the cap (MAX_UNITS_CAP); this only mirrors it so
+// an out-of-range value is visible before the run starts instead of after.
+const MAX_UNITS_CAP = 50;
+// 0 must survive this: `Number(v) || 10` would silently turn 0 into 10 and the
+// server's "至少 1 个" notice would never fire from the UI.
+function unitsValue() {
+  const raw = $("maxUnits").value.trim();
+  const n = Number(raw);
+  return raw && Number.isFinite(n) ? Math.trunc(n) : 10;
+}
+function syncUnitsHint() {
+  const hint = $("maxUnitsHint");
+  const raw = $("maxUnits").value.trim();
+  const asked = Number(raw);
+  if (!raw || !Number.isFinite(asked)) {
+    hint.textContent = T("审查单元数，1–{cap}；超出会按上限执行并提示。", { cap: MAX_UNITS_CAP });
+    hint.classList.remove("warn");
+    return;
+  }
+  const wanted = Math.trunc(asked);
+  const actual = Math.max(1, Math.min(wanted, MAX_UNITS_CAP));
+  if (actual !== wanted) {
+    hint.textContent = T("超出 1–{cap}，服务端会按 {used} 执行，并在进度里提示。", {
+      cap: MAX_UNITS_CAP, used: actual,
+    });
+    hint.classList.add("warn");
+  } else {
+    hint.textContent = actual === MAX_UNITS_CAP
+      ? T("最多 {actual} 个审查单元（已到上限）。", { actual })
+      : T("最多 {actual} 个审查单元。", { actual });
+    hint.classList.remove("warn");
+  }
+}
+$("maxUnits").addEventListener("input", syncUnitsHint);
+$("maxUnits").addEventListener("blur", syncUnitsHint);
+syncUnitsHint();
 
 $("runBtn").onclick = async () => {
   const btn = $("runBtn");
@@ -899,7 +1217,7 @@ $("runBtn").onclick = async () => {
     diff: $("diff").value.trim() || "HEAD~1",
     paths: $("paths").value.trim(),
     mode: $("mode").value,
-    max_units: Number($("maxUnits").value) || 10,
+    max_units: unitsValue(),
     author_model: $("authorModel").value.trim(),
     write_markdown: $("writeMd").checked,
     house_rules: $("houseRules").value,
@@ -913,7 +1231,7 @@ $("runBtn").onclick = async () => {
     reviewTracking = true;
     setRunBusy(true);
     $("progressBox").hidden = false;
-    progressSetRunning("审查中…（其他标签页或连接已启动）");
+    progressSetRunning(T("审查中…（其他标签页或连接已启动）"));
     await pollReviewStatus();
     return;  // leave the button busy; the poller clears it when the run ends
   }
@@ -921,7 +1239,7 @@ $("runBtn").onclick = async () => {
   setRunBusy(true);
   reviewStreaming = true;
   progressReset();
-  progressSetRunning("审查中…");
+  progressSetRunning(T("审查中…"));
   let runId = null;
   let streamCompleted = false;  // a terminal frame arrived; server work is over
   try {
@@ -929,7 +1247,7 @@ $("runBtn").onclick = async () => {
     // stream. Same-origin POST keeps the CSRF/Origin guard intact.
     const res = await fetch(BASE + "/api/review/stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "X-Lang": LANG },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -937,8 +1255,8 @@ $("runBtn").onclick = async () => {
       // Lost the race to another request: track the winner instead of erroring.
       if (res.status === 409) {
         reviewTracking = true;
-        progressAddLine("已有审查正在进行中，正在跟踪其进度…");
-        progressSetRunning("审查中…");
+        progressAddLine(T("已有审查正在进行中，正在跟踪其进度…"));
+        progressSetRunning(T("审查中…"));
         await pollReviewStatus();
         return;  // poller owns button state now
       }
@@ -958,27 +1276,33 @@ $("runBtn").onclick = async () => {
           progressAddLine(ev.message || "");
         } else if (ev.type === "empty") {
           streamCompleted = true;
-          progressAddLine(ev.message || "没有可审查的改动", "done");
-          progressFinishHead("无改动");
+          progressAddLine(ev.message || T("没有可审查的改动"), "done");
+          progressFinishHead(T("无改动"));
         } else if (ev.type === "cancelled") {
           streamCompleted = true;
-          progressAddLine(ev.message || "审查已停止", "done");
-          progressFinishHead("审查已停止");
+          progressAddLine(ev.message || T("审查已停止"), "done");
+          progressFinishHead(T("审查已停止"));
         } else if (ev.type === "error") {
           streamCompleted = true;
-          progressAddLine("错误：" + (ev.error || "未知错误"), "err");
-          progressFinishHead("审查失败：" + (ev.error || "未知错误"));
+          progressAddLine(T("错误：{msg}", { msg: ev.error || T("未知错误") }), "err");
+          progressFinishHead(T("审查失败：{msg}", { msg: ev.error || T("未知错误") }));
           showError(
-            `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
-            + `审查模式：${body.mode}\n\n${ev.error || "未知错误"}`,
-            "审查失败"
+            T("审查范围：{diff}{paths}\n审查模式：{mode}\n\n{error}", {
+              diff: body.diff || T("(空)"),
+              paths: body.paths ? " · " + T("路径 {paths}", { paths: body.paths }) : "",
+              mode: body.mode,
+              error: ev.error || T("未知错误"),
+            }),
+            T("审查失败")
           );
         } else if (ev.type === "done") {
           streamCompleted = true;
           runId = ev.run_id;
-          progressAddLine(`完成：${ev.findings} 条发现 · ${ev.calls} 次调用 · 均 ${ev.latency_ms_avg}ms`, "done");
+          progressAddLine(T("完成：{n} 条发现 · {calls} 次调用 · 均 {ms}ms", {
+            n: ev.findings, calls: ev.calls, ms: ev.latency_ms_avg,
+          }), "done");
           tokenSummary(ev.tokens).forEach((l) => progressAddLine(l, "done"));
-          progressFinishHead("审查完成");
+          progressFinishHead(T("审查完成"));
         }
       }
     };
@@ -995,17 +1319,21 @@ $("runBtn").onclick = async () => {
     }
     if (buffer.trim()) { frames.push(buffer); await flushFrames(); }
     if (runId) {
-      toast("审查完成");
+      toast(T("审查完成"));
       await loadRuns(false);
       await openRun(runId);
     }
   } catch (e) {
-    progressAddLine("错误：" + e.message, "err");
-    progressFinishHead("审查失败");
+    progressAddLine(T("错误：{msg}", { msg: e.message }), "err");
+    progressFinishHead(T("审查失败"));
     showError(
-      `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
-      + `审查模式：${body.mode}\n\n${e.message}`,
-      "审查失败"
+      T("审查范围：{diff}{paths}\n审查模式：{mode}\n\n{error}", {
+        diff: body.diff || T("(空)"),
+        paths: body.paths ? " · " + T("路径 {paths}", { paths: body.paths }) : "",
+        mode: body.mode,
+        error: e.message,
+      }),
+      T("审查失败")
     );
   } finally {
     reviewStreaming = false;
@@ -1022,14 +1350,14 @@ $("statsBtn").onclick = async () => {
   try {
     const s = await api("/api/stats");
     const rows = [
-      ["审查运行数", s.runs], ["发现总数", s.findings_total],
-      ["已采纳", s.accepted], ["已驳回", s.rejected],
-      ["采纳率", s.acceptance_rate == null ? "尚无人工裁决" : (s.acceptance_rate * 100).toFixed(1) + "%"],
+      [T("审查运行数"), s.runs], [T("发现总数"), s.findings_total],
+      [T("已采纳"), s.accepted], [T("已驳回"), s.rejected],
+      [T("采纳率"), s.acceptance_rate == null ? T("尚无人工裁决") : (s.acceptance_rate * 100).toFixed(1) + "%"],
     ].map(([k, v]) => `<div class="stat-row"><span>${k}</span><b>${esc(v)}</b></div>`).join("");
     const cat = (s.by_category || []).map((r) =>
       `<tr><td>${esc(r.category)}</td><td>${r.total}</td><td>${r.rejected}</td></tr>`).join("");
     $("statsBody").innerHTML = rows +
-      (cat ? `<h3 style="margin-top:16px">按分类</h3><table class="mini"><tr><th>分类</th><th>总数</th><th>驳回</th></tr>${cat}</table>` : "");
+      (cat ? `<h3 style="margin-top:16px">${esc(T("按分类"))}</h3><table class="mini"><tr><th>${esc(T("分类"))}</th><th>${esc(T("总数"))}</th><th>${esc(TR("驳回", "Rejected"))}</th></tr>${cat}</table>` : "");
   } catch (e) { $("statsBody").textContent = e.message; }
 };
 
@@ -1071,7 +1399,7 @@ const DRIFT_LABEL = {
 $("docsBtn").onclick = async () => {
   if (!toggleDrawer("docsDrawer")) return;
   $("docsBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px">
-    <span class="spinner"></span> 解析 AST…</div>`;
+    <span class="spinner"></span> ${esc(T("解析 AST…"))}</div>`;
   try {
     renderDocs(await api("/api/docs"));
   } catch (e) {
@@ -1082,27 +1410,27 @@ $("docsBtn").onclick = async () => {
 function renderDocs(data) {
   const publicCount = data.modules.reduce((sum, m) => sum + m.public, 0);
   const parts = [
-    statRow("模块", data.modules.length),
-    statRow("公开符号", publicCount),
-    statRow("基线", data.has_baseline ? String(data.baseline_commit || "?").slice(0, 8) : "未生成"),
+    statRow(T("模块"), data.modules.length),
+    statRow(T("公开符号"), publicCount),
+    statRow(T("基线"), data.has_baseline ? String(data.baseline_commit || "?").slice(0, 8) : T("未生成")),
   ];
 
   if (!data.has_baseline) {
     parts.push(`<p style="color:var(--muted);font-size:12px;line-height:1.6;margin-top:10px">
-      还没有基线。先跑 <code>codeerratum docs</code> 生成，之后这里显示签名漂移。</p>`);
+      ${T("还没有基线。先跑 <code>codeerratum docs</code> 生成，之后这里显示签名漂移。")}</p>`);
   } else if (data.drift.length) {
-    parts.push(`<h3 style="margin-top:16px">漂移 ${data.drift.length} 处</h3>`);
-    parts.push(`<table class="mini"><tr><th>类型</th><th>文件</th><th>符号</th></tr>` +
+    parts.push(`<h3 style="margin-top:16px">${esc(T("漂移 {n} 处", { n: data.drift.length }))}</h3>`);
+    parts.push(`<table class="mini"><tr><th>${esc(T("类型"))}</th><th>${esc(T("文件"))}</th><th>${esc(T("符号"))}</th></tr>` +
       data.drift.slice(0, 40).map((x) => `<tr>
-        <td style="color:${x.breaking ? "var(--bad)" : "var(--muted)"}">${esc(DRIFT_LABEL[x.kind] || x.kind)}</td>
+        <td style="color:${x.breaking ? "var(--bad)" : "var(--muted)"}">${esc(T(DRIFT_LABEL[x.kind] || x.kind))}</td>
         <td style="font-family:ui-monospace,monospace;font-size:11px">${esc(x.path)}</td>
         <td>${esc(x.symbol || "—")}</td></tr>`).join("") + `</table>`);
   } else {
-    parts.push(`<p style="color:var(--ok);font-size:12.5px;margin-top:12px">无签名漂移</p>`);
+    parts.push(`<p style="color:var(--ok);font-size:12.5px;margin-top:12px">${esc(T("无签名漂移"))}</p>`);
   }
 
-  parts.push(`<h3 style="margin-top:16px">模块（${data.modules.length}）</h3>`);
-  parts.push(`<table class="mini"><tr><th>模块</th><th>公开/全部</th></tr>` +
+  parts.push(`<h3 style="margin-top:16px">${esc(T("模块（{n}）", { n: data.modules.length }))}</h3>`);
+  parts.push(`<table class="mini"><tr><th>${esc(T("模块"))}</th><th>${esc(T("公开/全部"))}</th></tr>` +
     data.modules.slice(0, 60).map((m) => `<tr>
       <td style="font-family:ui-monospace,monospace;font-size:11px">${esc(m.module)}</td>
       <td style="color:var(--muted)">${m.public}/${m.total}</td></tr>`).join("") + `</table>`);
@@ -1114,6 +1442,7 @@ const MODES = [
   ["dual", "dual · 双模型 + 证伪"],
   ["committee", "committee · 三模型"],
 ];
+const modeLabel = (zh) => T(zh);
 
 function cfgRow(m = {}) {
   const tr = document.createElement("tr");
@@ -1121,19 +1450,19 @@ function cfgRow(m = {}) {
   tr.innerHTML = `
     <td><input class="cfg-mid" value="${esc(m.model_id || "")}" placeholder="gpt-4o" spellcheck="false"></td>
     <td><input class="cfg-url" value="${esc(m.base_url || "")}" placeholder="https://api.example.com/v1" spellcheck="false"></td>
-    <td><input class="cfg-fam" value="${esc(m.family || "")}" placeholder="自动推断"></td>
-    <td><input class="cfg-key" type="password" value="" placeholder="${esc(m.api_key_hint || "无")}" autocomplete="new-password"></td>
-    <td><button class="ghost cfg-test" title="检测该模型是否可用（发一个最小请求，不写入配置）">检测</button></td>
-    <td><button class="ghost cfg-del" title="删除这一行">×</button></td>`;
+    <td><input class="cfg-fam" value="${esc(m.family || "")}" placeholder="${esc(T("自动推断"))}"></td>
+    <td><input class="cfg-key" type="password" value="" placeholder="${esc(m.api_key_hint || T("无"))}" autocomplete="new-password"></td>
+    <td><button class="ghost cfg-test" title="${esc(T("检测该模型是否可用（发一个最小请求，不写入配置）"))}">${esc(T("检测"))}</button></td>
+    <td><button class="ghost cfg-del" title="${esc(T("删除这一行"))}">×</button></td>`;
   tr.querySelector(".cfg-del").onclick = () => tr.remove();
   tr.querySelector(".cfg-test").onclick = () => checkCfgRow(tr);
   // Editing any field invalidates the previous probe result.
   tr.querySelectorAll("input").forEach((input) => {
     input.addEventListener("input", () => {
       const b = tr.querySelector(".cfg-test");
-      b.textContent = "检测";
+      b.textContent = T("检测");
       b.className = "ghost cfg-test";
-      b.title = "检测该模型是否可用（发一个最小请求，不写入配置）";
+      b.title = T("检测该模型是否可用（发一个最小请求，不写入配置）");
     });
   });
   return tr;
@@ -1152,57 +1481,54 @@ let BATCH_CHECKING = false;
 
 async function checkCfgRow(tr) {
   const btn = tr.querySelector(".cfg-test");
-  const mid = tr.querySelector(".cfg-mid").value.trim() || "(未命名模型)";
+  const mid = tr.querySelector(".cfg-mid").value.trim() || T("(未命名模型)");
   btn.disabled = true;
-  btn.innerHTML = `<span class="spinner"></span> 检测中`;
+  btn.innerHTML = `<span class="spinner"></span> ${esc(T("检测中"))}`;
   let failure = "";
   try {
     const r = await api("/api/model/check", {
       method: "POST", body: JSON.stringify(cfgRowBody(tr)),
     });
-    const detail = r.detail + (r.status ? `（HTTP ${r.status}）` : "");
-    btn.textContent = r.ok ? "✓ 可用" : "✗ 不可用";
+    const detail = r.detail + (r.status ? T("（HTTP {status}）", { status: r.status }) : "");
+    btn.textContent = r.ok ? T("✓ 可用") : T("✗ 不可用");
     btn.className = "ghost cfg-test " + (r.ok ? "ok" : "bad");
     btn.title = detail + (r.ok ? ` · ${r.latency_ms}ms` : "");
     if (!r.ok) failure = `${mid}：${detail}`;
   } catch (e) {
-    btn.textContent = "✗ 检测失败";
+    btn.textContent = T("✗ 检测失败");
     btn.className = "ghost cfg-test bad";
     btn.title = e.message;
     failure = `${mid}：${e.message}`;
   } finally {
     btn.disabled = false;
   }
-  if (failure && !BATCH_CHECKING) showError(failure, "模型检测失败");
+  if (failure && !BATCH_CHECKING) showError(failure, T("模型检测失败"));
   return failure;
 }
 
 function renderConfig(info) {
   const parts = [];
   const src = info.source === "file"
-    ? `本地配置文件 <code>${esc(info.path)}</code>（保存后重启仍生效）`
+    ? T("本地配置文件 <code>{path}</code>（保存后重启仍生效）", { path: esc(info.path) })
     : info.source === "env"
-      ? "环境变量（尚未保存；点「保存配置」后写入本地文件）"
-      : "未配置";
-  parts.push(`<div class="cfg-note">当前来源：${src}</div>`);
+      ? T("环境变量（尚未保存；点「保存配置」后写入本地文件）")
+      : T("未配置");
+  parts.push(`<div class="cfg-note">${T("当前来源：{src}", { src })}</div>`);
   if (info.config_error) parts.push(`<div class="cfg-note bad" style="margin-top:8px">${esc(info.config_error)}</div>`);
   parts.push(`<div class="field" style="margin:14px 0 6px">
-    <label for="cfgMode">审查模式</label>
+    <label for="cfgMode">${esc(T("审查模式"))}</label>
     <select id="cfgMode">${MODES.map(([v, label]) =>
-      `<option value="${v}" ${v === info.mode ? "selected" : ""}>${label}</option>`).join("")}</select>
+      `<option value="${v}" ${v === info.mode ? "selected" : ""}>${esc(modeLabel(label))}</option>`).join("")}</select>
   </div>`);
-  parts.push(`<div class="hint" style="margin:0 0 6px">
-    dual 需 2 个不同 model_id、committee 需 3 个（同厂不同版本也算）；family 只作标签，空着会自动推断。证伪者优先用未参与审查的模型，否则由其他评审者交叉验证。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。
-    点「检测」发一个最小请求验证端点（不写入配置）：绿勾可用，红叉会弹出可复制的原因；改动字段后结果自动失效。
-  </div>`);
+  parts.push(`<div class="hint" style="margin:0 0 6px">${esc(T("dual 需 2 个不同 model_id、committee 需 3 个（同厂不同版本也算）；family 只作标签，空着会自动推断。证伪者优先用未参与审查的模型，否则由其他评审者交叉验证。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。 点「检测」发一个最小请求验证端点（不写入配置）：绿勾可用，红叉会弹出可复制的原因；改动字段后结果自动失效。"))}</div>`);
   parts.push(`<table class="cfg"><thead><tr>
-    <th>model_id</th><th>base_url</th><th>family</th><th>api_key</th><th>检测</th><th></th>
+    <th>model_id</th><th>base_url</th><th>family</th><th>api_key</th><th>${esc(T("检测"))}</th><th></th>
   </tr></thead><tbody id="cfgRows"></tbody></table>`);
   parts.push(`<div class="actions" style="margin-top:12px">
-    <button class="ghost" id="cfgAdd">+ 添加模型</button>
-    <button class="ghost" id="cfgTestAll">检测全部</button>
+    <button class="ghost" id="cfgAdd">${esc(T("+ 添加模型"))}</button>
+    <button class="ghost" id="cfgTestAll">${esc(T("检测全部"))}</button>
     <span class="spacer"></span>
-    <button class="primary" id="cfgSave">保存配置</button>
+    <button class="primary" id="cfgSave">${esc(T("保存配置"))}</button>
   </div>`);
   $("configBody").innerHTML = parts.join("");
   const tbody = $("cfgRows");
@@ -1221,7 +1547,7 @@ function renderConfig(info) {
     } finally {
       BATCH_CHECKING = false;
     }
-    if (failures.length) showError(failures.join("\n\n"), "模型检测失败");
+    if (failures.length) showError(failures.join("\n\n"), T("模型检测失败"));
   };
   $("cfgSave").onclick = saveConfig;
 }
@@ -1246,9 +1572,9 @@ async function saveConfig() {
     renderConfig(info);
     STATE.meta = await api("/api/meta");
     renderMeta();
-    toast("配置已保存到 " + info.path);
+    toast(T("配置已保存到 {path}", { path: info.path }));
   } catch (e) {
-    showError(e.message, "保存配置失败");
+    showError(e.message, T("保存配置失败"));
   } finally {
     btn.disabled = false;
   }
@@ -1272,28 +1598,25 @@ function renderRepoDrawer() {
   const cur = STATE.meta ? STATE.meta.repo : "";
   const recent = recentRepos().filter((p) => p !== cur);
   const parts = [
-    `<div class="cfg-note">当前仓库：<code>${esc(cur)}</code><br>
-      三种方式选仓库：① 点「浏览本地…」弹出系统文件夹选择器；
-      ② 把文件夹直接拖到本窗口；③ 粘贴绝对路径（支持 <code>~</code>）。
-      填仓库内任意子目录会自动定位到 git 根目录。切换只影响当前服务进程，不会改动磁盘上的代码。<br>
-      点「打开当前仓库文件夹」可在系统文件管理器中查看这个目录。</div>`,
+    `<div class="cfg-note">${T("当前仓库：{path}", { path: `<code>${esc(cur)}</code>` })}<br>
+      ${T("三种方式选仓库：① 点「浏览本地…」弹出系统文件夹选择器；② 把文件夹直接拖到本窗口；③ 粘贴绝对路径（支持 <code>~</code>）。填仓库内任意子目录会自动定位到 git 根目录。切换只影响当前服务进程，不会改动磁盘上的代码。点「打开当前仓库文件夹」可在系统文件管理器中查看这个目录。")}</div>`,
     `<div class="actions" style="margin-top:10px">
-      <button class="ghost" id="repoOpen">打开当前仓库文件夹</button>
+      <button class="ghost" id="repoOpen">${esc(T("打开当前仓库文件夹"))}</button>
     </div>`,
     `<div class="field" style="margin:14px 0 8px">
-      <label for="repoPath">本地仓库路径</label>
-      <input id="repoPath" placeholder="点「浏览本地」或粘贴 /Users/me/my-project" spellcheck="false">
-      <div class="hint">拖拽只暴露文件夹名，会在家目录下按名字定位 git 仓库（最多 5 层）。多匹配时列出候选。</div>
+      <label for="repoPath">${esc(T("本地仓库路径"))}</label>
+      <input id="repoPath" placeholder="${esc(T("点「浏览本地」或粘贴 /Users/me/my-project"))}" spellcheck="false">
+      <div class="hint">${esc(T("拖拽只暴露文件夹名，会在家目录下按名字定位 git 仓库（最多 5 层）。多匹配时列出候选。"))}</div>
     </div>`,
     `<div class="actions">
-      <button class="ghost" id="repoBrowse">浏览本地…</button>
+      <button class="ghost" id="repoBrowse">${esc(T("浏览本地…"))}</button>
       <span class="spacer"></span>
-      <button class="primary" id="repoSwitch">切换</button>
+      <button class="primary" id="repoSwitch">${esc(T("切换"))}</button>
     </div>`,
     `<div class="cfg-note bad" id="repoErr" style="margin-top:10px" hidden></div>`,
   ];
   if (recent.length) {
-    parts.push(`<h3 style="margin-top:18px">最近使用</h3>`);
+    parts.push(`<h3 style="margin-top:18px">${esc(T("最近使用"))}</h3>`);
     parts.push(recent.map((p) =>
       `<button class="recent-repo" data-path="${esc(p)}">${esc(p)}<span class="go">→</span></button>`
     ).join(""));
@@ -1309,7 +1632,7 @@ function renderRepoDrawer() {
 }
 
 async function doSwitchRepo(path) {
-  if (!path) { showError("请填写本地仓库文件夹的绝对路径，或用「浏览本地…」选择", "没有选择仓库"); return; }
+  if (!path) { showError(T("请填写本地仓库文件夹的绝对路径，或用「浏览本地…」选择"), T("没有选择仓库")); return; }
   const btn = $("repoSwitch");
   btn.disabled = true;
   try {
@@ -1321,11 +1644,11 @@ async function doSwitchRepo(path) {
     renderMeta();
     showOnlyDrawer("");
     await loadRuns(true);
-    toast("已切换到 " + meta.repo);
+    toast(T("已切换到 {path}", { path: meta.repo }));
   } catch (e) {
     const err = $("repoErr");
     if (err) { err.textContent = e.message; err.hidden = false; }
-    showError(`目标路径：${path}\n\n${e.message}`, "切换仓库失败");
+    showError(T("目标路径：{path}", { path }) + "\n\n" + e.message, T("切换仓库失败"));
   } finally {
     btn.disabled = false;
   }
@@ -1336,11 +1659,11 @@ async function openRepoFolder() {
   btn.disabled = true;
   try {
     await api("/api/repo/open", { method: "POST", body: "{}" });
-    toast("已在文件管理器中打开当前仓库");
+    toast(T("已在文件管理器中打开当前仓库"));
   } catch (e) {
     const err = $("repoErr");
     if (err) { err.textContent = e.message; err.hidden = false; }
-    showError(e.message, "打开文件夹失败");
+    showError(e.message, T("打开文件夹失败"));
   } finally {
     btn.disabled = false;
   }
@@ -1350,7 +1673,7 @@ async function browseRepo() {
   const btn = $("repoBrowse");
   btn.disabled = true;
   const old = btn.textContent;
-  btn.textContent = "选择中…";
+  btn.textContent = T("选择中…");
   try {
     const picked = await api("/api/pick-repo", { method: "POST", body: "{}" });
     $("repoPath").value = picked.path;
@@ -1359,7 +1682,7 @@ async function browseRepo() {
     const err = $("repoErr");
     if (err) { err.textContent = e.message; err.hidden = false; }
     // Cancel is not an error worth interrupting the user for.
-    if (!/取消/.test(e.message)) showError(e.message, "选择仓库失败");
+    if (!/取消|cancel/i.test(e.message)) showError(e.message, T("选择仓库失败"));
   } finally {
     btn.disabled = false;
     btn.textContent = old;
@@ -1370,14 +1693,15 @@ function showDropMatches(name, matches) {
   showOnlyDrawer("repoDrawer");
   const box = $("repoBody");
   if (!matches.length) {
-    box.innerHTML = `<div class="cfg-note bad">按文件夹名「${esc(name)}」没找到 git 仓库。
-      请用「浏览本地…」手动选择，或粘贴完整绝对路径。</div>
-      <div class="actions" style="margin-top:12px"><button class="ghost" id="dmBack">返回</button></div>`;
+    box.innerHTML = `<div class="cfg-note bad">${esc(T("按文件夹名「{name}」没找到 git 仓库。 请用「浏览本地…」手动选择，或粘贴完整绝对路径。", { name }))}</div>
+      <div class="actions" style="margin-top:12px"><button class="ghost" id="dmBack">${esc(T("返回"))}</button></div>`;
     $("dmBack").onclick = renderRepoDrawer;
     return;
   }
-  const title = matches.length === 1 ? "找到 1 个仓库，已定位" : `找到 ${matches.length} 个同名仓库，请选一个`;
-  box.innerHTML = `<div class="cfg-note">拖入文件夹：<code>${esc(name)}</code><br>${esc(title)}</div>
+  const title = matches.length === 1
+    ? T("找到 1 个仓库，已定位")
+    : T("找到 {n} 个同名仓库，请选一个", { n: matches.length });
+  box.innerHTML = `<div class="cfg-note">${T("拖入文件夹：{name}", { name: `<code>${esc(name)}</code>` })}<br>${esc(title)}</div>
     <div id="dropMatches">${matches.map((p) =>
       `<button class="recent-repo" data-path="${esc(p)}">${esc(p)}<span class="go">→</span></button>`
     ).join("")}</div>`;
@@ -1399,7 +1723,7 @@ async function handleFolderDrop(e) {
     }
   }
   if (!name) {
-    showError("请拖拽文件夹（不是文件）到窗口；也可以点「切换仓库」用系统选择器", "无法识别拖拽内容");
+    showError(T("请拖拽文件夹（不是文件）到窗口；也可以点「切换仓库」用系统选择器"), T("无法识别拖拽内容"));
     return;
   }
   if (BASE) {
@@ -1415,7 +1739,7 @@ async function handleFolderDrop(e) {
     });
     showDropMatches(found.name, found.matches || []);
   } catch (err) {
-    showError(`文件夹名：${name}\n\n${err.message}`, "定位仓库失败");
+    showError(T("文件夹名：{name}", { name }) + "\n\n" + err.message, T("定位仓库失败"));
   }
 }
 
@@ -1528,7 +1852,7 @@ if (BASE) {
   // In the multi-project shell a tab is pinned to one project: switching the
   // repo here would desync the tab from its slug, so the button goes back to
   // the project list instead.
-  $("repoBtn").textContent = "项目总览";
+  $("repoBtn").textContent = T("项目总览");
   $("repoBtn").onclick = () => { location.href = "/"; };
 } else {
   $("repoBtn").onclick = () => {
@@ -1539,7 +1863,7 @@ if (BASE) {
 
 $("configBtn").onclick = async () => {
   if (!toggleDrawer("configDrawer")) return;
-  $("configBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px"><span class="spinner"></span> 读取配置…</div>`;
+  $("configBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px"><span class="spinner"></span> ${esc(T("读取配置…"))}</div>`;
   try {
     renderConfig(await api("/api/config"));
   } catch (e) {
@@ -1551,6 +1875,9 @@ function statRow(label, value) {
   return `<div class="stat-row"><span>${esc(label)}</span><b>${esc(value)}</b></div>`;
 }
 
+$("langSel").value = LANG;
+$("langSel").onchange = (e) => saveLang(e.target.value);
+applyLang();  // paint the saved language before the first fetch
 boot();
 </script>
 </body>

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..context import build_context
 from ..evidence import collect_static, known_facts_block
+from ..i18n import t
 from ..models import Finding, FindingCollection, ModelRegistry, ModelSpec, ReviewUnit
 from ..providers import OpenAICompatProvider, Provider
 from .aggregator import cluster_findings, rank_findings
@@ -66,7 +67,15 @@ async def _review_with(
     diags_all: list[dict] = []
     total = len(units)
     for idx, unit in enumerate(units, 1):
-        say(f"[{spec.model_id}] 审查单元 {idx}/{total} · {unit.primary_file}")
+        say(
+            t(
+                "orch.unit_start",
+                model=spec.model_id,
+                idx=idx,
+                total=total,
+                file=unit.primary_file,
+            )
+        )
         try:
             findings, rej, completion, diags = await review_unit(
                 provider, spec.model_id, unit, repo_root, run_id, house_rules, sources
@@ -80,7 +89,15 @@ async def _review_with(
                     "error": str(exc),
                 }
             )
-            say(f"[{spec.model_id}] 单元 {idx}/{total} 调用失败：{type(exc).__name__}")
+            say(
+                t(
+                    "orch.unit_failed",
+                    model=spec.model_id,
+                    idx=idx,
+                    total=total,
+                    error=type(exc).__name__,
+                )
+            )
             continue
         per_unit.setdefault(unit.unit_id, []).extend(findings)
         for r in rej:
@@ -98,7 +115,15 @@ async def _review_with(
                 "raw_request_hash": completion.raw_request_hash,
             }
         )
-        say(f"[{spec.model_id}] 单元 {idx}/{total} 完成（{len(findings)} 条发现）")
+        say(
+            t(
+                "orch.unit_done",
+                model=spec.model_id,
+                idx=idx,
+                total=total,
+                n=len(findings),
+            )
+        )
     return per_unit, rejected, calls, diags_all
 
 
@@ -152,7 +177,7 @@ async def run_review(
     watcher = asyncio.create_task(watch_stop())
     try:
         reviewers, falsifier_spec = registry.route(mode, author_model=author_model)  # type: ignore[arg-type]
-        say(f"启动 {len(reviewers)} 个审查模型并行评审 {len(units)} 个单元")
+        say(t("orch.start", models=len(reviewers), units=len(units)))
 
         providers = {m.model_id: _make_provider(m) for m in reviewers}
         review_tasks = [
@@ -175,9 +200,9 @@ async def run_review(
         for result in results:
             if isinstance(result, BaseException):
                 if isinstance(result, asyncio.CancelledError):
-                    raise ReviewCancelled("审查已被用户停止") from result
+                    raise ReviewCancelled(t("server.stopped_by_user")) from result
                 raise result
-        say("所有模型评审完成，开始聚类合并")
+        say(t("orch.merged"))
 
         per_model_reviews: dict[str, dict[str, list[Finding]]] = {}
         all_rejected: list[dict] = []
@@ -225,10 +250,10 @@ async def run_review(
         units_by_id = {u.unit_id: u for u in units}
         targets = [f for f in merged if should_falsify(f)]
         if targets:
-            say(f"证伪轮：{len(targets)} 条高价值发现交叉验证")
+            say(t("orch.falsify_round", n=len(targets)))
         for f in targets:
             if should_stop and should_stop():
-                raise ReviewCancelled("审查已被用户停止")
+                raise ReviewCancelled(t("server.stopped_by_user"))
             source_models = set(f.source_models)
             source_unit = units_by_id.get(f.unit_id)
             context, facts = (
@@ -266,7 +291,14 @@ async def run_review(
                         "usage": completion.usage.model_dump(),
                     }
                 )
-                say(f"证伪 {chosen_model}：{verdict.verdict} · {_one_line(f.claim)}")
+                say(
+                    t(
+                        "orch.falsify_verdict",
+                        model=chosen_model,
+                        verdict=verdict.verdict,
+                        claim=_one_line(f.claim),
+                    )
+                )
             except Exception as exc:  # noqa: BLE001
                 all_calls.append(
                     {
@@ -276,7 +308,13 @@ async def run_review(
                         "error": str(exc),
                     }
                 )
-                say(f"证伪 {chosen_model}：调用失败 · {_one_line(f.claim)}")
+                say(
+                    t(
+                        "orch.falsify_failed",
+                        model=chosen_model,
+                        claim=_one_line(f.claim),
+                    )
+                )
 
         # Recompute agreement after falsification and drop fully-refuted findings that
         # were only ever asserted by a single model (a unique claim that got broken).
@@ -331,7 +369,7 @@ async def run_review(
         return collection, all_calls, all_diags
     except asyncio.CancelledError as exc:
         if should_stop and should_stop():
-            raise ReviewCancelled("审查已被用户停止") from exc
+            raise ReviewCancelled(t("server.stopped_by_user")) from exc
         raise
     finally:
         watcher.cancel()

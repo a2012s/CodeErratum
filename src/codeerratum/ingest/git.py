@@ -7,6 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from ..i18n import t
 from ..models import Hunk, ReviewUnit
 
 DIFF_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+)$")
@@ -32,7 +33,7 @@ def normalize_pathspec(paths: str) -> str:
         # "..\\secret" would otherwise slip through as a literal filename.
         normalized = value.replace("\\", "/")
         if normalized.startswith("/") or ".." in Path(normalized).parts:
-            raise DiffError("路径必须是仓库内的相对路径（不接受绝对路径或 ..）")
+            raise DiffError(t("git.pathspec_relative"))
     return paths.strip()
 
 
@@ -71,12 +72,7 @@ def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
             # A repo with one commit has no HEAD~1. The raw git message is
             # English and suggests an unrelated fix (--), which leaves users
             # stuck; say what to type instead and keep the original for copying.
-            detail = (
-                f"无法解析 {spec}：当前仓库可能只有一个提交。\n"
-                "审查本地未提交改动请填 HEAD；审查上一个提交请用 HEAD~1"
-                "（需要至少两个提交）。\n\n"
-                f"git 原始错误：\n{detail}"
-            )
+            detail = t("git.diff_unresolvable", spec=spec, detail=detail)
         raise DiffError(detail)
     return result.stdout
 

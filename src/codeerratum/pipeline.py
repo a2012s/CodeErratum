@@ -20,6 +20,7 @@ from pathlib import Path
 from .config import Config
 from .config_store import CONFIG_REL
 from .config_store import load as load_saved_config
+from .i18n import t
 from .ingest import DiffError, get_commit, get_diff, new_side_sources, split_diff
 from .models import FindingCollection, ModelRegistry, ReviewUnit
 from .report import render_markdown
@@ -185,9 +186,7 @@ def abstain_warning(findings: list) -> str:
     abstained = sum(1 for role in roles if role == "abstain")
     if abstained / len(roles) <= 0.3:
         return ""
-    return (
-        f"证伪轮 {abstained}/{len(roles)} 判为证据不足（>30%），上下文构建可能不足，结论请谨慎采用"
-    )
+    return t("pipeline.abstain", n=abstained, total=len(roles))
 
 
 def apply_measured_profiles(registry: ModelRegistry, store: ReviewStore) -> int:
@@ -291,7 +290,7 @@ def execute_review(
         # Check at every lifecycle message too, not just inside model calls —
         # diff splitting / report writing have no other cancellation point.
         if should_stop and should_stop():
-            raise ReviewCancelled("审查已被停止")
+            raise ReviewCancelled(t("pipeline.stopped"))
         emit(message)
 
     repo_root = repo_root.resolve()
@@ -335,11 +334,11 @@ def execute_review(
 
     notices: list[str] = []
     if paths.strip():
-        notices.append(f"仅审查路径 {paths.strip()} 内的改动（其他目录未审）")
+        notices.append(t("pipeline.path_scope", paths=paths.strip()))
         say(notices[-1])
     rules = resolve_house_rules(house_rules, repo_root)
     if rules.truncated:
-        notices.append(f"项目规范超过 {MAX_HOUSE_RULES_CHARS} 字，已截断")
+        notices.append(t("pipeline.rules_truncated", limit=MAX_HOUSE_RULES_CHARS))
         say(notices[-1])
     if rules:
         say(f"Project rules: {rules.source} ({rules.chars} chars, sha {rules.sha})")
@@ -350,7 +349,7 @@ def execute_review(
         sources = new_side_sources(run_spec, repo_root, paths=paths)
     except DiffError as exc:
         sources = {}
-        notices.append(f"无法读取 diff 版本的文件内容（{exc}），锚点改为基于工作区校验")
+        notices.append(t("pipeline.snapshot_fallback", error=exc))
         say(notices[-1])
     units = split_diff(diff_text, repo_root, notices=notices, sources=sources)
     (run_dir / "units.json").write_text(
@@ -364,7 +363,7 @@ def execute_review(
 
     selected = prioritize(units)[:max_units]
     if len(units) > max_units:
-        capped = f"仅审查 {max_units}/{len(units)} 个单元（--max-units 可调整）"
+        capped = t("pipeline.units_capped", kept=max_units, total=len(units))
         notices.append(capped)
         say(capped)
 
@@ -398,13 +397,13 @@ def execute_review(
                 should_stop=should_stop,
             )
         )
-        say("生成报告并写入存储")
+        say(t("pipeline.report_writing"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
     failed = [r for r in collection.rejected if r.get("reason") == "provider_error"]
     if failed:
-        notices.append(f"{len(failed)} 个单元调用模型失败，相关文件未被审查")
+        notices.append(t("pipeline.units_failed", n=len(failed)))
 
     # A high abstain rate is a signal about *our* context, not about the code: the
     # falsifier keeps saying it cannot decide. Surfacing it turns a silent

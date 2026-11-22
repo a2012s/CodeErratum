@@ -14,19 +14,22 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from .i18n import t
+
 DEFAULT_TIMEOUT = 10.0
 MAX_TIMEOUT = 30.0
 
 
 def _explain(exc: Exception, timeout: float) -> str:
     if isinstance(exc, httpx.TimeoutException):
-        return f"连接超时（{timeout:g}s）"
+        return t("model.timeout", seconds=timeout)
     if isinstance(exc, httpx.ConnectError):
         reason = str(exc).strip().replace("\n", " ")[:160]
-        return f"无法连接端点（地址或网络不可达）{f'：{reason}' if reason else ''}"
+        suffix = t("model.reason_suffix", reason=reason) if reason else ""
+        return t("model.unreachable", suffix=suffix)
     if isinstance(exc, httpx.TransportError):
-        return f"网络错误：{type(exc).__name__}"
-    return f"请求失败：{type(exc).__name__}"
+        return t("model.network_error", error=type(exc).__name__)
+    return t("model.request_failed", error=type(exc).__name__)
 
 
 def probe_model(
@@ -44,10 +47,10 @@ def probe_model(
     model_id = str(model_id or "").strip()
     base_url = str(base_url or "").strip().rstrip("/")
     if not model_id:
-        result["detail"] = "缺少 model_id"
+        result["detail"] = t("model.missing_id")
         return result
     if not base_url.startswith(("http://", "https://")):
-        result["detail"] = "base_url 必须以 http:// 或 https:// 开头"
+        result["detail"] = t("model.bad_base_url")
         return result
 
     timeout = max(1.0, min(float(timeout), MAX_TIMEOUT))
@@ -80,44 +83,41 @@ def probe_model(
                     target = parsed.netloc or parsed.path
                 except ValueError:
                     target = ""
-            result["detail"] = (
-                f"端点返回 {response.status_code} 重定向"
-                + (f" → {target}" if target else "")
-                + "：base_url 可能填成了控制台网页地址；请使用以 /v1 结尾的 API 端点"
+            result["detail"] = t(
+                "model.redirect",
+                status=response.status_code,
+                suffix=t("model.target_suffix", target=target) if target else "",
             )
             return result
         if response.status_code == 401 or response.status_code == 403:
-            detail = f"鉴权失败（{response.status_code}）：检查 api_key"
+            detail = t("model.auth", status=response.status_code)
             # sk-sp- keys belong to Aliyun Token Plan / Coding Plan and are
             # rejected by the pay-as-you-go dashscope endpoint. Name the
             # mismatch instead of leaving the user guessing at a valid key.
             if api_key.startswith("sk-sp-") and "dashscope.aliyuncs.com" in base_url:
-                detail += (
-                    "；sk-sp- 是 Token Plan 专属密钥，请用 "
-                    "token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
-                )
+                detail += t("model.token_plan_hint")
             result["detail"] = detail
             return result
         if response.status_code == 404:
-            result["detail"] = "404：检查 base_url 与 model_id"
+            result["detail"] = t("model.not_found")
             return result
         if response.status_code == 429:
-            result["detail"] = "429：端点已限流，稍后重试"
+            result["detail"] = t("model.rate_limited")
             return result
         if response.status_code >= 500:
-            result["detail"] = f"服务端错误（{response.status_code}）"
+            result["detail"] = t("model.server_error", status=response.status_code)
             return result
         if response.status_code >= 400:
-            result["detail"] = f"请求被拒（{response.status_code}）"
+            result["detail"] = t("model.rejected", status=response.status_code)
             return result
         data = response.json()
         if not data.get("choices"):
-            result["detail"] = "响应无 choices，端点可能不兼容 OpenAI 协议"
+            result["detail"] = t("model.no_choices")
             return result
     except (ValueError, TypeError) as exc:
         # A non-JSON 200 response is a compatibility problem, not a crash.
         result["latency_ms"] = int((time.monotonic() - t0) * 1000)
-        result["detail"] = f"响应不是合法 JSON：{type(exc).__name__}"
+        result["detail"] = t("model.bad_json", error=type(exc).__name__)
         return result
     except Exception as exc:  # noqa: BLE001 - transport errors are the common case
         result["latency_ms"] = int((time.monotonic() - t0) * 1000)
@@ -125,5 +125,5 @@ def probe_model(
         return result
 
     result["ok"] = True
-    result["detail"] = f"可用 · {result['latency_ms']}ms"
+    result["detail"] = t("model.ok", ms=result["latency_ms"])
     return result

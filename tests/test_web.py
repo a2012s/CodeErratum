@@ -978,3 +978,96 @@ def test_stream_handler_survives_closed_tab(client):
     src = inspect.getsource(web_server.make_handler)
     assert "_client_gone" in src
     assert "_write_sse" in src
+
+
+def test_out_of_range_max_units_is_clamped_with_a_notice(client):
+    """Above the cap the run is clamped, and it says so instead of doing it quietly."""
+    params = client.app.prepare_review({"diff": "HEAD", "max_units": 200})
+    assert params["max_units"] == 50
+    assert params["notices"] == ["上限 200 超出范围（最多 50 个审查单元），已按 50 执行"]
+
+    summary = client.post("/api/review", json={"diff": "HEAD", "max_units": 200}).json()
+    assert summary["notices"] == params["notices"]
+    # Other tabs read the same notice from the shared status, not just the initiator.
+    assert client.get("/api/review/status").json()["params"]["notices"] == params["notices"]
+
+
+def test_max_units_below_one_clamps_to_one(client):
+    params = client.app.prepare_review({"diff": "HEAD", "max_units": 0})
+    assert params["max_units"] == 1
+    assert "至少 1 个" in params["notices"][0]
+
+
+def test_in_range_max_units_carries_no_notice(client):
+    params = client.app.prepare_review({"diff": "HEAD", "max_units": 10})
+    assert params["max_units"] == 10
+    assert params["notices"] == []
+    summary = client.post("/api/review", json={"diff": "HEAD", "max_units": 10}).json()
+    assert "notices" not in summary
+
+
+def test_clamp_notice_reaches_progress_log(client):
+    """The clamp must appear in the SSE/status log, before any unit is reviewed."""
+    messages: list[str] = []
+    params = client.app.prepare_review({"diff": "HEAD", "max_units": 999})
+    client.app.acquire_review_lock(params)
+    try:
+        client.app.execute_prepared(params, progress=messages.append)
+    finally:
+        client.app.release_review_lock()
+    assert messages and messages[0].startswith("上限 999 超出范围")
+    assert any("上限 999" in m for m in client.get("/api/review/status").json()["messages"])
+
+
+def test_units_hint_mirrors_the_cap_in_the_page():
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="maxUnitsHint"' in html
+    assert "function syncUnitsHint" in html
+    assert "const MAX_UNITS_CAP = 50;" in html
+    assert ".hint.warn { color: var(--warn)" in html
+    assert "max_units: unitsValue()," in html  # 0 must not become 10
+
+
+def test_language_header_switches_repo_errors(client):
+    """The same failure is worded in the language the tab asked for."""
+    en = client.post(
+        "/api/repo", json={"path": "/nope/definitely-missing"}, headers={"X-Lang": "en"}
+    )
+    assert en.status_code == 400
+    assert "does not exist" in en.json()["error"]
+
+    zh = client.post("/api/repo", json={"path": "/nope/definitely-missing"})
+    assert "路径不存在" in zh.json()["error"]
+
+
+def test_language_header_switches_run_notices(client):
+    en = client.post(
+        "/api/review", json={"diff": "HEAD", "max_units": 200}, headers={"X-Lang": "en"}
+    )
+    assert "Limit 200" in en.json()["notices"][0]
+
+    zh = client.post("/api/review", json={"diff": "HEAD", "max_units": 200})
+    assert "已按 50 执行" in zh.json()["notices"][0]
+
+
+def test_language_header_switches_lock_messages(client):
+    en = client.post("/api/review/stop", json={}, headers={"X-Lang": "en"})
+    assert en.status_code == 409
+    assert "No review is running" in en.json()["error"]
+
+    zh = client.post("/api/review/stop", json={})
+    assert "当前没有正在进行的审查" in zh.json()["error"]
+
+
+def test_pages_expose_a_language_switch():
+    """Both pages must carry the selector and the translation helpers."""
+    from codeerratum.web.server import STATIC_DIR
+
+    for name in ("index.html", "projects.html"):
+        html = (STATIC_DIR / name).read_text(encoding="utf-8")
+        assert 'id="langSel"' in html, name
+        assert "codeerratum.lang" in html, name
+        assert "function T(" in html, name
+        assert 'value="en">English' in html, name

@@ -31,6 +31,7 @@ from ..config_store import KEEP_SECRET
 from ..config_store import load as load_config
 from ..config_store import public as public_config
 from ..config_store import save as save_config_file
+from ..i18n import set_lang, t
 from ..ingest import DiffError, normalize_pathspec
 from ..model_check import probe_model
 from ..models import ModelRegistry
@@ -52,6 +53,10 @@ RUN_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 FINDING_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 LOOPBACK_HOST_RE = re.compile(r"^(?:127\.0\.0\.1|localhost|\[::1\]|::1)(?::\d+)?$", re.I)
 MAX_BODY = 2 * 1024 * 1024
+# Cost guard for the web UI. The CLI trusts --max-units as given; the UI is a
+# click-away surface (and reachable by any local page script), so an absurd value
+# is clamped here — and the clamp is announced instead of applied silently.
+MAX_UNITS_CAP = 50
 
 
 def _write_sse(wfile, kind: str, payload: dict) -> bool:
@@ -72,21 +77,22 @@ def _write_sse(wfile, kind: str, payload: dict) -> bool:
 def resolve_git_root(candidate: Path) -> Path:
     """Validate a directory and snap it to its git root, with a clear message."""
     if not candidate.exists():
-        raise PipelineError(f"路径不存在：{candidate}")
+        raise PipelineError(t("server.path_missing", path=candidate))
     if not candidate.is_dir():
-        raise PipelineError(f"不是文件夹：{candidate}")
+        raise PipelineError(t("server.not_a_folder", path=candidate))
     root = find_repo_root(candidate)
     if not (root / ".git").exists():
-        raise PipelineError(f"不是 git 仓库：{root}")
+        raise PipelineError(t("server.not_a_repo", path=root))
     return root
 
 
-def pick_folder(title: str = "选择要审查的 git 仓库") -> Path:
+def pick_folder(title: str | None = None) -> Path:
     """Open the native folder picker in this local process and return a git root.
 
     A browser page cannot read a directory dialog's absolute path, so the dialog
     must run here. Shared by single-repo switching and the multi-project hub.
     """
+    title = title or t("server.picker_title")
     system = sys.platform
     if system == "darwin":
         cmd = ["osascript", "-e", f'POSIX path of (choose folder with prompt "{title}")']
@@ -103,17 +109,17 @@ def pick_folder(title: str = "选择要审查的 git 仓库") -> Path:
     else:
         zenity = shutil.which("zenity")
         if not zenity:
-            raise PipelineError("本系统未安装 zenity，无法弹出文件夹选择器；请粘贴路径")
+            raise PipelineError(t("server.picker_no_zenity"))
         cmd = [zenity, "--file-selection", "--directory", f"--title={title}"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
     except subprocess.TimeoutExpired as exc:
-        raise PipelineError("文件夹选择超时，请重试或粘贴路径") from exc
+        raise PipelineError(t("server.picker_timeout")) from exc
     except OSError as exc:
-        raise PipelineError(f"无法打开文件夹选择器：{exc}") from exc
+        raise PipelineError(t("server.picker_open_failed", error=exc)) from exc
     if result.returncode != 0 or not result.stdout.strip():
         # macOS -128 / "User canceled." — not an error worth a toast.
-        raise PipelineError("已取消选择文件夹")
+        raise PipelineError(t("server.picker_cancelled"))
     chosen = result.stdout.strip().rstrip(os.sep) or os.sep
     return resolve_git_root(Path(chosen).expanduser().resolve())
 
@@ -206,13 +212,13 @@ class WebApp:
         """
         value = str(raw_path or "").strip()
         if not value:
-            raise PipelineError("请填写本地文件夹路径")
+            raise PipelineError(t("server.repo_path_required"))
         candidate = Path(value).expanduser()
         if not candidate.is_absolute():
-            raise PipelineError("请填写绝对路径（支持 ~ 开头的家目录）")
+            raise PipelineError(t("server.repo_abs_required"))
         root = self._git_root(candidate.resolve())
         if not self._review_lock.acquire(blocking=False):
-            raise RuntimeError("审查进行中，不能切换仓库")
+            raise RuntimeError(t("server.switch_blocked"))
         try:
             self.repo_root = root
         finally:
@@ -241,7 +247,7 @@ class WebApp:
         """
         target = self.repo_root
         if not target.is_dir():
-            raise PipelineError(f"当前仓库目录不存在：{target}")
+            raise PipelineError(t("server.repo_dir_missing", path=target))
         system = sys.platform
         if system == "darwin":
             cmd = ["open", str(target)]
@@ -250,7 +256,7 @@ class WebApp:
         else:
             opener = shutil.which("xdg-open") or shutil.which("gio")
             if not opener:
-                raise PipelineError("未找到 xdg-open / gio，请在文件管理器中手动打开当前仓库")
+                raise PipelineError(t("server.opener_missing"))
             cmd = (
                 [opener, "open", str(target)]
                 if Path(opener).name == "gio"
@@ -259,12 +265,14 @@ class WebApp:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
         except subprocess.TimeoutExpired as exc:
-            raise PipelineError("打开文件管理器超时，请稍后重试") from exc
+            raise PipelineError(t("server.open_timeout")) from exc
         except OSError as exc:
-            raise PipelineError(f"无法打开当前仓库文件夹：{exc}") from exc
+            raise PipelineError(t("server.open_failed", error=exc)) from exc
         if result.returncode != 0 and system != "win32":
             lines = (result.stderr or result.stdout or "").strip().splitlines()
-            raise PipelineError(f"无法打开当前仓库文件夹：{lines[-1] if lines else '系统返回失败'}")
+            raise PipelineError(
+                t("server.open_failed", error=lines[-1] if lines else t("server.open_unknown"))
+            )
         return {"path": str(target), "opened": True}
 
     def find_repo_by_name(self, raw_name: str, hints: list[str] | None = None) -> dict:
@@ -277,7 +285,7 @@ class WebApp:
         """
         name = str(raw_name or "").strip().strip("/\\")
         if not name or name in (".", "..") or "/" in name or "\\" in name:
-            raise PipelineError("拖入的文件夹名无效")
+            raise PipelineError(t("server.dropped_name_invalid"))
         candidates: list[Path] = []
         seen: set[Path] = set()
 
@@ -516,10 +524,17 @@ class WebApp:
         diff_spec = str(payload.get("diff") or "HEAD~1").strip() or "HEAD~1"
         mode = str(payload.get("mode") or "").strip().lower()
         try:
-            max_units = int(payload.get("max_units", 10))
+            requested_units = int(payload.get("max_units", 10))
         except (TypeError, ValueError) as exc:
             raise PipelineError("max_units must be an integer") from exc
-        max_units = max(1, min(max_units, 50))
+        # Clamp, but never silently: an out-of-range value becomes a notice that
+        # rides the progress log (and the JSON summary) so the user knows the run
+        # covers fewer (or more) units than the number they typed.
+        notices: list[str] = []
+        max_units = max(1, min(requested_units, MAX_UNITS_CAP))
+        if max_units != requested_units:
+            key = "server.units_clamped_low" if requested_units < 1 else "server.units_clamped_high"
+            notices.append(t(key, asked=requested_units, used=max_units, cap=MAX_UNITS_CAP))
         author = str(payload.get("author_model") or "").strip() or None
         # Validate here so a bad path is a 400 with a clear message, not a
         # git failure buried in a 500 after the review has started.
@@ -552,11 +567,12 @@ class WebApp:
             "out": out,
             "house_rules": house_rules,
             "paths": paths,
+            "notices": notices,
         }
 
     def acquire_review_lock(self, params: dict | None = None) -> None:
         if not self._review_lock.acquire(blocking=False):
-            raise RuntimeError("已有审查正在进行中，请等待其完成后再运行")
+            raise RuntimeError(t("server.review_busy"))
         self._stop_event.clear()
         with self._state_lock:
             self._review_state.update(
@@ -573,6 +589,7 @@ class WebApp:
                         "mode": (params or {}).get("mode", ""),
                         "max_units": (params or {}).get("max_units", 10),
                         "paths": (params or {}).get("paths", ""),
+                        "notices": (params or {}).get("notices", []),
                     },
                     "tokens": None,
                     "error": "",
@@ -602,12 +619,12 @@ class WebApp:
         """Ask the one running review to stop. Any tab may call this."""
         with self._state_lock:
             if not self._review_state["running"]:
-                raise RuntimeError("当前没有正在进行的审查")
+                raise RuntimeError(t("server.no_active_review"))
             self._stop_event.set()
             if self._review_state["status"] != "stopping":
                 self._review_state["status"] = "stopping"
-                self._review_state["messages"].append("已请求停止，正在中断模型调用…")
-        return {"ok": True, "message": "已请求停止审查"}
+                self._review_state["messages"].append(t("server.stop_requested_log"))
+        return {"ok": True, "message": t("server.stop_requested")}
 
     def _set_status(self, status: str, message: str = "") -> None:
         with self._state_lock:
@@ -623,10 +640,10 @@ class WebApp:
         """
         if self._gate is None:
             return
-        self._set_status("queued", "排队中：等待其他项目释放执行位…")
+        self._set_status("queued", t("server.queued"))
         while not self._gate.acquire(timeout=0.25):
             if self._stop_event.is_set():
-                raise ReviewCancelled("已取消排队")
+                raise ReviewCancelled(t("server.queue_cancelled"))
         self._set_status("running")
 
     def execute_prepared(self, params: dict, progress=None) -> dict:
@@ -635,6 +652,10 @@ class WebApp:
             if progress:
                 progress(msg)
 
+        # Announce a clamped limit before anything else: if the run then queues or
+        # fails, the reason the budget is not what was asked for is still on record.
+        for note in params.get("notices") or []:
+            both(note)
         self._wait_for_slot()
         try:
             outcome = execute_review(
@@ -656,6 +677,8 @@ class WebApp:
         summary = outcome.summary()
         if outcome.out_path:
             summary["out_path"] = str(outcome.out_path)
+        if params.get("notices"):
+            summary["notices"] = list(params["notices"])
         return summary
 
     def start_review(self, payload: dict, progress=None) -> dict:
@@ -672,7 +695,7 @@ class WebApp:
             raise
         except ReviewCancelled:
             final_status = "cancelled"
-            return {"cancelled": True, "error": "审查已被用户停止"}
+            return {"cancelled": True, "error": t("server.stopped_by_user")}
         except Exception as exc:
             final_status = "error"
             final_error = _safe_error(exc, self.repo_root)
@@ -797,7 +820,7 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
                     self._sse_headers()
                 except OSError:  # tab closed before the stream opened
                     self._client_gone = True
-                self._sse_event("log", {"message": "已连接进度流，准备审查…"})
+                self._sse_event("log", {"message": t("server.stream_connected")})
                 summary = app.execute_prepared(
                     params, progress=lambda msg: self._sse_event("log", {"message": msg})
                 )
@@ -806,7 +829,7 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
                 self._sse_event("done", summary)
             except ReviewCancelled as exc:
                 final_status = "cancelled"
-                self._sse_event("cancelled", {"message": str(exc) or "审查已被用户停止"})
+                self._sse_event("cancelled", {"message": str(exc) or t("server.stopped_by_user")})
             except NoChanges as exc:
                 final_status = "empty"
                 self._sse_event("empty", {"message": str(exc)})
@@ -915,6 +938,7 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
             ).encode("utf-8")
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+            set_lang(self.headers.get("X-Lang"))  # per-thread: never leaks across tabs
             if not self._host_ok():
                 self._error(HTTPStatus.FORBIDDEN, "non-loopback Host refused")
                 return
@@ -966,6 +990,7 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
                 self._error(HTTPStatus.INTERNAL_SERVER_ERROR, "internal error; see server log")
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+            set_lang(self.headers.get("X-Lang"))
             path = urlsplit(self.path).path.rstrip("/") or "/"
             if not self._origin_ok():
                 self._error(HTTPStatus.FORBIDDEN, "cross-origin request refused")

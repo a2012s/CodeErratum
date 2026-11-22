@@ -34,6 +34,10 @@
     cursor: pointer;
   }
   button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  select {
+    font: inherit; font-size: 12.5px; padding: 5px 8px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  }
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
   button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.05); }
   button:disabled { opacity: .55; cursor: not-allowed; }
@@ -118,14 +122,20 @@
     display: flex; align-items: center; justify-content: center; color: var(--accent);
     font-size: 15px; font-weight: 600; pointer-events: none;
   }
+  body.dragging.lang-en::after { content: "Drop the folder here to add a project"; }
+  #langSel { background: transparent; }
 </style>
 </head>
 <body>
 <header class="top">
-  <div class="brand">CodeErratum <span>· 项目</span></div>
+  <div class="brand">CodeErratum <span data-en="· Projects">· 项目</span></div>
   <div id="tabs"></div>
-  <button id="overviewBtn">总览</button>
-  <button class="primary" id="addBtn">+ 添加项目</button>
+  <button id="overviewBtn" data-en="Overview">总览</button>
+  <select id="langSel" aria-label="界面语言 / Interface language">
+    <option value="zh">中文</option>
+    <option value="en">English</option>
+  </select>
+  <button class="primary" id="addBtn" data-en="+ Add project">+ 添加项目</button>
 </header>
 
 <main>
@@ -133,25 +143,25 @@
   <section id="overview" hidden>
     <div class="cards" id="cards"></div>
     <div class="empty" id="empty" hidden>
-      <h2>还没有项目</h2>
-      <p>点右上角「+ 添加项目」：粘贴绝对路径、用系统文件夹选择器，或把文件夹直接拖进窗口。</p>
-      <p>每个项目独立配置模型与运行历史，最多 <b id="maxParallel">2</b> 个项目同时审查。</p>
+      <h2 data-en="No projects yet">还没有项目</h2>
+      <p data-en="Press + Add project: paste an absolute path, use the native folder picker, or drag a folder onto this window.">点右上角「+ 添加项目」：粘贴绝对路径、用系统文件夹选择器，或把文件夹直接拖进窗口。</p>
+      <p data-en="Each project keeps its own models and run history; up to 2 projects review at the same time.">每个项目独立配置模型与运行历史，最多 <b id="maxParallel">2</b> 个项目同时审查。</p>
     </div>
   </section>
 </main>
 
 <div id="modal">
   <div class="dialog">
-    <h3>添加项目</h3>
-    <p>填仓库内任意子目录会自动定位到 git 根。配置与历史按仓库隔离，不会改动磁盘上的代码。</p>
-    <input id="pathInput" placeholder="/Users/you/codes/my-project 或 ~/codes/my-project" autocomplete="off">
-    <div class="drop-hint">也可以点下面按钮用系统文件夹选择器，或把文件夹拖进窗口</div>
+    <h3 data-en="Add a project">添加项目</h3>
+    <p data-en="A subdirectory snaps up to its git root. Config and history are kept per repository; nothing on disk is modified.">填仓库内任意子目录会自动定位到 git 根。配置与历史按仓库隔离，不会改动磁盘上的代码。</p>
+    <input id="pathInput" placeholder="/Users/you/codes/my-project 或 ~/codes/my-project" data-en-ph="/Users/you/codes/my-project or ~/codes/my-project" autocomplete="off">
+    <div class="drop-hint" data-en="Or use the native folder picker below, or drag a folder onto this window">也可以点下面按钮用系统文件夹选择器，或把文件夹拖进窗口</div>
     <div id="candidates" class="candidates" hidden></div>
     <div id="modalMsg"></div>
     <div class="dialog-actions">
-      <button id="pickBtn">浏览本地…</button>
-      <button id="cancelBtn">取消</button>
-      <button class="primary" id="confirmBtn">添加</button>
+      <button id="pickBtn" data-en="Browse local…">浏览本地…</button>
+      <button id="cancelBtn" data-en="Cancel">取消</button>
+      <button class="primary" id="confirmBtn" data-en="Add">添加</button>
     </div>
   </div>
 </div>
@@ -160,6 +170,66 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
   ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/* ---- Two-language support: Chinese is the source, STR maps it to English. --- */
+const LANG_KEY = "codeerratum.lang";
+let LANG = (() => {
+  try {
+    return (localStorage.getItem(LANG_KEY) || "zh").toLowerCase().startsWith("en") ? "en" : "zh";
+  } catch { return "zh"; }
+})();
+const STR = {
+  "未运行": "Idle",
+  "审查中": "Reviewing",
+  "排队中": "Queued",
+  "停止中": "Stopping",
+  "已完成": "Done",
+  "失败": "Failed",
+  "无改动": "No changes",
+  "已停止": "Stopped",
+  "打开": "Open",
+  "停止": "Stop",
+  "文件夹": "Folder",
+  "移除": "Remove",
+  "从列表移除「{name}」？\n只移除入口，磁盘代码与运行历史都会保留。": "Remove “{name}” from the list?\nOnly the entry goes away; the code on disk and the run history stay.",
+  "请填写或选择文件夹路径": "Enter or pick a folder path",
+  "等待系统文件夹选择器…": "Waiting for the folder picker…",
+  "正在定位文件夹…": "Locating the folder…",
+  "没找到名为 {name} 的 git 仓库，请粘贴完整路径": "No git repository named {name} was found; paste the full path",
+  "已定位，点「添加」确认": "Located — press Add to confirm",
+  "找到 {n} 个同名仓库，选一个": "Found {n} repositories with that name; pick one",
+  "已选中，点「添加」确认": "Selected — press Add to confirm",
+  "CodeErratum — 项目": "CodeErratum — Projects",
+};
+function T(zh, vars) {
+  let text = LANG === "en" ? (STR[zh] ?? zh) : zh;
+  if (vars) for (const [k, v] of Object.entries(vars)) text = text.split(`{${k}}`).join(String(v));
+  return text;
+}
+function applyLang() {
+  document.documentElement.lang = LANG === "en" ? "en" : "zh-CN";
+  document.body.classList.toggle("lang-en", LANG === "en");
+  document.querySelectorAll("[data-en]").forEach((el) => {
+    if (el.dataset.zh === undefined) el.dataset.zh = el.innerHTML;
+    el.innerHTML = LANG === "en" ? el.dataset.en : el.dataset.zh;
+  });
+  document.querySelectorAll("[data-en-ph]").forEach((el) => {
+    if (el.dataset.zhPh === undefined) el.dataset.zhPh = el.getAttribute("placeholder") || "";
+    el.setAttribute("placeholder", LANG === "en" ? el.dataset.enPh : el.dataset.zhPh);
+  });
+  if ($("langSel")) $("langSel").value = LANG;
+  if (PROJECTS.length || ACTIVE) { renderTabs(); renderCards(); }
+  if (ACTIVE === "overview" || !ACTIVE) document.title = T("CodeErratum — 项目");
+  // Each tab is an iframe on the same origin; tell it to repaint, no reload.
+  for (const f of FRAMES.values()) {
+    try { f.contentWindow.postMessage({ type: "ce:lang", lang: LANG }, location.origin); } catch { /* not loaded yet */ }
+  }
+}
+function saveLang(next) {
+  LANG = next === "en" ? "en" : "zh";
+  try { localStorage.setItem(LANG_KEY, LANG); } catch { /* private mode */ }
+  applyLang();
+}
 
 const STATUS_TEXT = {
   idle: "未运行", running: "审查中", queued: "排队中", stopping: "停止中",
@@ -170,7 +240,9 @@ let ACTIVE = null;          // slug or "overview"
 const FRAMES = new Map();   // slug -> iframe (kept alive so reviews keep streaming)
 
 async function api(path, opts = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json", "X-Lang": LANG }, ...opts,
+  });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error) throw new Error(data.error || res.statusText);
   return data;
@@ -210,15 +282,15 @@ function renderCards() {
     card.innerHTML = `
       <div class="card-head">
         <div class="card-name">${esc(p.name)}</div>
-        <span class="chip ${statusClass(p)}">${STATUS_TEXT[p.status] || p.status}</span>
+        <span class="chip ${statusClass(p)}">${esc(T(STATUS_TEXT[p.status] || p.status))}</span>
       </div>
       <div class="card-path">${esc(p.path)}</div>
       <div class="card-progress">${esc(p.progress || "—")}${tokens}</div>
       <div class="card-actions">
-        <button data-act="open">打开</button>
-        ${p.running ? '<button data-act="stop" class="danger">停止</button>' : ""}
-        <button data-act="folder">文件夹</button>
-        <button data-act="remove" class="danger">移除</button>
+        <button data-act="open">${esc(T("打开"))}</button>
+        ${p.running ? `<button data-act="stop" class="danger">${esc(T("停止"))}</button>` : ""}
+        <button data-act="folder">${esc(T("文件夹"))}</button>
+        <button data-act="remove" class="danger">${esc(T("移除"))}</button>
       </div>`;
     card.querySelector('[data-act="open"]').onclick = () => activate(p.slug);
     const stopBtn = card.querySelector('[data-act="stop"]');
@@ -232,7 +304,7 @@ function renderCards() {
       api(`/api/projects/${p.slug}/open`, { method: "POST", body: "{}" })
         .catch((e) => alert(e.message));
     card.querySelector('[data-act="remove"]').onclick = async () => {
-      if (!confirm(`从列表移除「${p.name}」？\n只移除入口，磁盘代码与运行历史都会保留。`)) return;
+      if (!confirm(T("从列表移除「{name}」？\n只移除入口，磁盘代码与运行历史都会保留。", { name: p.name }))) return;
       try {
         await api(`/api/projects/${p.slug}/remove`, { method: "POST", body: "{}" });
         const f = FRAMES.get(p.slug);
@@ -261,7 +333,7 @@ function activate(slug) {
     const p = PROJECTS.find((x) => x.slug === slug);
     if (p) document.title = `${p.name} — CodeErratum`;
   } else {
-    document.title = "CodeErratum — 项目";
+    document.title = T("CodeErratum — 项目");
   }
   history.replaceState(null, "", slug === "overview" ? "#overview" : `#p=${slug}`);
   renderTabs();
@@ -293,7 +365,7 @@ function closeModal() { $("modal").classList.remove("show"); }
 
 async function addByPath() {
   const path = $("pathInput").value.trim();
-  if (!path) { msg("请填写或选择文件夹路径"); return; }
+  if (!path) { msg(T("请填写或选择文件夹路径")); return; }
   $("confirmBtn").disabled = true;
   try {
     const p = await api("/api/projects", { method: "POST", body: JSON.stringify({ path }) });
@@ -320,7 +392,7 @@ $("overviewBtn").onclick = () => activate("overview");
 
 $("pickBtn").onclick = async () => {
   $("pickBtn").disabled = true;
-  msg("等待系统文件夹选择器…", true);
+  msg(T("等待系统文件夹选择器…"), true);
   try {
     const p = await api("/api/projects/pick", { method: "POST", body: "{}" });
     closeModal();
@@ -357,22 +429,22 @@ window.addEventListener("drop", async (e) => {
 async function resolveDroppedName(name) {
   if (!name) return;
   openModal();
-  msg("正在定位文件夹…", true);
+  msg(T("正在定位文件夹…"), true);
   try {
     const found = await api("/api/projects/find", {
       method: "POST", body: JSON.stringify({ name, hints: PROJECTS.map((p) => p.path) }),
     });
     const matches = found.matches || [];
-    if (!matches.length) { msg(`没找到名为 ${name} 的 git 仓库，请粘贴完整路径`); return; }
-    if (matches.length === 1) { $("pathInput").value = matches[0]; msg("已定位，点「添加」确认", true); return; }
-    msg(`找到 ${matches.length} 个同名仓库，选一个`);
+    if (!matches.length) { msg(T("没找到名为 {name} 的 git 仓库，请粘贴完整路径", { name })); return; }
+    if (matches.length === 1) { $("pathInput").value = matches[0]; msg(T("已定位，点「添加」确认"), true); return; }
+    msg(T("找到 {n} 个同名仓库，选一个", { n: matches.length }));
     const box = $("candidates");
     box.hidden = false;
     box.innerHTML = "";
     for (const m of matches) {
       const b = document.createElement("button");
       b.textContent = m;
-      b.onclick = () => { $("pathInput").value = m; msg("已选中，点「添加」确认", true); };
+      b.onclick = () => { $("pathInput").value = m; msg(T("已选中，点「添加」确认"), true); };
       box.appendChild(b);
     }
   } catch (err) { msg(err.message); }
@@ -386,6 +458,9 @@ window.addEventListener("message", (e) => {
 });
 
 // ---- boot --------------------------------------------------------------
+$("langSel").value = LANG;
+$("langSel").onchange = (e) => saveLang(e.target.value);
+applyLang();
 (async () => {
   const hash = location.hash.replace(/^#/, "");
   await refresh();
