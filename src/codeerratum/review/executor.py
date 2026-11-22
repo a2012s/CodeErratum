@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from ..models import Anchor, Finding, ReviewUnit
 from ..models.finding import DefectCategory, Evidence, Lens, Suggestion, snippet_hash
 from ..providers import Completion, Provider
+from ..report.markdown import _fence
 from .schema import LLMReview
 
 PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "review.correctness.md"
@@ -40,6 +41,30 @@ HOUSE_RULES_FOOTER = "</house_rules>"
 # and code identifiers stay as-is so the parser and the anchor checker are
 # untouched. ``en`` injects nothing — it is already the prompt's language.
 LANG_NAMES = {"zh": "Simplified Chinese"}
+
+_FENCE_LANG = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".jsx": "jsx",
+    ".java": "java",
+    ".go": "go",
+    ".rs": "rust",
+    ".rb": "ruby",
+    ".php": "php",
+    ".cs": "csharp",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".c": "c",
+    ".h": "c",
+    ".cc": "cpp",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".sql": "sql",
+    ".sh": "bash",
+}
 
 
 def language_directive(output_lang: str) -> str:
@@ -174,11 +199,49 @@ def render_excerpt(source_lines: list[str], ranges: list[tuple[int, int]]) -> st
     return "\n".join(out)
 
 
+def _fence_lang(path: str) -> str:
+    return _FENCE_LANG.get(Path(path).suffix.lower(), "")
+
+
+def render_callers(callers: list[str], details: list[dict] | None = None) -> str:
+    """Call sites as code when available, coordinates otherwise.
+
+    The caller snippets are a separate file, so they are explicitly marked
+    non-citable: the anchor gate rejects any finding whose file is not the
+    reviewed unit, and a model that treats a caller line as the location would
+    have its whole finding discarded after paying for the call.
+    """
+    if not details:
+        return "# Direct callers\n" + "\n".join(f"- {c}" for c in callers)
+    blocks = [
+        "# Direct callers\n\n"
+        "Call sites are context only — cite locations from the reviewed file, never "
+        "from this section. Check whether argument count, return-value use, and "
+        "exception assumptions still hold here."
+    ]
+    for d in details:
+        lang = _fence_lang(d["file"])
+        # Reuse the report renderer's adaptive fence: raw caller source can
+        # contain a ``` docstring, which would close a fixed three-tick block
+        # early and leak the rest into the prompt as free-form instructions.
+        fence = _fence(d["snippet"])
+        blocks.append(f"## {d['file']}:{d['line']}\n{fence}{lang}\n{d['snippet']}\n{fence}")
+    # callers come from Path.relative_to() (backslash on Windows) while details
+    # are normalised to "/"; without this they never match and every caller is
+    # listed twice, defeating the MAX_CALLER_SNIPPETS limit.
+    covered = {f"{d['file']}:{d['line']}" for d in details}
+    rest = [c for c in callers if c.replace("\\", "/") not in covered]
+    if rest:
+        blocks.append("Also referenced at: " + ", ".join(f"`{c}`" for c in rest))
+    return "\n\n".join(blocks)
+
+
 def build_messages(
     unit: ReviewUnit,
     source_lines: list[str],
     enclosing_span: tuple[int, int] | None = None,
     callers: list[str] | None = None,
+    caller_details: list[dict] | None = None,
     known_facts: str = "",
     house_rules: str = "",
     output_lang: str = "",
@@ -195,8 +258,8 @@ def build_messages(
         "# Line numbers below are absolute line numbers of this file.\n\n"
         f"```{unit.language or 'text'}\n{excerpt}\n```"
     ]
-    if callers:
-        parts.append("# Direct callers\n" + "\n".join(f"- {c}" for c in callers))
+    if callers or caller_details:
+        parts.append(render_callers(callers or [], caller_details))
     if known_facts:
         parts.append(known_facts)
     context = "\n\n".join(parts)
@@ -206,7 +269,8 @@ def build_messages(
             "role": "user",
             "content": (
                 f"Review this code change (symbol: {unit.symbol}, risk tags: {unit.risk_tags}).\n"
-                "Cite only lines from the excerpt below, using their absolute line numbers.\n\n"
+                "Cite only lines from the reviewed file excerpt below, using their absolute "
+                "line numbers. Caller snippets are context, not a citable location.\n\n"
                 f"{context}"
             ),
         },
@@ -393,6 +457,7 @@ async def review_unit(
             source_lines,
             enclosing_span=ctx.get("enclosing_range"),
             callers=ctx["callers"],
+            caller_details=ctx.get("caller_snippets"),
             known_facts=known_facts_block(relevant),
             house_rules=house_rules,
             output_lang=output_lang,

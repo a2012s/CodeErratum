@@ -25,6 +25,7 @@ from .pipeline import (
     find_repo_root,
     store_for,
 )
+from .report.outcomes import apply_outcomes, parse_outcomes
 from .review import MAX_HOUSE_RULES_CHARS
 from .store import ReviewStore
 
@@ -601,6 +602,56 @@ def reject(
     f = found[0]
     store.set_status(f["id"], "rejected", reason)
     console.print(f"[yellow]Rejected {f['id'][:12]}: {f['claim']}[/yellow]")
+
+
+@app.command()
+def reconcile(
+    report: Path = typer.Argument(
+        Path("erratumReview.md"), help="Work order whose 执行结果 table to read"
+    ),
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository root"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Parse and report without writing"),
+) -> None:
+    """Read the work order's execution-result table back into feedback.db."""
+    repo_root = _resolve_repo_or_exit(repo)
+    # The default work order is generated at the repo root. From a subdirectory,
+    # a bare relative "erratumReview.md" would otherwise be looked up next to
+    # the CWD while the store still points at the repo root — inconsistent with
+    # the promise that commands behave the same from any subdirectory. An
+    # explicit path that exists as given always wins.
+    if not report.is_absolute() and not report.is_file():
+        report = repo_root / report
+    if not report.is_file():
+        console.print(f"[red]{t('cli.reconcile_missing', path=report)}[/red]")
+        raise typer.Exit(1)
+    parsed = parse_outcomes(report.read_text(encoding="utf-8", errors="replace"))
+    if not parsed.found_table:
+        console.print(f"[red]{t('cli.reconcile_no_table')}[/red]")
+        raise typer.Exit(1)
+
+    store = _store(repo_root)
+    counts = apply_outcomes(store, parsed.rows, dry_run=dry_run)
+    if counts["rows"] == 0:
+        console.print(f"[yellow]{t('cli.reconcile_empty')}[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(
+        t(
+            "cli.reconcile_summary",
+            rows=counts["rows"],
+            updated=counts["updated"],
+            accepted=counts["accepted"],
+            rejected=counts["rejected"],
+            skipped=counts["skipped"],
+            unmatched=counts["unmatched"],
+        )
+    )
+    for problem in parsed.problems[:10]:
+        console.print(f"[yellow]- {problem}[/yellow]")
+    if dry_run:
+        console.print(f"[dim]{t('cli.reconcile_dry')}[/dim]")
+    elif counts["updated"]:
+        console.print(f"[green]{t('cli.reconcile_done', path=store.db_path)}[/green]")
 
 
 @app.command()

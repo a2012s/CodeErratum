@@ -33,7 +33,12 @@ from codeerratum.providers.base import (
 )
 from codeerratum.providers.openai_compat import OpenAICompatProvider
 from codeerratum.report import render_markdown
-from codeerratum.review.executor import build_messages, convert_findings, review_unit
+from codeerratum.review.executor import (
+    build_messages,
+    convert_findings,
+    render_callers,
+    review_unit,
+)
 from codeerratum.review.schema import LLMReview
 from codeerratum.store import ReviewStore
 
@@ -381,6 +386,68 @@ def test_callers_are_found(tmp_path):
     )
     callers = build_context(unit, tmp_path)["callers"]
     assert "app.py:5" in callers
+
+
+def test_caller_fence_adapts_to_backticks_in_snippet():
+    """A fixed ``` fence closes early on a docstring containing ```, leaving the
+    rest of the caller source as free-form text in the review prompt."""
+    snippet = '"""doc\n```\nstill source\n"""'
+    rendered = render_callers(
+        ["app.py:5"], [{"file": "app.py", "line": 5, "snippet": snippet}]
+    )
+    assert "````python\n" in rendered  # opening fence is four ticks, not three
+    assert rendered.rstrip().endswith("````")  # and it closes with four
+    assert "still source" in rendered  # snippet body stays inside the block
+
+
+def test_caller_backslash_paths_are_not_listed_twice():
+    """callers use Path.relative_to() (backslash on Windows) while details use
+    "/"; unnormalised comparison defeats the "max 5 callers" limit."""
+    details = [{"file": "pkg/app.py", "line": 5, "snippet": "target(1)"}]
+    rendered = render_callers([r"pkg\app.py:5", "other.py:9"], details)
+    assert "Also referenced at:" in rendered
+    assert r"pkg\app.py:5" not in rendered
+    assert "other.py:9" in rendered
+
+
+def test_caller_snippets_show_the_call_expression(tmp_path):
+    """Reverting: the prompt listed ``app.py:5`` only, so a signature or
+    return-value change was reviewed without the line that consumes it."""
+    (tmp_path / "lib.py").write_text("def target(x):\n    return x + 1\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "from lib import target\n\n\ndef main():\n    return target(1)\n", encoding="utf-8"
+    )
+    unit = _unit(
+        primary_file="lib.py",
+        symbol="target",
+        hunks=[
+            Hunk(
+                old_start=2,
+                old_lines=1,
+                new_start=2,
+                new_lines=1,
+                content="+    return x + 1",
+            )
+        ],
+    )
+    source_lines = (tmp_path / "lib.py").read_text(encoding="utf-8").splitlines(keepends=True)
+
+    ctx = build_context(unit, tmp_path)
+    details = ctx["caller_snippets"]
+    assert details and details[0]["file"] == "app.py" and details[0]["line"] == 5
+    assert "return target(1)" in details[0]["snippet"]
+
+    messages = build_messages(
+        unit,
+        source_lines,
+        enclosing_span=ctx["enclosing_range"],
+        callers=ctx["callers"],
+        caller_details=details,
+    )
+    user = messages[1]["content"]
+    assert "## app.py:5" in user
+    assert "return target(1)" in user
+    assert "never" in user and "context" in user
 
 
 # --- provider ---------------------------------------------------------------
@@ -783,3 +850,66 @@ def test_clustering_merges_across_bucket_boundary():
     merged, _ = cluster_findings({"m1": [first], "m2": [second]})
     assert len(merged) == 1
     assert set(merged[0].source_models) == {"m1", "m2"}
+
+
+def test_clustering_merges_one_issue_across_categories():
+    """Reverting: category was part of the cluster key, so the same defect labeled
+    ``boundary`` by one model and ``off_by_one`` by another never met and both
+    survived into the unique zone."""
+    from codeerratum.models.finding import DefectCategory
+    from codeerratum.review.aggregator import cluster_findings
+
+    first = _finding(3)
+    second = _finding(3)
+    second.category = DefectCategory.OFF_BY_ONE
+    first.source_models, second.source_models = [], []
+    merged, _ = cluster_findings({"m1": [first], "m2": [second]})
+    assert len(merged) == 1
+    assert set(merged[0].source_models) == {"m1", "m2"}
+
+
+def test_clustering_keeps_distinct_same_line_defects_with_shared_wording():
+    """Reverting the strict cross-category threshold silently deletes a defect.
+
+    Two models can describe different bugs on the same line with near-identical
+    prefixes ("返回值未…", "循环未…"). At jaccard 0.35-0.43 the old rule merged
+    them and one bug vanished from the work order.
+    """
+    from codeerratum.review.aggregator import cluster_findings
+
+    first = _finding(10)
+    first.claim = "返回值未判空导致崩溃"
+    first.category = DefectCategory.NULL_DEREF
+    second = _finding(10)
+    second.claim = "返回值未校验导致注入"
+    second.category = DefectCategory.INJECTION
+    first.source_models, second.source_models = [], []
+    merged, _ = cluster_findings({"m1": [first], "m2": [second]})
+    assert len(merged) == 2
+
+
+def test_clustering_still_merges_same_defect_across_categories():
+    """The strict threshold must not undo cross-category merging of one issue."""
+    from codeerratum.review.aggregator import cluster_findings
+
+    first = _finding(3)
+    second = _finding(3)
+    second.category = DefectCategory.OFF_BY_ONE
+    first.source_models, second.source_models = [], []
+    merged, _ = cluster_findings({"m1": [first], "m2": [second]})
+    assert len(merged) == 1
+
+
+def test_clustering_keeps_two_distinct_issues_on_the_same_line():
+    """Reverting ``gap == 0 -> True`` matters most here: two unrelated bugs on one
+    line used to be merged, silently deleting one from the work order."""
+    from codeerratum.models.finding import DefectCategory
+    from codeerratum.review.aggregator import cluster_findings
+
+    first = _finding(3)
+    second = _finding(3)
+    second.category = DefectCategory.SEMANTIC_DRIFT
+    second.claim = "返回类型不一致"
+    first.source_models, second.source_models = [], []
+    merged, _ = cluster_findings({"m1": [first], "m2": [second]})
+    assert len(merged) == 2

@@ -20,8 +20,8 @@ Success criterion: sample 10 findings at random; at least 7 must be executed cor
 
 ## Status
 
-- **Phases 1–6 implemented and tested** (170 tests + real-HTTP end-to-end + CI)
-- Commands: `review` (write the work order) / `pr` (post to a pull request) / `docs` (module map + signature drift) / `mcp` (stdio server for coding agents) / `ui` (local web UI) / `accept` / `reject` / `stats` / `compare`
+- **Phases 1–6 implemented and tested** (full regression suite + real-HTTP end-to-end + CI)
+- Commands: `review` (write the work order) / `pr` (post to a pull request) / `docs` (module map + signature drift) / `mcp` (stdio server for coding agents) / `ui` (local web UI) / `accept` / `reject` / `reconcile` / `stats` / `compare`
 - Written in Python ≥3.11; symbol-level review for Python, file-level for everything else; any OpenAI-compatible provider (cloud or local); `correctness` lens
 - Three review modes: `quick` (single model) / `dual` (two models + falsification) / `committee` (three models)
 - No Docker. Three environment variables get a single model running — including a local Ollama endpoint; multi-model uses one JSON config
@@ -73,7 +73,7 @@ codeerratum review --diff HEAD~1 -o erratumReview.md
 ## Zero-cost self-check
 
 ```bash
-uv run pytest -q                     # expect 170 passed
+uv run pytest -q                     # expect the full suite to pass
 ```
 
 To exercise the whole pipeline without spending tokens, use the bundled fake model endpoint (always returns one fixed finding):
@@ -136,7 +136,7 @@ Rules are **appended, never substituted**. They land in a `<house_rules>` block 
 
 The cap is 4000 characters; anything longer is truncated and the truncation is stated in the report. The rules actually used are recorded as a 12-char sha256 in both `erratumReview.md` and `findings.json`, so when two runs over the same diff disagree you can tell whether the prompt changed. The falsification round deliberately does **not** receive project rules — a falsifier that has absorbed your conventions stops being an independent check.
 
-Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject <finding_id> --reason "..."`, `codeerratum stats` for the acceptance rate, `codeerratum compare` for per-model unique-finding counts and measured profiles. All three resolve to the same database from any subdirectory of the repo.
+Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject <finding_id> --reason "..."`, `codeerratum stats` for the acceptance rate, `codeerratum compare` for per-model unique-finding counts and measured profiles. To close the loop without retyping, `codeerratum reconcile erratumReview.md` reads the executor's filled `执行结果` table back into the same database (`已修复`/`部分修复` become accepted, `误报`/`不适用`/`跳过` become rejected, unresolved rows stay open). Use `--dry-run` to inspect the mapping first. Every command resolves to the same database from any subdirectory of the repo.
 
 ## Web UI (optional)
 

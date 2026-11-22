@@ -404,6 +404,23 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "cli.stop_hint": ("Ctrl+C 停止", "Ctrl+C to stop"),
     "cli.stopped": ("已停止", "Stopped"),
+    "cli.reconcile_missing": ("找不到工单文件：{path}", "Work order not found: {path}"),
+    "cli.reconcile_no_table": (
+        "工单里没有《执行结果》表，无法回填",
+        "The work order has no execution-result table; nothing to ingest",
+    ),
+    "cli.reconcile_empty": (
+        "《执行结果》表里没有可回填的行（待处理的行会被跳过）",
+        "The execution-result table has no rows to ingest (pending rows are skipped)",
+    ),
+    "cli.reconcile_summary": (
+        "共 {rows} 行：已回填 {updated}（采纳 {accepted} / 驳回 {rejected}），"
+        "跳过 {skipped}，编号未匹配 {unmatched}",
+        "Rows: {rows}; ingested {updated} (accepted {accepted} / rejected {rejected}), "
+        "skipped {skipped}, unmatched {unmatched}",
+    ),
+    "cli.reconcile_dry": ("[预演] 未写入数据库", "[dry run] nothing written"),
+    "cli.reconcile_done": ("已写入反馈库：{path}", "Written to feedback store: {path}"),
     "desk.missing": (
         "缺少图形组件 pywebview：先执行 uv pip install -e '.[desktop]'，或改用 codeerratum ui",
         "The pywebview GUI extra is missing: run uv pip install -e '.[desktop]', "

@@ -14,6 +14,12 @@ import re
 
 from ..models.finding import Agreement, Finding, Verdict
 
+# Same line, different category: two genuinely distinct defects often share a
+# line and a long descriptive prefix ("返回值未…" / "循环未…"). The generic 0.35
+# threshold merges them and silently drops one from the work order. Cross-label
+# agreement on one line needs near-identical wording instead.
+SAME_LINE_CROSS_CATEGORY_THRESHOLD = 0.8
+
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[\u4e00-\u9fff]")
 
 
@@ -29,25 +35,42 @@ def jaccard(a: str, b: str) -> float:
 
 
 def cluster_key(f: Finding) -> str:
-    """Level 1: candidate group = same file + same category.
+    """Level 1: candidate group = same file.
 
     Bucketing by ``line // 3`` looked equivalent to "±3 lines" but split pairs
     that straddle a bucket boundary (line 2 vs line 4), so near-identical findings
     were never compared. Group first, then bound by real line distance.
+
+    Category deliberately stays out of the key. It is a label the model picked,
+    and two models describing one defect can disagree on it (``boundary`` vs
+    ``off_by_one``). With category in the key those copies never met, so both
+    survived into the unique zone — inflating exactly the signal the three-zone
+    report exists to show. File + line distance + wording is the evidence;
+    category only buys a shortcut when two reports land on the same line.
     """
-    anchor = f.anchors[0]
-    return f"{anchor.file}:{f.category.value}"
+    return f.anchors[0].file
 
 
 def same_issue(a: Finding, b: Finding, threshold: float = 0.35, max_line_gap: int = 3) -> bool:
-    """Level 2: same group AND (same exact line OR nearby + wording overlap)."""
+    """Level 2: same file AND (same line + same label, or nearby + wording overlap).
+
+    Same line with different categories still needs wording overlap: two distinct
+    bugs can share a line, and the old ``gap == 0 -> True`` merged them into one
+    finding, silently deleting one of the two.
+    """
     if cluster_key(a) != cluster_key(b):
         return False
     gap = abs(a.anchors[0].start_line - b.anchors[0].start_line)
-    if gap == 0:
-        return True
     if gap > max_line_gap:
         return False
+    if gap == 0 and a.category == b.category:
+        # Same anchor, same label: models agree on the issue even when the
+        # wording differs. Only within one category, though.
+        return True
+    if gap == 0:
+        # Different labels on one line. A shared prefix is not enough — "崩溃"
+        # vs "注入" need to stay as two findings. Require near-identical claims.
+        return jaccard(a.claim, b.claim) >= SAME_LINE_CROSS_CATEGORY_THRESHOLD
     return jaccard(a.claim, b.claim) >= threshold
 
 

@@ -19,6 +19,14 @@ from ..models import ReviewUnit
 _CALLER_CACHE: dict[tuple[str, str, str], list[str]] = {}
 _CACHE_LIMIT = 512
 
+# Five call sites is enough to show the shape of the contract without turning a
+# review unit into a project-wide read. Two lines of padding catches the common
+# multi-line call (opening paren, arguments on the next line).
+CALLER_PAD = 2
+MAX_CALLER_SNIPPETS = 5
+MAX_CALLER_LINE_CHARS = 240
+_SNIPPET_CACHE: dict[tuple[str, str, int, int], str | None] = {}
+
 
 def _find_definition(source: str, symbol: str) -> tuple[int, int] | None:
     """Locate the (line, column) of the symbol's own name token — 1-based line."""
@@ -138,6 +146,84 @@ def callers_of(
         return []
 
 
+def _line_window(text: str, line_no: int, pad: int) -> tuple[int, int, str] | None:
+    lines = text.splitlines()
+    if not 1 <= line_no <= len(lines):
+        return None
+    start = max(1, line_no - pad)
+    end = min(len(lines), line_no + pad)
+    body = "\n".join(
+        f"{i:4d} | {lines[i - 1].rstrip()[:MAX_CALLER_LINE_CHARS]}"
+        for i in range(start, end + 1)
+    )
+    return start, end, body
+
+
+def caller_snippets(
+    callers: list[str],
+    repo_root: Path,
+    sources: dict[str, str] | None = None,
+    pad: int = CALLER_PAD,
+    limit: int = MAX_CALLER_SNIPPETS,
+) -> list[dict]:
+    """Read the call expression at each caller coordinate, not just its address.
+
+    A coordinate tells the model that a symbol is used; it does not show *how*.
+    The highest-value bug class this review catches is a signature or return-value
+    change whose caller was not updated, and that is invisible from ``app.py:5``.
+
+    Best-effort by design: a caller outside the working tree, a binary file, or a
+    line number that the revision moved drops that one snippet instead of failing
+    the review.
+    """
+    out: list[dict] = []
+    for coord in callers[:limit]:
+        file, sep, line_text = coord.rpartition(":")
+        if not sep:
+            continue
+        file = file.replace("\\", "/")
+        try:
+            line_no = int(line_text)
+        except ValueError:
+            continue
+        blob = (sources or {}).get(file)
+        path = repo_root / file
+        if blob is not None:
+            stamp = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+        else:
+            try:
+                stamp = str(path.stat().st_mtime_ns)
+            except OSError:
+                continue
+        key = (str(path), stamp, line_no, pad)
+        if key in _SNIPPET_CACHE:
+            window = _SNIPPET_CACHE[key]
+        else:
+            text = blob
+            if text is None:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    text = None
+            window = _line_window(text, line_no, pad) if text is not None else None
+            if len(_SNIPPET_CACHE) > _CACHE_LIMIT:
+                _SNIPPET_CACHE.clear()
+            _SNIPPET_CACHE[key] = window
+        if window is None:
+            continue
+        start, end, body = window
+        out.append(
+            {
+                "file": file,
+                "line": line_no,
+                "start_line": start,
+                "end_line": end,
+                "snippet": body,
+            }
+        )
+    return out
+
+
 def _remember(key: tuple[str, str, str], value: list[str]) -> None:
     if len(_CALLER_CACHE) > _CACHE_LIMIT:
         _CALLER_CACHE.clear()
@@ -157,10 +243,12 @@ def build_context(unit: ReviewUnit, repo_root: Path, sources: dict[str, str] | N
             else ""
         )
     span = enclosing_range(unit, source) if source else None
+    callers = callers_of(unit, repo_root, sources)
     return {
         "enclosing": enclosing_source(unit, source) if source else "",
         "enclosing_range": span,
-        "callers": callers_of(unit, repo_root, sources),
+        "callers": callers,
+        "caller_snippets": caller_snippets(callers, repo_root, sources),
         "symbol": unit.symbol,
         "risk_tags": unit.risk_tags,
     }

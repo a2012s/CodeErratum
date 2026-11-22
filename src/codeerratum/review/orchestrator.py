@@ -23,7 +23,7 @@ from ..i18n import t
 from ..models import Finding, FindingCollection, ModelRegistry, ModelSpec, ReviewUnit, Verdict
 from ..providers import OpenAICompatProvider, Provider
 from .aggregator import agreement, cluster_findings, rank_findings, same_issue
-from .executor import review_unit
+from .executor import render_callers, review_unit
 from .falsification import falsify_finding, should_falsify
 
 
@@ -100,7 +100,15 @@ def _context_for(
 ) -> tuple[str, str]:
     ctx = build_context(unit, repo_root, sources)
     diags = collect_static(unit.primary_file, repo_root)
-    context = "\n".join([ctx.get("enclosing", ""), *ctx.get("callers", [])])
+    callers = ctx.get("callers") or []
+    context = "\n\n".join(
+        part
+        for part in [
+            ctx.get("enclosing", ""),
+            render_callers(callers, ctx.get("caller_snippets")) if callers else "",
+        ]
+        if part
+    )
     return context, known_facts_block(diags)
 
 

@@ -20,8 +20,8 @@
 
 ## 当前状态
 
-- **第一至六期已实现并通过测试**（170 tests + 真实 HTTP 端到端验证 + CI）
-- 可用命令：`review`（出工单）/ `pr`（贴到 PR）/ `docs`（模块文档与签名漂移）/ `mcp`（给 agent 用的 stdio 服务）/ `ui`（本地图形界面）/ `accept` / `reject` / `stats` / `compare`
+- **第一至六期已实现并通过测试**（完整回归套件 + 真实 HTTP 端到端验证 + CI）
+- 可用命令：`review`（出工单）/ `pr`（贴到 PR）/ `docs`（模块文档与签名漂移）/ `mcp`（给 agent 用的 stdio 服务）/ `ui`（本地图形界面）/ `accept` / `reject` / `reconcile`（回收执行结果）/ `stats` / `compare`
 - 实现语言 Python ≥3.11；Python 走符号级审查，其他语言走文件级；OpenAI 兼容 provider（云端或本地）；correctness 视角
 - 三种审查模式：`quick`（单模型）/ `dual`（双模型+证伪）/ `committee`（三模型）
 - 不依赖 Docker；单模型三环境变量即可跑通（含本地 Ollama），多模型用 JSON 配置
@@ -73,7 +73,7 @@ codeerratum review --diff HEAD~1 -o erratumReview.md
 ## 不花钱的自检
 
 ```bash
-uv run pytest -q                     # 期望 170 passed
+uv run pytest -q                     # 期望全量测试通过
 ```
 
 想验证全链路又不想消耗 token，用仓库自带的假模型端点（固定返回一条 finding）：
@@ -118,7 +118,7 @@ codeerratum review --diff HEAD~1 -o erratumReview.md
 
 不花 token 就能看到真实格式的产物：[`examples/sample-review.md`](examples/sample-review.md)——格式是真的，内容来自仓库自带的假模型端点。
 双模型下报告分三区：**独有发现**（仅一家报出，最值得看）/ **冲突区**（意见相反，待人工裁决）/ **共识区**。
-审查后反馈：`codeerratum accept <finding_id>` / `codeerratum reject <finding_id> --reason "..."`，`codeerratum stats` 看采纳率，`codeerratum compare` 看各模型独有发现数与实测画像。这三个命令在仓库任意子目录执行都指向同一个数据库。
+审查后反馈：`codeerratum accept <finding_id>` / `codeerratum reject <finding_id> --reason "..."`，`codeerratum stats` 看采纳率，`codeerratum compare` 看各模型独有发现数与实测画像。执行方 AI 填完工单末尾的《执行结果》表后，用 `codeerratum reconcile erratumReview.md` 直接把结果回填到同一个数据库：`已修复` / `部分修复` 记为采纳，`误报` / `不适用` / `跳过` 记为驳回，`未修复` / `待处理` 保持 open，不污染采纳率；`--dry-run` 可先看映射结果。所有命令在仓库任意子目录执行都指向同一个数据库。
 
 ### 项目规范（可选）
 

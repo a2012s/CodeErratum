@@ -51,7 +51,8 @@ HEADER = """# Code Review 工单
 > 1. 按 F-001 起顺序逐条处理，不要跳条。
 > 2. 每条先核对【现状】与代码是否一致；不一致则跳过，不要猜测。
 > 3. 按【修改建议】改动，然后运行【验收】中的命令。
-> 4. 全部完成后，在文末《执行结果》表追加：finding_id / 状态 / 验证结果。
+> 4. 全部完成后，在文末《执行结果》表填写：finding_id / 状态 / 验证结果。
+>    状态只填：已修复 / 部分修复 / 未修复 / 误报 / 不适用；未处理的保持“待处理”。
 > 5. AI 审查通过 ≠ 可以合入；必须人工确认。
 
 """
@@ -108,6 +109,7 @@ def _render_finding(f, index: int) -> str:
     verdict_label = VERIFICATION_LABEL.get(f.verification, f.verification)
     lines = [
         f"## F-{index:03d} [{f.severity}] {_one_line(f.claim)}",
+        f"<!-- finding:F-{index:03d}={f.id} -->",
         "",
         f"- 位置：`{loc}`",
         f"- 视角：{f.lens.value}",
@@ -272,6 +274,10 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
         parts.append("\n")
 
     parts.append("## 执行结果（由执行方 AI 填写）\n\n")
+    parts.append(
+        "> 状态填 `已修复` / `部分修复` / `未修复` / `误报` / `不适用`；"
+        "`codeerratum reconcile erratumReview.md` 会把这张表回填到 feedback.db。\n\n"
+    )
     parts.append("| finding_id | 状态 | 验证结果 |\n|---|---|---|\n")
     for i in range(1, len(display) + 1):
         parts.append(f"| F-{i:03d} | 待处理 | — |\n")
