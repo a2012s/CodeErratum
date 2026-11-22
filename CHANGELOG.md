@@ -23,6 +23,11 @@
   重启 UI 后仍生效，CLI 也读同一份。api_key 从不回显，输入框留空即沿用原值。
   配置写入和审查一样要求同源 loopback Origin / Host；配置文件损坏时直接报错，不静默退回环境变量。
 - 界面 diff 输入框补提示：本地未提交改动填 `HEAD`（含已暂存），新文件需先 `git add`；README 同步。
+- **默认写工作单 + 文件名改名**：界面「同时写 erratumReview.md 到仓库根」默认勾选；
+  产品报告文件名由 `review.md` 改为 `erratumReview.md`（CLI `-o` 默认值与 README 同步）。
+  每次运行的内部归档仍为 `.codeerratum/runs/<run_id>/review.md`，历史运行不受影响。
+- **顶栏面板互斥**：切换仓库 / 配置 / 文档 / 统计同一时刻只显示一个，当前按钮高亮；
+  再点当前按钮收起，点另一个直接切换（拖拽定位也会切到仓库面板）。
 
 ### Fixed
 

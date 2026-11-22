@@ -399,7 +399,7 @@ class WebApp:
                 )
             out: Path | None = None
             if payload.get("write_markdown"):
-                raw_out = str(payload.get("out") or "review.md")
+                raw_out = str(payload.get("out") or "erratumReview.md")
                 # execute_review resolves this against the repo root. Without a
                 # plain-filename check, "../../.ssh/authorized_keys" or an
                 # absolute path would be a legal target for a local page to write.

@@ -8,13 +8,13 @@
 
 **给 AI 写的代码开一张勘误表。**
 
-`CodeErratum` 读一次 git diff，输出一份 `review.md` —— 不是给人看的评论列表，而是**给另一个写代码的 AI 直接执行的修改工单**：精确定位、说明期望行为、给出改法和验收命令。
+`CodeErratum` 读一次 git diff，输出一份 `erratumReview.md` —— 不是给人看的评论列表，而是**给另一个写代码的 AI 直接执行的修改工单**：精确定位、说明期望行为、给出改法和验收命令。
 
 > 项目早期代号 `reviewCodeAgent` / `CrossCheck` / `Erratum`。名称已在 PyPI、npm、GitHub 完成注册表级查重，均无占用；备选名 `Snag`。
 
 ## 第一期目标（唯一）
 
-> 把 `review.md` 原样交给 Claude Code / Cursor / Cline，它能在不追问的情况下改对代码。
+> 把 `erratumReview.md` 原样交给 Claude Code / Cursor / Cline，它能在不追问的情况下改对代码。
 
 判据：随机抽 10 条 finding，下游 AI 直接执行成功的比例 ≥ 7 条。
 
@@ -61,10 +61,10 @@ set -a && source .env && set +a
 
 ```bash
 cd /path/to/your-repo
-codeerratum review --diff HEAD~1 -o review.md
+codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
-`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。审本地未提交的改动用 `--diff HEAD`（暂存与未暂存一起）；全新文件要先 `git add`（不必 commit）。加 `--path src/api` 可只审该目录的改动，已跟踪文件不需要先 `git add`。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `review.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
+`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。审本地未提交的改动用 `--diff HEAD`（暂存与未暂存一起）；全新文件要先 `git add`（不必 commit）。加 `--path src/api` 可只审该目录的改动，已跟踪文件不需要先 `git add`。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `erratumReview.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
 
 > 审 `main...feature` 这类**未 checkout 的版本**时，源码、摘录与锚点校验都直接取 diff 版本的 git blob，不需要先切分支。只有当某个文件的 blob 取不到（例如未提交的工作区改动）时才回退到工作区，内容对不上会跳过该文件并在「本次覆盖说明」写明。
 
@@ -81,7 +81,7 @@ uv run python scripts/mock_server.py          # 终端 A，监听 127.0.0.1:8899
 
 # 终端 B，在任意有 ≥2 次提交的仓库里
 CODEERRATUM_BASE_URL=http://127.0.0.1:8899/v1 CODEERRATUM_API_KEY=x \
-CODEERRATUM_MODEL=mock codeerratum review --diff HEAD~1 -o review.md
+CODEERRATUM_MODEL=mock codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
 ## 快速开始
@@ -92,7 +92,7 @@ CODEERRATUM_MODEL=mock codeerratum review --diff HEAD~1 -o review.md
 export CODEERRATUM_BASE_URL=https://api.example.com/v1
 export CODEERRATUM_API_KEY=sk-...          # 本地端点可留空
 export CODEERRATUM_MODEL=your-model-id
-codeerratum review --diff HEAD~1 -o review.md
+codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
 双模型异构交叉（dual，第三期核心价值）：至少配两家不同厂商 + 可选第三家作证伪。
@@ -104,13 +104,13 @@ export CODEERRATUM_MODELS='[
   {"model_id":"deepseek-chat","base_url":"https://api.deepseek.com/v1","api_key":"sk-...","family":"deepseek"}
 ]'
 export CODEERRATUM_MODE=dual
-codeerratum review --diff HEAD~1 -o review.md
+codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
 `family` 是异构判据：同厂商两个型号不算异构，会被路由拒绝。证伪轮优先用第三家；没配第三家时在两个审查模型间交叉证伪。
 如果这段代码是某个模型写的，用 `--author-model <model_id>` 把它排除出审查席位（设计底线第 1 条）。
 
-产出 `review.md` 交给 Claude Code / Cursor / Cline 执行；每次运行的可追溯产物落在 `.codeerratum/runs/<run_id>/`（`input.diff` / `units.json` / `calls.json` / `findings.json` / `static_diags.json`），反馈数据库在同一目录，不会污染工作区。
+产出 `erratumReview.md` 交给 Claude Code / Cursor / Cline 执行；每次运行的可追溯产物落在 `.codeerratum/runs/<run_id>/`（`input.diff` / `units.json` / `calls.json` / `findings.json` / `static_diags.json`），反馈数据库在同一目录，不会污染工作区。
 
 不花 token 就能看到真实格式的产物：[`examples/sample-review.md`](examples/sample-review.md)——格式是真的，内容来自仓库自带的假模型端点。
 双模型下报告分三区：**独有发现**（仅一家报出，最值得看）/ **冲突区**（意见相反，待人工裁决）/ **共识区**。
@@ -133,7 +133,7 @@ codeerratum review --diff HEAD~1 --rules project-rules.md
 
 规范是**追加，不是替换**。它被包在 `<house_rules>` 块里，位置在硬规则之后、输出契约之前，prompt 里明确写了「与硬规则冲突时以硬规则为准」。这个顺序不是排版偏好：如果允许整段替换 system prompt，用户就可能要求更长的 `claim`、或非逐字的 `snippet`，锚点校验会把这类发现全部丢弃——最后返回一份干净的空报告，读起来和「没有 bug」一模一样。
 
-上限 4000 字，超出会截断并在报告里声明。实际生效的规范以 12 位 sha256 同时写进 `review.md` 头部与 `findings.json`：同一个 diff 两次结果不一样时，先看这里是不是换了提示词。证伪轮**故意不接收**项目规范——一个吸收了你家规矩的证伪者，就不再是独立检验。
+上限 4000 字，超出会截断并在报告里声明。实际生效的规范以 12 位 sha256 同时写进 `erratumReview.md` 头部与 `findings.json`：同一个 diff 两次结果不一样时，先看这里是不是换了提示词。证伪轮**故意不接收**项目规范——一个吸收了你家规矩的证伪者，就不再是独立检验。
 
 ## 图形界面（可选）
 
@@ -227,7 +227,7 @@ codeerratum review --diff HEAD~1
 
 | 期次 | 主题 | 状态 |
 |---|---|---|
-| 一 | 可执行工单：diff → AI 能照着改的 `review.md` | ✅ 已实现 |
+| 一 | 可执行工单：diff → AI 能照着改的 `erratumReview.md` | ✅ 已实现 |
 | 二 | 可信度：消除幻觉定位与空泛结论 | ✅ 已实现 |
 | 三 | 异构交叉：双模型 + 证伪，产出独有发现 | ✅ 已实现 |
 | 四 | 自动化接入：GitHub Action、PR 评论、规则库 | ✅ 已实现 |

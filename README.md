@@ -8,13 +8,13 @@
 
 **An errata sheet for code written by AI.**
 
-CodeErratum reads a git diff and writes a `review.md` — not a list of comments for humans to skim, but a **work order another coding agent can execute directly**: exact location, expected behavior, a concrete fix, and an acceptance command.
+CodeErratum reads a git diff and writes a `erratumReview.md` — not a list of comments for humans to skim, but a **work order another coding agent can execute directly**: exact location, expected behavior, a concrete fix, and an acceptance command.
 
 > Formerly known as `reviewCodeAgent` / `CrossCheck` / `Erratum`. The name was checked against the PyPI, npm and GitHub registries — none taken. Fallback name: `Snag`.
 
 ## The one goal (phase 1)
 
-> Hand `review.md` to Claude Code / Cursor / Cline as-is, and it fixes the code without asking a single follow-up question.
+> Hand `erratumReview.md` to Claude Code / Cursor / Cline as-is, and it fixes the code without asking a single follow-up question.
 
 Success criterion: sample 10 findings at random; at least 7 must be executed correctly by a downstream agent with no clarification.
 
@@ -61,10 +61,10 @@ Run it **inside the repository under review**, not inside this project's directo
 
 ```bash
 cd /path/to/your-repo
-codeerratum review --diff HEAD~1 -o review.md
+codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
-`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. For local uncommitted work use `--diff HEAD` (staged and unstaged together); brand-new files must be `git add`-ed first, but never committed. Add `--path src/api` to review only that folder's changes (no `git add` needed for tracked files). At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `review.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
+`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. For local uncommitted work use `--diff HEAD` (staged and unstaged together); brand-new files must be `git add`-ed first, but never committed. Add `--path src/api` to review only that folder's changes (no `git add` needed for tracked files). At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `erratumReview.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
 
 > Reviewing a revision that is **not checked out** (e.g. `main...feature`): sources, excerpts and anchor checks all read the diff revision's git blob, so no checkout is needed. Only files whose blob is unavailable (e.g. uncommitted working-tree edits) fall back to the working tree; a mismatch there skips the file and is listed in the run's coverage notes.
 
@@ -81,7 +81,7 @@ uv run python scripts/mock_server.py          # terminal A, listens on 127.0.0.1
 
 # terminal B, inside any repo with at least 2 commits
 CODEERRATUM_BASE_URL=http://127.0.0.1:8899/v1 CODEERRATUM_API_KEY=x \
-CODEERRATUM_MODEL=mock codeerratum review --diff HEAD~1 -o review.md
+CODEERRATUM_MODEL=mock codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
 ## Quick start
@@ -92,7 +92,7 @@ With three environment variables set, it is one command:
 export CODEERRATUM_BASE_URL=https://api.example.com/v1
 export CODEERRATUM_API_KEY=sk-...          # may be empty for local endpoints
 export CODEERRATUM_MODEL=your-model-id
-codeerratum review --diff HEAD~1 -o review.md
+codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
 Two heterogeneous models (dual — the core of phase 3). At least two different vendors, plus an optional third to act as falsifier:
@@ -104,12 +104,12 @@ export CODEERRATUM_MODELS='[
   {"model_id":"deepseek-chat","base_url":"https://api.deepseek.com/v1","api_key":"sk-...","family":"deepseek"}
 ]'
 export CODEERRATUM_MODE=dual
-codeerratum review --diff HEAD~1 -o review.md
+codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
 `family` is the heterogeneity test: two model IDs from the same vendor do not count as heterogeneous and the router will reject them. The falsification round prefers the third vendor; without one, the two reviewers falsify each other's findings. If a model wrote the code, pass `--author-model <model_id>` to keep it out of the reviewer seats (design invariant #1).
 
-Hand the resulting `review.md` to Claude Code / Cursor / Cline. Every run leaves traceable artifacts in `.codeerratum/runs/<run_id>/` (`input.diff`, `units.json`, `calls.json`, `findings.json`, `static_diags.json`); the feedback database sits in the same directory and never pollutes your working tree.
+Hand the resulting `erratumReview.md` to Claude Code / Cursor / Cline. Every run leaves traceable artifacts in `.codeerratum/runs/<run_id>/` (`input.diff`, `units.json`, `calls.json`, `findings.json`, `static_diags.json`); the feedback database sits in the same directory and never pollutes your working tree.
 
 A real artifact, without spending a token, is in [`examples/sample-review.md`](examples/sample-review.md) — the format is genuine, the content comes from the bundled fake endpoint.
 
@@ -132,7 +132,7 @@ codeerratum review --diff HEAD~1 --rules project-rules.md
 
 Rules are **appended, never substituted**. They land in a `<house_rules>` block between the hard rules and the output contract, and the prompt states that a project rule loses to a hard rule on conflict. That ordering is not cosmetic: a substituted system prompt lets a rule ask for longer `claim` values or non-verbatim snippets, and the anchor check would then discard every finding — producing a clean, empty report that reads exactly like "no bugs found".
 
-The cap is 4000 characters; anything longer is truncated and the truncation is stated in the report. The rules actually used are recorded as a 12-char sha256 in both `review.md` and `findings.json`, so when two runs over the same diff disagree you can tell whether the prompt changed. The falsification round deliberately does **not** receive project rules — a falsifier that has absorbed your conventions stops being an independent check.
+The cap is 4000 characters; anything longer is truncated and the truncation is stated in the report. The rules actually used are recorded as a 12-char sha256 in both `erratumReview.md` and `findings.json`, so when two runs over the same diff disagree you can tell whether the prompt changed. The falsification round deliberately does **not** receive project rules — a falsifier that has absorbed your conventions stops being an independent check.
 
 Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject <finding_id> --reason "..."`, `codeerratum stats` for the acceptance rate, `codeerratum compare` for per-model unique-finding counts and measured profiles. All three resolve to the same database from any subdirectory of the repo.
 
@@ -231,7 +231,7 @@ codeerratum review --diff HEAD~1
 
 | Phase | Theme | Status |
 |---|---|---|
-| 1 | Executable work order: diff → a `review.md` an AI can follow | ✅ Done |
+| 1 | Executable work order: diff → an `erratumReview.md` an AI can follow | ✅ Done |
 | 2 | Trust: eliminate hallucinated locations and vacuous claims | ✅ Done |
 | 3 | Heterogeneous cross-check: two models + falsification, surfacing unique findings | ✅ Done |
 | 4 | Automation: GitHub Action, PR comments, rule library | ✅ Done |

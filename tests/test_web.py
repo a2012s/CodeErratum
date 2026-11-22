@@ -156,6 +156,14 @@ def test_write_markdown_flag_copies_to_repo_root(client, repo):
     assert (repo / "review.md").read_text(encoding="utf-8").startswith("# Code Review 工单")
 
 
+def test_default_out_filename_is_erratum_review_md(client, repo):
+    """The work order lands under the product name unless an explicit out is given."""
+    summary = client.post("/api/review", json={"diff": "HEAD", "write_markdown": True}).json()
+    assert summary["out_path"].endswith("erratumReview.md")
+    assert (repo / "erratumReview.md").read_text(encoding="utf-8").startswith("# Code Review 工单")
+    assert not (repo / "review.md").exists()
+
+
 def test_empty_diff_is_reported_without_error_status(client, repo):
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "apply"], cwd=repo, check=True)
@@ -590,3 +598,23 @@ def test_errors_use_modal_dialog_not_auto_dismissing_toast():
     assert not re.search(r"toast\([^;]*?,\s*true\s*\)", html)
     # The default must not be a revision that a one-commit repository lacks.
     assert 'id="diff" value="HEAD"' in html
+
+
+def test_ui_defaults_and_mutually_exclusive_drawers():
+    """Writing the work order is opt-out; the four panels never stack."""
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="writeMd" checked' in html
+    assert "同时写 erratumReview.md 到仓库根" in html
+    assert "function showOnlyDrawer(" in html
+    assert "function toggleDrawer(" in html
+    assert '$(btn).classList.toggle("active", id === openId)' in html
+    for drawer, btn in (
+        ("drawer", "statsBtn"),
+        ("docsDrawer", "docsBtn"),
+        ("repoDrawer", "repoBtn"),
+        ("configDrawer", "configBtn"),
+    ):
+        assert f'{drawer}: "{btn}"' in html
+        assert f'toggleDrawer("{drawer}")' in html

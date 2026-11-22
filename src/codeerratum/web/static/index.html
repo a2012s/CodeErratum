@@ -76,6 +76,9 @@
     background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600;
   }
   button.ghost { background: transparent; }
+  button.ghost.active {
+    background: var(--accent-weak); border-color: var(--accent); color: var(--accent);
+  }
 
   .layout { display: grid; grid-template-columns: 292px minmax(0, 1fr); height: calc(100vh - 51px); }
   aside.sidebar {
@@ -339,7 +342,7 @@
         <input id="maxUnits" type="number" value="10" min="1" max="50">
       </div>
     </div>
-    <label class="check"><input type="checkbox" id="writeMd"> 同时写 review.md 到仓库根</label>
+    <label class="check"><input type="checkbox" id="writeMd" checked> 同时写 erratumReview.md 到仓库根</label>
     <div class="field">
       <label for="authorModel">作者模型（可选，排除出审查席位）</label>
       <input id="authorModel" placeholder="写这段代码的模型 id" spellcheck="false">
@@ -725,9 +728,7 @@ $("runBtn").onclick = async () => {
 };
 
 $("statsBtn").onclick = async () => {
-  const d = $("drawer");
-  d.hidden = !d.hidden;
-  if (d.hidden) return;
+  if (!toggleDrawer("drawer")) return;
   try {
     const s = await api("/api/stats");
     const rows = [
@@ -742,15 +743,32 @@ $("statsBtn").onclick = async () => {
   } catch (e) { $("statsBody").textContent = e.message; }
 };
 
+// Four top-bar panels are mutually exclusive; the open one lights its button.
+const DRAWERS = {
+  drawer: "statsBtn",
+  docsDrawer: "docsBtn",
+  repoDrawer: "repoBtn",
+  configDrawer: "configBtn",
+};
+function showOnlyDrawer(openId) {
+  Object.entries(DRAWERS).forEach(([id, btn]) => {
+    $(id).hidden = id !== openId;
+    $(btn).classList.toggle("active", id === openId);
+  });
+}
+function toggleDrawer(id) {
+  const opening = $(id).hidden;
+  showOnlyDrawer(opening ? id : "");
+  return opening;
+}
+
 const DRIFT_LABEL = {
   module_added: "模块新增", module_removed: "模块删除",
   symbol_added: "符号新增", symbol_removed: "符号删除", signature_changed: "签名变更"
 };
 
 $("docsBtn").onclick = async () => {
-  const d = $("docsDrawer");
-  d.hidden = !d.hidden;
-  if (d.hidden) return;
+  if (!toggleDrawer("docsDrawer")) return;
   $("docsBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px">
     <span class="spinner"></span> 解析 AST…</div>`;
   try {
@@ -995,7 +1013,7 @@ async function doSwitchRepo(path) {
     STATE.run = null; STATE.zone = null;
     $("runView").hidden = true; $("empty").hidden = false;
     renderMeta();
-    $("repoDrawer").hidden = true;
+    showOnlyDrawer("");
     await loadRuns(true);
     toast("已切换到 " + meta.repo);
   } catch (e) {
@@ -1028,8 +1046,7 @@ async function browseRepo() {
 }
 
 function showDropMatches(name, matches) {
-  $("repoDrawer").hidden = false;
-  $("configDrawer").hidden = true;
+  showOnlyDrawer("repoDrawer");
   const box = $("repoBody");
   if (!matches.length) {
     box.innerHTML = `<div class="cfg-note bad">按文件夹名「${esc(name)}」没找到 git 仓库。
@@ -1100,18 +1117,12 @@ async function handleFolderDrop(e) {
 })();
 
 $("repoBtn").onclick = () => {
-  const d = $("repoDrawer");
-  d.hidden = !d.hidden;
-  if (d.hidden) return;
-  $("configDrawer").hidden = true;
+  if (!toggleDrawer("repoDrawer")) return;
   renderRepoDrawer();
 };
 
 $("configBtn").onclick = async () => {
-  const d = $("configDrawer");
-  d.hidden = !d.hidden;
-  if (d.hidden) return;
-  $("repoDrawer").hidden = true;
+  if (!toggleDrawer("configDrawer")) return;
   $("configBody").innerHTML = `<div style="color:var(--muted);font-size:12.5px"><span class="spinner"></span> 读取配置…</div>`;
   try {
     renderConfig(await api("/api/config"));

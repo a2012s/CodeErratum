@@ -62,7 +62,7 @@ def main(
 @app.command()
 def review(
     diff: str = typer.Option("HEAD~1", "--diff", help="Git diff spec, e.g. HEAD~1 or HEAD~3..HEAD"),
-    out: Path = typer.Option(Path("review.md"), "--out", "-o", help="Output markdown path"),
+    out: Path = typer.Option(Path("erratumReview.md"), "--out", "-o", help="Output markdown path"),
     repo: Path = typer.Option(Path("."), "--repo", help="Repository root"),
     max_units: int = typer.Option(10, "--max-units", help="Max review units per run (cost guard)"),
     mode: str = typer.Option(
@@ -83,7 +83,7 @@ def review(
         "", "--path", help="Limit the diff to a git pathspec, e.g. src/api (no need to git add)"
     ),
 ) -> None:
-    """Review a git diff and write an executable review.md work order."""
+    """Review a git diff and write an executable erratumReview.md work order."""
     repo_root = repo.resolve()
     house_rules = _read_rules_file(rules)
     try:
