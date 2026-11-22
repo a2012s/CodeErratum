@@ -20,7 +20,7 @@ from pathlib import Path
 from .config import Config
 from .config_store import CONFIG_REL
 from .config_store import effective as effective_config
-from .i18n import t
+from .i18n import get_lang, t
 from .ingest import (
     DiffError,
     get_commit,
@@ -533,6 +533,9 @@ def execute_review(
                 should_stop=should_stop,
                 pinned=models,
                 on_findings=on_findings,
+                # Pinned at run start: the review outlives the request thread that
+                # seeded the language ContextVar, so it must travel as a value.
+                output_lang=get_lang(),
             )
         )
         say(t("pipeline.report_writing"))

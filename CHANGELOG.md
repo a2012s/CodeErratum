@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.9] — 2026-11-23
+
+### Fixed
+
+- **发现的 detail 论据不再固定英文，跟随界面语言**：0.4.7 做双语时，输出语言指令
+  （`language_directive`）只做到了 executor 一层——`execute_review → run_review →
+  _review_with → review_unit` 整条链都没传 `output_lang`，证伪轮的 prompt 同样没传，
+  所以模型始终按默认 prompt 语言（英文）写 `claim` / `detail` / `suggestion`，界面切中文
+  也没用。现在 pipeline 在运行起点（请求线程里语言已就位时）捕获语言并显式传值：
+  审查与证伪两条路径都收到指令，证伪裁决的标签（「反例 / 错误假设」）也随语言切换；
+  语言随 run 固化，审查进行中切换界面语言不影响本次输出。enum 值与代码标识符不译，
+  解析与锚点校验不受影响。新增 `tests/test_output_language.py`（8 项）锁住
+  指令内容、审查 prompt、证伪 prompt、pipeline 捕获四个环节。
+
 ## [0.4.8] — 2026-11-23
 
 ### Fixed

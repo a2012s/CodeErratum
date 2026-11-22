@@ -114,6 +114,7 @@ async def _review_with(
     sources: dict[str, str] | None = None,
     progress: Callable[[str], None] | None = None,
     on_findings: Callable[[ReviewUnit, list[Finding], str], None] | None = None,
+    output_lang: str = "",
 ) -> tuple[dict[str, list[Finding]], list[dict], list[dict], list[dict]]:
     """Run one model over all units, a bounded number at a time.
 
@@ -150,7 +151,14 @@ async def _review_with(
             )
             try:
                 findings, rej, completion, diags = await review_unit(
-                    provider, spec.model_id, unit, repo_root, run_id, house_rules, sources
+                    provider,
+                    spec.model_id,
+                    unit,
+                    repo_root,
+                    run_id,
+                    house_rules,
+                    sources,
+                    output_lang=output_lang,
                 )
             except Exception as exc:  # noqa: BLE001 - one model/unit failing must not kill the run
                 rejected.append(
@@ -242,6 +250,7 @@ async def run_review(
     should_stop: Callable[[], bool] | None = None,
     pinned: list[str] | None = None,
     on_findings: Callable[[ReviewUnit, list[Finding], str], None] | None = None,
+    output_lang: str = "",
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
@@ -252,7 +261,9 @@ async def run_review(
     ``house_rules`` only reaches the reviewers. The falsifier is deliberately left
     with the stock prompt: a falsifier that has absorbed the project's conventions
     would start agreeing with the reviewer for the wrong reason, which destroys the
-    independence the falsification round exists to provide.
+    independence the falsification round exists to provide. ``output_lang`` does
+    reach the falsifier — it is presentation, not content, and a verdict in a
+    language the reader cannot read is worse than no verdict.
     """
     say = progress or (lambda _msg: None)
     active: set[asyncio.Task] = set()
@@ -285,6 +296,7 @@ async def run_review(
                     sources,
                     progress=say,
                     on_findings=on_findings,
+                    output_lang=output_lang,
                 )
             )
             for m in reviewers
@@ -376,7 +388,9 @@ async def run_review(
             async with falsify_gate:
                 try:
                     falsify_task = asyncio.create_task(
-                        falsify_finding(chosen_provider, chosen_model, f, context, facts)
+                        falsify_finding(
+                            chosen_provider, chosen_model, f, context, facts, output_lang
+                        )
                     )
                     active.add(falsify_task)
                     verdict, completion = await falsify_task

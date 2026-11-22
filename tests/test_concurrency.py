@@ -30,7 +30,7 @@ def _spec() -> ModelSpec:
 def _patch_review(monkeypatch, delay: float, seen: dict) -> None:
     """Replace the per-unit call with a sleep, and record overlap."""
 
-    async def fake_review_unit(provider, model_id, unit, repo_root, run_id, house_rules, sources):
+    async def fake_review_unit(provider, model_id, unit, repo_root, run_id, house_rules, sources, **_kwargs):
         seen["started"] += 1
         seen["peak"] = max(seen["peak"], seen["started"])
         await asyncio.sleep(delay)
@@ -96,7 +96,7 @@ def test_bad_env_value_falls_back_instead_of_crashing(monkeypatch):
 
 
 def test_a_failing_unit_does_not_kill_its_neighbours(monkeypatch):
-    async def boom(provider, model_id, unit, repo_root, run_id, house_rules, sources):
+    async def boom(provider, model_id, unit, repo_root, run_id, house_rules, sources, **_kwargs):
         if unit.unit_id == "u1":
             raise RuntimeError("provider exploded")
         return (

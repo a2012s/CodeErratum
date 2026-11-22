@@ -35,6 +35,26 @@ and the project rule is ignored.
 
 HOUSE_RULES_FOOTER = "</house_rules>"
 
+# Reviewers default to English prose. When the UI runs in another language the
+# human-readable fields should follow the reader, not the prompt: enum values
+# and code identifiers stay as-is so the parser and the anchor checker are
+# untouched. ``en`` injects nothing — it is already the prompt's language.
+LANG_NAMES = {"zh": "Simplified Chinese"}
+
+
+def language_directive(output_lang: str) -> str:
+    """A prompt section pinning the human-readable output language, or ""."""
+    if not output_lang or output_lang == "en":
+        return ""
+    name = LANG_NAMES.get(output_lang, output_lang)
+    return (
+        "# Output language\n\n"
+        "Write every human-readable field — `claim`, `detail`, "
+        "`suggestion.explanation`, `suggestion.acceptance`, and any free-text "
+        f"`reason` — in {name}. Keep enum values (`category`, `severity`, `lens`) "
+        "and code identifiers untranslated.\n"
+    )
+
 # Context window sent to the model: hunk ± PAD lines, plus the enclosing symbol
 # when it fits. Sending the whole file for a one-line change multiplies cost by
 # the file size on every unit and every model.
@@ -73,8 +93,13 @@ def truncate_house_rules(text: str, limit: int = MAX_HOUSE_RULES_CHARS) -> tuple
     return text[:limit].rstrip() + "\n… (truncated)", True
 
 
-def load_prompt(house_rules: str = "") -> str:
-    """Base prompt, with the owner's additions spliced in before the Output section."""
+def load_prompt(house_rules: str = "", output_lang: str = "") -> str:
+    """Base prompt, with the owner's additions spliced in before the Output section.
+
+    ``output_lang`` adds an output-language section ahead of ``# Output``; the
+    house rules block can never override it because both are spliced from code,
+    not from user text.
+    """
     base = PROMPT_PATH.read_text(encoding="utf-8")
     head, marker, tail = base.partition(HOUSE_RULES_MARKER)
     if not marker:
@@ -84,9 +109,12 @@ def load_prompt(house_rules: str = "") -> str:
         )
     joined = head.rstrip("\n") + "\n\n"
     body, _ = truncate_house_rules(sanitize_house_rules(house_rules))
-    if not body:
-        return joined + tail.lstrip("\n")
-    return f"{joined}{HOUSE_RULES_HEADER}\n{body}\n{HOUSE_RULES_FOOTER}\n\n" + tail.lstrip("\n")
+    rules = "" if not body else f"{HOUSE_RULES_HEADER}\n{body}\n{HOUSE_RULES_FOOTER}\n\n"
+    prompt = joined + rules + tail.lstrip("\n")
+    directive = language_directive(output_lang)
+    if directive and "# Output\n" in prompt:
+        prompt = prompt.replace("# Output\n", f"{directive}\n# Output\n", 1)
+    return prompt
 
 
 def _hunk_window(unit_hunk, total_lines: int) -> tuple[int, int]:
@@ -153,6 +181,7 @@ def build_messages(
     callers: list[str] | None = None,
     known_facts: str = "",
     house_rules: str = "",
+    output_lang: str = "",
 ) -> list[dict[str, str]]:
     """Build a self-contained prompt with exact file line numbers for citation.
 
@@ -172,7 +201,7 @@ def build_messages(
         parts.append(known_facts)
     context = "\n\n".join(parts)
     return [
-        {"role": "system", "content": load_prompt(house_rules)},
+        {"role": "system", "content": load_prompt(house_rules, output_lang)},
         {
             "role": "user",
             "content": (
@@ -324,6 +353,7 @@ async def review_unit(
     run_id: str,
     house_rules: str = "",
     sources: dict[str, str] | None = None,
+    output_lang: str = "",
 ) -> tuple[list[Finding], list[dict], Completion, list[dict]]:
     from ..context import build_context
     from ..evidence import collect_static, known_facts_block
@@ -365,6 +395,7 @@ async def review_unit(
             callers=ctx["callers"],
             known_facts=known_facts_block(relevant),
             house_rules=house_rules,
+            output_lang=output_lang,
         ),
         schema=LLMReview,
         temperature=0.0,
