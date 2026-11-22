@@ -10,6 +10,7 @@ for the request only and never appears in the result.
 from __future__ import annotations
 
 import time
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -66,8 +67,36 @@ def probe_model(
             response = client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
         result["status"] = response.status_code
         result["latency_ms"] = int((time.monotonic() - t0) * 1000)
+        if 300 <= response.status_code < 400:
+            # A console page answers POST with a redirect to a 404 page. We do
+            # not follow it (that would leak the Authorization header to a
+            # different host); name the likely misconfiguration instead of
+            # failing later as an opaque JSONDecodeError.
+            location = getattr(response, "headers", {}).get("location", "")
+            target = ""
+            if location:
+                try:
+                    parsed = urlsplit(location)
+                    target = parsed.netloc or parsed.path
+                except ValueError:
+                    target = ""
+            result["detail"] = (
+                f"端点返回 {response.status_code} 重定向"
+                + (f" → {target}" if target else "")
+                + "：base_url 可能填成了控制台网页地址；请使用以 /v1 结尾的 API 端点"
+            )
+            return result
         if response.status_code == 401 or response.status_code == 403:
-            result["detail"] = f"鉴权失败（{response.status_code}）：检查 api_key"
+            detail = f"鉴权失败（{response.status_code}）：检查 api_key"
+            # sk-sp- keys belong to Aliyun Token Plan / Coding Plan and are
+            # rejected by the pay-as-you-go dashscope endpoint. Name the
+            # mismatch instead of leaving the user guessing at a valid key.
+            if api_key.startswith("sk-sp-") and "dashscope.aliyuncs.com" in base_url:
+                detail += (
+                    "；sk-sp- 是 Token Plan 专属密钥，请用 "
+                    "token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+                )
+            result["detail"] = detail
             return result
         if response.status_code == 404:
             result["detail"] = "404：检查 base_url 与 model_id"

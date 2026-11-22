@@ -610,6 +610,7 @@ def test_ui_defaults_and_mutually_exclusive_drawers():
     assert "function showOnlyDrawer(" in html
     assert "function toggleDrawer(" in html
     assert '$(btn).classList.toggle("active", id === openId)' in html
+    assert 'document.addEventListener("click", (ev)' in html  # click-away closes
     for drawer, btn in (
         ("drawer", "statsBtn"),
         ("docsDrawer", "docsBtn"),

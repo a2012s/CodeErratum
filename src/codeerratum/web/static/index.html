@@ -762,6 +762,17 @@ function toggleDrawer(id) {
   return opening;
 }
 
+// Clicking anywhere outside an open panel closes it. Clicks inside the panel
+// or on the four toggle buttons belong to their own handlers.
+document.addEventListener("click", (ev) => {
+  if (!$("errOverlay").hidden) return;  // the error modal owns the click
+  const open = Object.keys(DRAWERS).find((id) => !$(id).hidden);
+  if (!open) return;
+  if ($(open).contains(ev.target)) return;
+  if (Object.values(DRAWERS).some((btn) => $(btn).contains(ev.target))) return;
+  showOnlyDrawer("");
+});
+
 const DRIFT_LABEL = {
   module_added: "模块新增", module_removed: "模块删除",
   symbol_added: "符号新增", symbol_removed: "符号删除", signature_changed: "签名变更"

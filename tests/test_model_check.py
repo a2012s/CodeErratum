@@ -11,9 +11,10 @@ from codeerratum.web import WebApp
 
 
 class _Reply:
-    def __init__(self, status: int, body: dict | None = None):
+    def __init__(self, status: int, body: dict | None = None, headers: dict | None = None):
         self.status_code = status
         self._body = body or {}
+        self.headers = headers or {}
 
     def json(self):
         return self._body
@@ -83,6 +84,28 @@ def test_http_errors_are_red_crosses(monkeypatch, status, fragment):
     assert result["ok"] is False
     assert result["status"] == status
     assert fragment in result["detail"]
+
+
+def test_plan_key_on_generic_endpoint_gets_specific_hint(monkeypatch):
+    """sk-sp- on the pay-as-you-go endpoint is a key/endpoint mismatch, not a bad key."""
+    _patch_client(monkeypatch, _Reply(401))
+    result = probe_model("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "sk-sp-xxx")
+    assert result["ok"] is False
+    assert "sk-sp-" in result["detail"]
+    assert "Token Plan" in result["detail"]
+    assert "token-plan.cn-beijing" in result["detail"]
+
+
+def test_redirect_is_diagnosed_as_wrong_base_url(monkeypatch):
+    """A console page's 302 must not surface as a misleading JSONDecodeError."""
+    reply = _Reply(302, headers={"location": "http://www.aliyun.com/notfound/"})
+    _patch_client(monkeypatch, reply)
+    result = probe_model("qwen", "https://console.example.com/subscription/personal")
+    assert result["ok"] is False
+    assert result["status"] == 302
+    assert "重定向" in result["detail"]
+    assert "base_url" in result["detail"]
+    assert "aliyun.com" in result["detail"]
 
 
 def test_empty_choices_is_failure(monkeypatch):
