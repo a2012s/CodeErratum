@@ -66,7 +66,18 @@ def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
         check=False,
     )
     if result.returncode != 0:
-        raise DiffError(result.stderr.strip() or f"git diff {spec} failed")
+        detail = result.stderr.strip() or f"git diff {spec} failed"
+        if "ambiguous argument" in detail and spec.startswith("HEAD~"):
+            # A repo with one commit has no HEAD~1. The raw git message is
+            # English and suggests an unrelated fix (--), which leaves users
+            # stuck; say what to type instead and keep the original for copying.
+            detail = (
+                f"无法解析 {spec}：当前仓库可能只有一个提交。\n"
+                "审查本地未提交改动请填 HEAD；审查上一个提交请用 HEAD~1"
+                "（需要至少两个提交）。\n\n"
+                f"git 原始错误：\n{detail}"
+            )
+        raise DiffError(detail)
     return result.stdout
 
 

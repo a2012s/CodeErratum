@@ -54,6 +54,17 @@ def test_get_diff_with_pathspec_excludes_other_folders(tmp_path):
     assert "src/m.py" in both and "tests/m.py" in both
 
 
+def test_single_commit_repo_explains_head_tilde(tmp_path):
+    """Reverting: the UI's old HEAD~1 default dies with an English git fatal on a 1-commit repo."""
+    repo = _init_repo(tmp_path / "repo")
+    with pytest.raises(DiffError) as exc:
+        get_diff("HEAD~1", repo)
+    msg = str(exc.value)
+    assert "只有一个提交" in msg
+    assert "请填 HEAD" in msg
+    assert "git 原始错误" in msg  # keep the copyable raw reason
+
+
 def test_split_diff_respects_pathspec(tmp_path):
     repo = _init_repo(tmp_path / "repo")
     units = split_diff(get_diff("HEAD", repo, paths="src"), repo)

@@ -573,3 +573,20 @@ def test_model_check_requires_same_origin(client):
         headers={"Origin": "http://evil.example"},
     )
     assert resp.status_code == 403
+
+
+def test_errors_use_modal_dialog_not_auto_dismissing_toast():
+    """Errors must stay on screen until clicked and be selectable for copying."""
+    import re
+
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for marker in ('id="errOverlay"', 'id="errText"', 'id="errCopy"', 'id="errClose"'):
+        assert marker in html
+    assert "function showError(" in html
+    assert "审查失败" in html
+    # No error path may still route through the disappearing toast.
+    assert not re.search(r"toast\([^;]*?,\s*true\s*\)", html)
+    # The default must not be a revision that a one-commit repository lacks.
+    assert 'id="diff" value="HEAD"' in html

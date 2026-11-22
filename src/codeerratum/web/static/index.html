@@ -264,6 +264,31 @@
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #toast.bad { background: var(--bad); color: #fff; }
+  /* Errors are modal: they must be dismissed by a click and stay selectable. */
+  #errOverlay {
+    position: fixed; inset: 0; z-index: 60; padding: 20px;
+    background: rgba(0, 0, 0, .48); display: flex; align-items: center; justify-content: center;
+  }
+  #errOverlay[hidden] { display: none; }
+  .errBox {
+    width: min(680px, 100%); max-height: 82vh; display: flex; flex-direction: column;
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 12px; box-shadow: 0 18px 60px rgba(0, 0, 0, .3);
+  }
+  .errHead {
+    padding: 16px 18px 12px; font-size: 15px; font-weight: 600; color: var(--bad);
+    border-bottom: 1px solid var(--border);
+  }
+  .errBody { padding: 14px 18px; overflow: auto; }
+  .errBody textarea {
+    width: 100%; min-height: 170px; resize: vertical; padding: 10px 12px;
+    font: 12.5px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; white-space: pre; overflow: auto; user-select: text;
+  }
+  .errFoot {
+    display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 16px;
+  }
   .spinner {
     width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent;
     border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; vertical-align: -2px;
@@ -290,7 +315,7 @@
   <aside class="sidebar">
     <div class="field">
       <label for="diff">git diff 范围</label>
-      <input id="diff" value="HEAD~1" spellcheck="false">
+      <input id="diff" value="HEAD" spellcheck="false">
       <div class="hint"><code>HEAD</code> = 本地未提交改动（含已暂存）；
         <code>HEAD~1</code> = 上一个提交；<code>HEAD~3..HEAD</code> = 最近三个提交。
         新文件需先 <code>git add</code>（不必 commit）才会进入 diff。</div>
@@ -374,6 +399,16 @@
   <div class="sub">按文件夹名在本机查找，不上传任何文件</div>
 </div></div>
 <div id="toast"></div>
+<div id="errOverlay" hidden>
+  <div class="errBox" role="dialog" aria-modal="true" aria-labelledby="errTitle">
+    <div class="errHead" id="errTitle">操作失败</div>
+    <div class="errBody"><textarea id="errText" readonly spellcheck="false"></textarea></div>
+    <div class="errFoot">
+      <button class="ghost" id="errCopy">复制错误</button>
+      <button class="primary" id="errClose">关闭</button>
+    </div>
+  </div>
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -406,6 +441,32 @@ function toast(msg, bad = false) {
   t._timer = setTimeout(() => (t.className = ""), bad ? 5200 : 2400);
 }
 
+// Errors never auto-dismiss: they open a modal with selectable, copyable text.
+function showError(message, title = "操作失败") {
+  $("errTitle").textContent = title;
+  $("errText").value = String(message ?? "");
+  $("errOverlay").hidden = false;
+  $("errClose").focus();
+}
+function closeError() { $("errOverlay").hidden = true; }
+$("errClose").onclick = closeError;
+$("errOverlay").onclick = (ev) => { if (ev.target === $("errOverlay")) closeError(); };
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !$("errOverlay").hidden) closeError();
+});
+$("errCopy").onclick = async () => {
+  const btn = $("errCopy");
+  try {
+    await navigator.clipboard.writeText($("errText").value);
+    btn.textContent = "已复制";
+    setTimeout(() => { btn.textContent = "复制错误"; }, 1500);
+  } catch {
+    $("errText").focus();
+    $("errText").select();
+    toast("浏览器拒绝剪贴板访问，已选中文本，请按 ⌘/Ctrl+C");
+  }
+};
+
 function ago(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -436,7 +497,7 @@ function renderMeta() {
 async function boot() {
   try {
     STATE.meta = await api("/api/meta");
-  } catch (e) { toast("无法连接后端: " + e.message, true); return; }
+  } catch (e) { showError("无法连接后端: " + e.message, "连接失败"); return; }
   renderMeta();
   await loadRuns(true);
 }
@@ -483,7 +544,7 @@ async function openRun(id) {
     renderRun();
     document.querySelectorAll("ul#runs li").forEach((li) =>
       li.classList.toggle("active", li.dataset.run === id));
-  } catch (e) { toast("打不开该运行: " + e.message, true); }
+  } catch (e) { showError("打不开该运行: " + e.message, "读取运行失败"); }
 }
 
 function renderRun() {
@@ -603,7 +664,7 @@ function bindCards() {
       btn.onclick = async () => {
         const status = btn.dataset.act;
         const reason = card.querySelector(".reason").value.trim();
-        if (status === "rejected" && !reason) { toast("驳回要写理由，否则统计没有意义", true); return; }
+        if (status === "rejected" && !reason) { showError("驳回要写理由，否则统计没有意义", "无法保存裁决"); return; }
         btn.disabled = true;
         try {
           const r = await api(`/api/findings/${id}/status`, {
@@ -612,14 +673,14 @@ function bindCards() {
           });
           applyStatus(r.id, r.status, r.reason);
           toast(status === "accepted" ? "已采纳" : status === "rejected" ? "已驳回" : "已重置");
-        } catch (e) { toast(e.message, true); }
+        } catch (e) { showError(e.message, "保存裁决失败"); }
         finally { btn.disabled = false; }
       };
     });
     const copyBtn = card.querySelector("[data-copy]");
     if (copyBtn) copyBtn.onclick = async () => {
       try { await navigator.clipboard.writeText(copyBtn.dataset.copy); toast("已复制验收命令"); }
-      catch { toast("浏览器拒绝剪贴板访问", true); }
+      catch { toast("浏览器拒绝剪贴板访问，请手动复制"); }
     };
   });
 }
@@ -653,7 +714,11 @@ $("runBtn").onclick = async () => {
     await loadRuns(false);
     await openRun(s.run_id);
   } catch (e) {
-    toast(e.message, true);
+    showError(
+      `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
+      + `审查模式：${body.mode}\n\n${e.message}`,
+      "审查失败"
+    );
   } finally {
     btn.disabled = false; btn.innerHTML = old;
   }
@@ -764,25 +829,33 @@ function cfgRowBody(tr) {
   };
 }
 
+let BATCH_CHECKING = false;
+
 async function checkCfgRow(tr) {
   const btn = tr.querySelector(".cfg-test");
+  const mid = tr.querySelector(".cfg-mid").value.trim() || "(未命名模型)";
   btn.disabled = true;
-  const oldText = btn.textContent;
   btn.innerHTML = `<span class="spinner"></span> 检测中`;
+  let failure = "";
   try {
     const r = await api("/api/model/check", {
       method: "POST", body: JSON.stringify(cfgRowBody(tr)),
     });
+    const detail = r.detail + (r.status ? `（HTTP ${r.status}）` : "");
     btn.textContent = r.ok ? "✓ 可用" : "✗ 不可用";
     btn.className = "ghost cfg-test " + (r.ok ? "ok" : "bad");
-    btn.title = r.detail + (r.status ? `（HTTP ${r.status}）` : "") + (r.ok ? ` · ${r.latency_ms}ms` : "");
+    btn.title = detail + (r.ok ? ` · ${r.latency_ms}ms` : "");
+    if (!r.ok) failure = `${mid}：${detail}`;
   } catch (e) {
     btn.textContent = "✗ 检测失败";
     btn.className = "ghost cfg-test bad";
     btn.title = e.message;
+    failure = `${mid}：${e.message}`;
   } finally {
     btn.disabled = false;
   }
+  if (failure && !BATCH_CHECKING) showError(failure, "模型检测失败");
+  return failure;
 }
 
 function renderConfig(info) {
@@ -801,7 +874,7 @@ function renderConfig(info) {
   </div>`);
   parts.push(`<div class="hint" style="margin:0 0 6px">
     dual 要求至少两家不同 family，证伪者取第三家。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。
-    点「检测」发一个最小请求验证端点（不写入配置）：绿勾可用，红叉不可用；改动字段后结果自动失效。
+    点「检测」发一个最小请求验证端点（不写入配置）：绿勾可用，红叉会弹出可复制的原因；改动字段后结果自动失效。
   </div>`);
   parts.push(`<table class="cfg"><thead><tr>
     <th>model_id</th><th>base_url</th><th>family</th><th>api_key</th><th>检测</th><th></th>
@@ -819,7 +892,17 @@ function renderConfig(info) {
   $("cfgAdd").onclick = () => tbody.appendChild(cfgRow());
   $("cfgTestAll").onclick = async () => {
     const rows = [...tbody.querySelectorAll("tr")];
-    for (const tr of rows) await checkCfgRow(tr);  // sequential: shared local server
+    const failures = [];
+    BATCH_CHECKING = true;
+    try {
+      for (const tr of rows) {  // sequential: shared local server
+        const err = await checkCfgRow(tr);
+        if (err) failures.push(err);
+      }
+    } finally {
+      BATCH_CHECKING = false;
+    }
+    if (failures.length) showError(failures.join("\n\n"), "模型检测失败");
   };
   $("cfgSave").onclick = saveConfig;
 }
@@ -846,7 +929,7 @@ async function saveConfig() {
     renderMeta();
     toast("配置已保存到 " + info.path);
   } catch (e) {
-    toast("保存失败: " + e.message, true);
+    showError(e.message, "保存配置失败");
   } finally {
     btn.disabled = false;
   }
@@ -902,7 +985,7 @@ function renderRepoDrawer() {
 }
 
 async function doSwitchRepo(path) {
-  if (!path) { toast("请填写本地文件夹路径", true); return; }
+  if (!path) { showError("请填写本地仓库文件夹的绝对路径，或用「浏览本地…」选择", "没有选择仓库"); return; }
   const btn = $("repoSwitch");
   btn.disabled = true;
   try {
@@ -918,7 +1001,7 @@ async function doSwitchRepo(path) {
   } catch (e) {
     const err = $("repoErr");
     if (err) { err.textContent = e.message; err.hidden = false; }
-    toast("切换失败：" + e.message, true);
+    showError(`目标路径：${path}\n\n${e.message}`, "切换仓库失败");
   } finally {
     btn.disabled = false;
   }
@@ -937,7 +1020,7 @@ async function browseRepo() {
     const err = $("repoErr");
     if (err) { err.textContent = e.message; err.hidden = false; }
     // Cancel is not an error worth interrupting the user for.
-    if (!/取消/.test(e.message)) toast("选择失败：" + e.message, true);
+    if (!/取消/.test(e.message)) showError(e.message, "选择仓库失败");
   } finally {
     btn.disabled = false;
     btn.textContent = old;
@@ -978,7 +1061,7 @@ async function handleFolderDrop(e) {
     }
   }
   if (!name) {
-    toast("请拖拽文件夹（不是文件）到窗口", true);
+    showError("请拖拽文件夹（不是文件）到窗口；也可以点「切换仓库」用系统选择器", "无法识别拖拽内容");
     return;
   }
   try {
@@ -988,7 +1071,7 @@ async function handleFolderDrop(e) {
     });
     showDropMatches(found.name, found.matches || []);
   } catch (err) {
-    toast("按名字定位失败：" + err.message, true);
+    showError(`文件夹名：${name}\n\n${err.message}`, "定位仓库失败");
   }
 }
 
