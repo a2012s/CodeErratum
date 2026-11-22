@@ -5,6 +5,7 @@ from .finding import (
     FindingCollection,
     Severity,
     Suggestion,
+    Verdict,
 )
 from .registry import Mode, ModelRegistry, ModelSpec, derive_family
 from .unit import Hunk, ReviewUnit
@@ -16,6 +17,7 @@ __all__ = [
     "FindingCollection",
     "Severity",
     "Suggestion",
+    "Verdict",
     "Hunk",
     "ReviewUnit",
     "Mode",

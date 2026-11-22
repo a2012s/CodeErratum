@@ -186,6 +186,26 @@ def prioritize(units: list[ReviewUnit]) -> list[ReviewUnit]:
 # notice says which one happened.
 AUTO_UNIT_BUDGET = 60
 
+# Docs, manifests and translation catalogs are not where review tokens pay off:
+# they have no executable semantics, and an LLM "finding" there is usually a
+# style opinion. Static checks (schema/lint/doc-drift) cover them better. The
+# skip is visible in the report notes and reversible with include_non_code=True.
+NON_CODE_SUFFIXES = {
+    ".md", ".mdx", ".rst", ".adoc", ".txt",
+    ".json", ".toml", ".yaml", ".yml", ".ini",
+}
+I18N_PATH_PARTS = ("/i18n/", "/locale", "/locales/", "/translations/", "/lang/")
+
+
+def is_non_code_unit(unit: ReviewUnit) -> bool:
+    """True for documentation, config manifests and translation catalogs."""
+    path = f"/{unit.primary_file.replace(chr(92), '/').lower()}"
+    if Path(path).suffix in NON_CODE_SUFFIXES:
+        return True
+    if any(part in path for part in I18N_PATH_PARTS):
+        return True
+    return unit.kind == "config"
+
 
 def available_models(repo_root: Path) -> list[dict]:
     """Configured models, for the UI picker. Ids only — never the api_key.
@@ -333,6 +353,8 @@ def execute_review(
     paths: str = "",
     should_stop: Callable[[], bool] | None = None,
     on_findings: Callable[[object, list, str], None] | None = None,
+    include_non_code: bool = False,
+    tiered: bool = True,
 ) -> ReviewOutcome:
     """Run the whole pipeline and persist artifacts + feedback rows.
 
@@ -352,6 +374,11 @@ def execute_review(
     run is over, so a caller can stream results as they land. Nothing downstream
     depends on it: the report is still built from the full collection, so a
     listener that returns early only affects what the caller chose to display.
+
+    ``include_non_code=False`` drops docs/config/i18n units before the budget is
+    applied. ``tiered=True`` (quick mode only) scans every unit with the lightest
+    configured model and re-reviews hit units with the strong one; it degrades to
+    a normal single-model quick run when no second model is configured.
     """
     emit = progress or (lambda _msg: None)
 
@@ -479,6 +506,11 @@ def execute_review(
             sources = {}
             announce(t("pipeline.snapshot_fallback", error=exc))
     units = split_diff(diff_text, repo_root, notices=notices, sources=sources)
+    if not include_non_code:
+        before = len(units)
+        units = [u for u in units if not is_non_code_unit(u)]
+        if before > len(units):
+            announce(t("pipeline.non_code_skipped", n=before - len(units)))
     (run_dir / "units.json").write_text(
         json.dumps([u.model_dump() for u in units], ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -533,6 +565,7 @@ def execute_review(
                 should_stop=should_stop,
                 pinned=models,
                 on_findings=on_findings,
+                tiered=tiered,
                 # Pinned at run start: the review outlives the request thread that
                 # seeded the language ContextVar, so it must travel as a value.
                 output_lang=get_lang(),

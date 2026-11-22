@@ -89,6 +89,16 @@ def review(
     path: str = typer.Option(
         "", "--path", help="Limit the diff to a git pathspec, e.g. src/api (no need to git add)"
     ),
+    include_non_code: bool = typer.Option(
+        False,
+        "--include-non-code",
+        help="Also review docs/config/i18n units (skipped by default)",
+    ),
+    no_tiered: bool = typer.Option(
+        False,
+        "--no-tiered",
+        help="Disable quick-mode tiered review (fast scan + strong-model verification)",
+    ),
 ) -> None:
     """Review a git diff and write an executable erratumReview.md work order."""
     repo_root = repo.resolve()
@@ -104,6 +114,8 @@ def review(
             progress=lambda msg: console.print(msg),
             house_rules=house_rules,
             paths=path,
+            include_non_code=include_non_code,
+            tiered=not no_tiered,
         )
     except NotARepository as exc:
         console.print(f"[red]Error: {exc}[/red]")

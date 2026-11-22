@@ -690,6 +690,8 @@ class WebApp:
             unknown = [mid for mid in models if mid not in known]
             if unknown:
                 raise PipelineError(t("server.unknown_models", ids=", ".join(unknown)))
+        include_non_code = payload.get("include_non_code", False) is True
+        tiered = payload.get("tiered", True) is not False
         house_rules = str(payload.get("house_rules") or "")
         if len(house_rules) > MAX_HOUSE_RULES_CHARS * 2:
             raise PipelineError(
@@ -715,6 +717,8 @@ class WebApp:
             "house_rules": house_rules,
             "paths": paths,
             "notices": notices,
+            "include_non_code": include_non_code,
+            "tiered": tiered,
         }
 
     def acquire_review_lock(self, params: dict | None = None) -> None:
@@ -823,6 +827,8 @@ class WebApp:
                 progress=both,
                 should_stop=self._stop_event.is_set,
                 on_findings=on_findings,
+                include_non_code=params.get("include_non_code", False),
+                tiered=params.get("tiered", True),
             )
         finally:
             if self._gate is not None:

@@ -157,3 +157,41 @@ class ModelRegistry(BaseModel):
     def heterogenous(a: ModelSpec, b: ModelSpec) -> bool:
         """Two specs are heterogeneous when they are distinct pinned snapshots."""
         return a.model_id != b.model_id
+
+    def route_quick_tier(
+        self,
+        pinned: list[str] | None = None,
+        author_model: str | None = None,
+    ) -> tuple[ModelSpec, ModelSpec | None]:
+        """Pick (fast scanner, strong verifier) for a tiered quick review.
+
+        A pinned model is the one the user trusts with the verdict, so it takes
+        the verifier seat; the scanner is the lightest *other* configured model.
+        With only one model available the verifier is None and the caller falls
+        back to an ordinary single-model quick run — never a second call to the
+        same model sold as independent confirmation.
+        """
+        pool = self.available(author_model)
+        if not pool:
+            raise ValueError("no eligible review model (all excluded as author?)")
+        by_id = {m.model_id: m for m in self.models}
+        unknown = [mid for mid in (pinned or []) if mid not in by_id]
+        if unknown:
+            raise ValueError(f"unknown model id(s): {', '.join(unknown)}")
+        trusted = [by_id[mid] for mid in dict.fromkeys(pinned or []) if by_id[mid] in pool]
+
+        def lateness(m: ModelSpec) -> tuple[int, float, str]:
+            # Model ids normally carry the speed class (flash/mini/lite/...).
+            # This is a routing hint, never a claim about benchmarked latency.
+            light = any(
+                word in m.model_id.lower()
+                for word in ("flash", "mini", "lite", "turbo", "nano", "haiku", "fast", "8b", "7b")
+            )
+            return (0 if light else 1, -m.score([]), m.model_id)
+
+        ranked_strong = sorted(pool, key=lambda m: (-m.score([]), m.model_id))
+        verifier = trusted[0] if trusted else ranked_strong[0]
+        others = [m for m in pool if m.model_id != verifier.model_id]
+        if not others:
+            return verifier, None
+        return sorted(others, key=lateness)[0], verifier

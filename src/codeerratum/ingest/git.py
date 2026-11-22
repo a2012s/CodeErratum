@@ -387,6 +387,88 @@ def _symbol_for_line(index: list[tuple[int, int, str, str]], line: int) -> tuple
     return "<module>", "module"
 
 
+# A single unit with 900 changed lines turns one model call into a 4–5 minute
+# tail and hides defects between unrelated functions. Above this threshold we
+# re-split by symbol (or by line window when no symbol boundary exists). The
+# excerpt cap in the executor keeps the *context* bounded, but it still gets one
+# prompt per oversized unit — splitting gives each region its own call.
+MAX_UNIT_CHANGED_LINES = 220
+
+# Top-level declaration detector for languages without an AST index here. Only
+# used for oversized units, so a false positive cannot change small-file reviews.
+_GENERIC_DECL = re.compile(
+    r"^\s*(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:async\s+)?"
+    r"(?:(?:public|private|protected|static|final|abstract|override|virtual|pub)\s+)*"
+    r"(function|class|interface|struct|enum|trait|impl|mod|namespace|type|func|def|fn)"
+    r"\s+([A-Za-z_$][\w$]*)"
+)
+
+
+def _build_generic_symbol_index(source: str) -> list[tuple[int, int, str, str]]:
+    """Best-effort (start, end, name, kind) index for non-Python sources.
+
+    A regex is deliberately not a parser: this only groups changed lines into
+    review units, it never claims to understand the language. Each declaration
+    runs until the next declaration (or EOF), which is enough to keep a 900-line
+    diff from being reviewed as one prompt. Small files never reach this path.
+    """
+    lines = source.splitlines()
+    hits: list[tuple[int, str, str]] = []
+    for lineno, line in enumerate(lines, 1):
+        m = _GENERIC_DECL.match(line)
+        if not m:
+            continue
+        keyword, name = m.group(1), m.group(2)
+        class_words = ("class", "struct", "interface", "enum", "trait", "impl")
+        kind = "class" if keyword in class_words else "function"
+        hits.append((lineno, name, kind))
+    index: list[tuple[int, int, str, str]] = []
+    for i, (start, name, kind) in enumerate(hits):
+        end = hits[i + 1][0] - 1 if i + 1 < len(hits) else len(lines)
+        if end >= start:
+            index.append((start, end, name, kind))
+    return index
+
+
+def _split_group_by_lines(
+    file: str, symbol: str, kind: str, hunks: list[Hunk], changed: list[int], lang: str
+) -> list[ReviewUnit]:
+    """Last-resort split when one symbol still exceeds the line budget."""
+    parts = [
+        changed[i : i + MAX_UNIT_CHANGED_LINES]
+        for i in range(0, len(changed), MAX_UNIT_CHANGED_LINES)
+    ]
+    if len(parts) < 2:
+        return [
+            ReviewUnit(
+                unit_id=ReviewUnit.make_id(file, symbol, hunks),
+                primary_file=file,
+                symbol=symbol,
+                kind=kind,  # type: ignore[arg-type]
+                language=lang,
+                hunks=hunks,
+                changed_lines=len(changed),
+                is_public=not symbol.startswith("_") and symbol != "<module>",
+            )
+        ]
+    out: list[ReviewUnit] = []
+    for part in parts:
+        part_symbol = f"{symbol}:L{part[0]}-{part[-1]}"
+        out.append(
+            ReviewUnit(
+                unit_id=ReviewUnit.make_id(file, part_symbol, hunks),
+                primary_file=file,
+                symbol=part_symbol,
+                kind=kind,  # type: ignore[arg-type]
+                language=lang,
+                hunks=hunks,
+                changed_lines=len(part),
+                is_public=not symbol.startswith("_") and symbol != "<module>",
+            )
+        )
+    return out
+
+
 def _changed_lines(hunk: Hunk):
     """Yield (new_line_no, text) for every added/modified line in a hunk.
 
@@ -598,18 +680,23 @@ def split_diff(
         index = _build_symbol_index(source) if lang == "python" and source else []
 
         by_symbol: dict[tuple[str, str], _SymbolGroup] = {}
+        group_lines: dict[tuple[str, str], list[int]] = {}
         for hunk in hunks:
             changed_lines = list(_changed_lines(hunk))
             if not changed_lines:
                 symbol, kind = _symbol_for_line(index, hunk.new_start)
                 by_symbol.setdefault((symbol, kind), _SymbolGroup()).add_hunk(hunk)
+                group_lines.setdefault((symbol, kind), [])
                 continue
             for new_line, _text in changed_lines:
                 symbol, kind = _symbol_for_line(index, new_line)
-                group = by_symbol.setdefault((symbol, kind), _SymbolGroup())
+                key = (symbol, kind)
+                group = by_symbol.setdefault(key, _SymbolGroup())
                 group.add_hunk(hunk)
                 group.changed += 1
+                group_lines.setdefault(key, []).append(new_line)
 
+        generic_index: list[tuple[int, int, str, str]] | None = None
         for (symbol, kind), group in by_symbol.items():
             content = "\n".join(h.content for h in group.hunks)
             is_config = kind == "module" and file.endswith(
@@ -618,6 +705,51 @@ def split_diff(
             if is_config:
                 kind = "config"
                 symbol = "<config>"
+
+            if group.changed > MAX_UNIT_CHANGED_LINES and not is_config:
+                # Python already has an AST index; other languages get a
+                # best-effort one, built only for this oversized group.
+                if lang != "python" and generic_index is None and source:
+                    generic_index = _build_generic_symbol_index(source)
+                use_index = index if lang == "python" else (generic_index or [])
+                lines = group_lines.get((symbol, kind), [])
+                if lines and use_index:
+                    sub: dict[tuple[str, str], list[int]] = {}
+                    for line in lines:
+                        sub_symbol, sub_kind = _symbol_for_line(use_index, line)
+                        sub.setdefault((sub_symbol, sub_kind), []).append(line)
+                    if len(sub) > 1:
+                        for (sub_symbol, sub_kind), sub_lines in sub.items():
+                            if len(sub_lines) > MAX_UNIT_CHANGED_LINES:
+                                units.extend(
+                                    _split_group_by_lines(
+                                        file, sub_symbol, sub_kind, group.hunks, sub_lines, lang
+                                    )
+                                )
+                            else:
+                                units.append(
+                                    ReviewUnit(
+                                        unit_id=ReviewUnit.make_id(file, sub_symbol, group.hunks),
+                                        primary_file=file,
+                                        symbol=sub_symbol,
+                                        kind=sub_kind,  # type: ignore[arg-type]
+                                        language=lang,
+                                        hunks=group.hunks,
+                                        changed_lines=len(sub_lines),
+                                        is_public=not sub_symbol.startswith("_")
+                                        and sub_symbol != "<module>",
+                                        risk_tags=_risk_tags(content),
+                                    )
+                                )
+                        continue
+                # No usable symbol boundary: split the window instead.
+                units.extend(
+                    _split_group_by_lines(
+                        file, symbol, kind, group.hunks, group_lines.get((symbol, kind), []), lang
+                    )
+                )
+                continue
+
             units.append(
                 ReviewUnit(
                     unit_id=ReviewUnit.make_id(file, symbol, group.hunks),

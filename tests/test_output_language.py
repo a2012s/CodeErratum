@@ -104,7 +104,8 @@ def _finding() -> Finding:
 def test_falsify_prompt_carries_the_directive():
     messages = build_falsify_messages(_finding(), "ctx", "facts", output_lang="zh")
     assert "Simplified Chinese" in messages[0]["content"]
-    assert "Simplified Chinese" not in build_falsify_messages(_finding(), "ctx", "facts")[0]["content"]
+    plain = build_falsify_messages(_finding(), "ctx", "facts")[0]["content"]
+    assert "Simplified Chinese" not in plain
 
 
 def _init_repo(path: Path) -> Path:

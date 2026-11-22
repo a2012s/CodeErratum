@@ -20,9 +20,9 @@ import httpx
 from ..context import build_context
 from ..evidence import collect_static, known_facts_block
 from ..i18n import t
-from ..models import Finding, FindingCollection, ModelRegistry, ModelSpec, ReviewUnit
+from ..models import Finding, FindingCollection, ModelRegistry, ModelSpec, ReviewUnit, Verdict
 from ..providers import OpenAICompatProvider, Provider
-from .aggregator import cluster_findings, rank_findings
+from .aggregator import agreement, cluster_findings, rank_findings, same_issue
 from .executor import review_unit
 from .falsification import falsify_finding, should_falsify
 
@@ -226,6 +226,35 @@ async def _review_with(
     return per_unit, rejected, calls, diags_all
 
 
+def _merge_verification(
+    merged: list[Finding], verified: list[Finding], scanner_id: str, verifier_id: str
+) -> tuple[list[Finding], int]:
+    """Fold a strong model's re-review of hit units back into scanner findings.
+
+    A finding both models reported gains a second ``assert`` verdict (and the
+    ``unanimous`` label); a new finding only the verifier found is appended as
+    ``unique``. Verdict roles — not a vote count — drive agreement, so a
+    ``confirm`` here would be wrong: the verifier did review the code itself.
+    """
+    extra: list[Finding] = []
+    for vf in verified:
+        match = next((f for f in merged if same_issue(vf, f)), None)
+        if match is not None:
+            for mid in (scanner_id, verifier_id):
+                if not any(v.model_id == mid and v.role == "assert" for v in match.verdicts):
+                    match.verdicts.append(Verdict(model_id=mid, role="assert", reason=match.claim))
+            if verifier_id not in match.source_models:
+                match.source_models.append(verifier_id)
+            match.agreement = agreement(match.verdicts)
+            continue
+        vf.verdicts.append(Verdict(model_id=verifier_id, role="assert", reason=vf.claim))
+        vf.source_models = [verifier_id]
+        vf.agreement = "unique"
+        extra.append(vf)
+    merged.extend(extra)
+    return merged, len(extra)
+
+
 def _flatten(per_unit: dict[str, list[Finding]], model_id: str) -> list[Finding]:
     out: list[Finding] = []
     for findings in per_unit.values():
@@ -251,6 +280,7 @@ async def run_review(
     pinned: list[str] | None = None,
     on_findings: Callable[[ReviewUnit, list[Finding], str], None] | None = None,
     output_lang: str = "",
+    tiered: bool = False,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
@@ -280,7 +310,26 @@ async def run_review(
 
     watcher = asyncio.create_task(watch_stop())
     try:
-        reviewers, falsifier_spec = registry.route(mode, author_model=author_model, pinned=pinned)  # type: ignore[arg-type]
+        scanner_spec: ModelSpec | None = None
+        verifier_spec: ModelSpec | None = None
+        if mode == "quick" and tiered:
+            scanner_spec, verifier_spec = registry.route_quick_tier(
+                pinned=pinned, author_model=author_model
+            )
+            reviewers = [scanner_spec]
+            falsifier_spec = None
+            if verifier_spec is not None:
+                say(
+                    t(
+                        "orch.tier_start",
+                        scanner=scanner_spec.model_id,
+                        verifier=verifier_spec.model_id,
+                    )
+                )
+        else:
+            reviewers, falsifier_spec = registry.route(
+                mode, author_model=author_model, pinned=pinned  # type: ignore[arg-type]
+            )
         say(t("orch.start", models=len(reviewers), units=len(units)))
 
         providers = {m.model_id: _make_provider(m) for m in reviewers}
@@ -321,19 +370,108 @@ async def run_review(
             all_diags.extend(diags)
 
         if mode == "quick":
-            merged = _flatten(per_model_reviews[reviewers[0].model_id], reviewers[0].model_id)
+            scanner_id = reviewers[0].model_id
+            merged = _flatten(per_model_reviews[scanner_id], scanner_id)
             for f in merged:
                 f.agreement = "unverified" if not f.verdicts else "unique"
+
+            comparison: dict = {}
+            if verifier_spec is not None and merged:
+                # Re-review only the units that actually produced a finding. A
+                # clean sweep costs no second call; a hit costs one call per unit
+                # instead of one per finding, which is the whole time saving.
+                hit_units = {f.unit_id for f in merged}
+                verify_units = [u for u in units if u.unit_id in hit_units]
+                if verify_units:
+                    say(
+                        t(
+                            "orch.verify_round",
+                            n=len(verify_units),
+                            verifier=verifier_spec.model_id,
+                        )
+                    )
+                    verify_provider = _make_provider(verifier_spec)
+                    verify_gate = asyncio.Semaphore(unit_concurrency())
+
+                    async def verify_one(unit: ReviewUnit):
+                        if should_stop and should_stop():
+                            raise ReviewCancelled(t("server.stopped_by_user"))
+                        async with verify_gate:
+                            task = asyncio.create_task(
+                                review_unit(
+                                    verify_provider,
+                                    verifier_spec.model_id,  # type: ignore[union-attr]
+                                    unit,
+                                    repo_root,
+                                    run_id,
+                                    house_rules,
+                                    sources,
+                                    output_lang,
+                                )
+                            )
+                            active.add(task)
+                            return await task
+
+                    vresults = await asyncio.gather(
+                        *(verify_one(u) for u in verify_units), return_exceptions=True
+                    )
+                    verified: list[Finding] = []
+                    for unit, res in zip(verify_units, vresults, strict=True):
+                        if isinstance(res, BaseException):
+                            if isinstance(res, asyncio.CancelledError):
+                                raise ReviewCancelled(t("server.stopped_by_user")) from res
+                            all_calls.append(
+                                {
+                                    "model": verifier_spec.model_id,
+                                    "role": "verify",
+                                    "unit_id": unit.unit_id,
+                                    "verdict": "error",
+                                    "error": str(res),
+                                }
+                            )
+                            say(
+                                t(
+                                    "orch.verify_failed",
+                                    model=verifier_spec.model_id,
+                                    file=unit.primary_file,
+                                )
+                            )
+                            continue
+                        vf, rej, completion, diags = res
+                        all_rejected.extend(rej)
+                        all_diags.extend(diags)
+                        all_calls.append(
+                            {
+                                "model": verifier_spec.model_id,
+                                "family": verify_provider.family,
+                                "unit_id": unit.unit_id,
+                                "role": "verify",
+                                "latency_ms": completion.latency_ms,
+                                "usage": completion.usage.model_dump(),
+                            }
+                        )
+                        verified.extend(vf)
+                    merged, extra = _merge_verification(
+                        merged, verified, scanner_id, verifier_spec.model_id
+                    )
+                    comparison = {
+                        "mode": "tiered",
+                        "scanner": scanner_id,
+                        "verifier": verifier_spec.model_id,
+                        "verified_units": len(verify_units),
+                        "verify_only_findings": extra,
+                    }
             merged = rank_findings(merged, rejected_category_counts)
             return (
                 FindingCollection(
                     run_id=run_id,
                     repo=str(repo_root),
                     commit="",
-                    model_id=reviewers[0].model_id,
+                    model_id=scanner_id,
                     spec_level="L1",
                     mode="quick",
-                    reviewer_models=[reviewers[0].model_id],
+                    reviewer_models=[scanner_id],
+                    comparison=comparison,
                     findings=merged,
                     rejected=all_rejected,
                 ),

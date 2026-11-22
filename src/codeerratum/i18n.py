@@ -213,6 +213,18 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "所有模型评审完成，开始聚类合并",
         "All model reviews finished; clustering and merging",
     ),
+    "orch.tier_start": (
+        "分层审查：{scanner} 全量扫描，{verifier} 复核命中单元",
+        "Tiered review: {scanner} scans everything, {verifier} re-reviews hit units",
+    ),
+    "orch.verify_round": (
+        "复核轮：{verifier} 重审 {n} 个命中单元",
+        "Verification round: {verifier} re-reviews {n} hit units",
+    ),
+    "orch.verify_failed": (
+        "复核 {model} 失败：{file}",
+        "Verification by {model} failed: {file}",
+    ),
     "orch.falsify_round": (
         "证伪轮：{n} 条高价值发现交叉验证",
         "Falsification round: cross-checking {n} high-value findings",
@@ -321,6 +333,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "pipeline.units_capped": (
         "仅审查 {kept}/{total} 个单元（--max-units 可调整）",
         "Reviewing {kept} of {total} units (raise it with --max-units)",
+    ),
+    "pipeline.non_code_skipped": (
+        "已跳过 {n} 个非代码单元（文档/配置/i18n）；如需审查请开启 include_non_code",
+        "Skipped {n} non-code units (docs/config/i18n); enable include_non_code to review them",
     ),
     "pipeline.report_writing": ("生成报告并写入存储", "Writing the report and storing findings"),
     "pipeline.stopped": ("审查已被停止", "Review stopped"),

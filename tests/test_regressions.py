@@ -590,6 +590,7 @@ def test_pipeline_reads_the_diff_revisions_blobs(tmp_path, monkeypatch):
         pinned=None,
         on_findings=None,
         output_lang="",
+        tiered=False,
     ):
         captured["sources"] = sources
         return (
@@ -650,6 +651,7 @@ def test_rejected_history_reaches_the_ranker(tmp_path, monkeypatch):
         pinned=None,
         on_findings=None,
         output_lang="",
+        tiered=False,
     ):
         captured["counts"] = rejected_category_counts
         return (
