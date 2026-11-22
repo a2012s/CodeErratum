@@ -547,3 +547,29 @@ def test_pick_and_find_require_same_origin(client):
     for path in ("/api/pick-repo", "/api/find-repo"):
         resp = client.post(path, json={}, headers={"Origin": "http://evil.example"})
         assert resp.status_code == 403
+
+
+def test_model_check_route_ok(client, monkeypatch):
+    """The browser's probe call returns a green-tick payload over HTTP."""
+    import codeerratum.web.server as web_server
+
+    monkeypatch.setattr(
+        web_server,
+        "probe_model",
+        lambda **kw: {"ok": True, "status": 200, "latency_ms": 12, "detail": "可用 · 12ms"},
+    )
+    resp = client.post(
+        "/api/model/check",
+        json={"model_id": "m", "base_url": "https://x.test", "api_key": ""},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_model_check_requires_same_origin(client):
+    resp = client.post(
+        "/api/model/check",
+        json={"model_id": "m", "base_url": "https://x.test"},
+        headers={"Origin": "http://evil.example"},
+    )
+    assert resp.status_code == 403

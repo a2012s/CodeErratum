@@ -26,9 +26,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from ..config_store import KEEP_SECRET
+from ..config_store import load as load_config
 from ..config_store import public as public_config
 from ..config_store import save as save_config_file
 from ..ingest import DiffError, normalize_pathspec
+from ..model_check import probe_model
 from ..models import ModelRegistry
 from ..pipeline import (
     HOUSE_RULES_FILE,
@@ -229,6 +232,31 @@ class WebApp:
 
     def save_config(self, payload: dict) -> dict:
         return save_config_file(self.repo_root, payload)
+
+    def check_model(self, payload: dict) -> dict:
+        """Probe a single model row, resolving ``__KEEP__`` against saved config.
+
+        The row may be edited but not yet saved, so its typed key is what gets
+        tested. ``__KEEP__`` means "keep the stored key" — resolve it first, or
+        the probe would test with no key and report a false red cross.
+        """
+        api_key = str(payload.get("api_key") or "").strip()
+        if api_key == KEEP_SECRET:
+            api_key = ""
+            try:
+                saved = load_config(self.repo_root)
+            except (OSError, ValueError):
+                saved = None
+            if saved:
+                model_id = str(payload.get("model_id") or "").strip()
+                api_key = next(
+                    (m.api_key for m in saved.registry.models if m.model_id == model_id), ""
+                )
+        return probe_model(
+            model_id=str(payload.get("model_id") or ""),
+            base_url=str(payload.get("base_url") or ""),
+            api_key=api_key,
+        )
 
     def house_rules_info(self) -> dict:
         """Report the auto-discovered rules file so an empty textarea is not ambiguous."""
@@ -540,6 +568,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, app.switch_repo(str(body.get("path") or "")))
                 elif path == "/api/pick-repo":
                     self._json(HTTPStatus.OK, app.pick_repo())
+                elif path == "/api/model/check":
+                    self._json(HTTPStatus.OK, app.check_model(body))
                 elif path == "/api/find-repo":
                     hints = body.get("hints") or []
                     if not isinstance(hints, list):

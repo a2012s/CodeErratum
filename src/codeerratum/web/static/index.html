@@ -239,14 +239,18 @@
   #dropMatches .recent-repo { overflow-wrap: anywhere; }
   table.cfg { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 8px; }
   table.cfg th { font-size: 11.5px; font-weight: 500; color: var(--muted); text-align: left; }
-  table.cfg th:nth-child(1) { width: 25%; }
-  table.cfg th:nth-child(2) { width: 34%; }
-  table.cfg th:nth-child(3) { width: 14%; }
-  table.cfg th:nth-child(4) { width: 21%; }
-  table.cfg th:nth-child(5) { width: 6%; }
+  table.cfg th:nth-child(1) { width: 22%; }
+  table.cfg th:nth-child(2) { width: 30%; }
+  table.cfg th:nth-child(3) { width: 11%; }
+  table.cfg th:nth-child(4) { width: 17%; }
+  table.cfg th:nth-child(5) { width: 14%; }
+  table.cfg th:nth-child(6) { width: 6%; }
   table.cfg td { padding: 3px 2px; vertical-align: middle; }
   table.cfg input { width: 100%; min-width: 0; padding: 5px 6px; font-size: 11.5px; }
   table.cfg button { padding: 4px 7px; }
+  .cfg-test { min-width: 62px; font-size: 11.5px; white-space: nowrap; }
+  .cfg-test.ok { color: var(--ok); border-color: var(--ok); }
+  .cfg-test.bad { color: var(--bad); border-color: var(--bad); }
   .stat-row { display: flex; justify-content: space-between; padding: 5px 0;
     border-bottom: 1px solid var(--border); font-size: 13px; }
   table.mini { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
@@ -735,9 +739,50 @@ function cfgRow(m = {}) {
     <td><input class="cfg-url" value="${esc(m.base_url || "")}" placeholder="https://api.example.com/v1" spellcheck="false"></td>
     <td><input class="cfg-fam" value="${esc(m.family || "")}" placeholder="自动推断"></td>
     <td><input class="cfg-key" type="password" value="" placeholder="${esc(m.api_key_hint || "无")}" autocomplete="new-password"></td>
+    <td><button class="ghost cfg-test" title="检测该模型是否可用（发一个最小请求，不写入配置）">检测</button></td>
     <td><button class="ghost cfg-del" title="删除这一行">×</button></td>`;
   tr.querySelector(".cfg-del").onclick = () => tr.remove();
+  tr.querySelector(".cfg-test").onclick = () => checkCfgRow(tr);
+  // Editing any field invalidates the previous probe result.
+  tr.querySelectorAll("input").forEach((input) => {
+    input.addEventListener("input", () => {
+      const b = tr.querySelector(".cfg-test");
+      b.textContent = "检测";
+      b.className = "ghost cfg-test";
+      b.title = "检测该模型是否可用（发一个最小请求，不写入配置）";
+    });
+  });
   return tr;
+}
+
+function cfgRowBody(tr) {
+  const entered = tr.querySelector(".cfg-key").value.trim();
+  return {
+    model_id: tr.querySelector(".cfg-mid").value.trim(),
+    base_url: tr.querySelector(".cfg-url").value.trim(),
+    api_key: entered || (tr.dataset.key === "1" ? "__KEEP__" : ""),
+  };
+}
+
+async function checkCfgRow(tr) {
+  const btn = tr.querySelector(".cfg-test");
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.innerHTML = `<span class="spinner"></span> 检测中`;
+  try {
+    const r = await api("/api/model/check", {
+      method: "POST", body: JSON.stringify(cfgRowBody(tr)),
+    });
+    btn.textContent = r.ok ? "✓ 可用" : "✗ 不可用";
+    btn.className = "ghost cfg-test " + (r.ok ? "ok" : "bad");
+    btn.title = r.detail + (r.status ? `（HTTP ${r.status}）` : "") + (r.ok ? ` · ${r.latency_ms}ms` : "");
+  } catch (e) {
+    btn.textContent = "✗ 检测失败";
+    btn.className = "ghost cfg-test bad";
+    btn.title = e.message;
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function renderConfig(info) {
@@ -756,12 +801,14 @@ function renderConfig(info) {
   </div>`);
   parts.push(`<div class="hint" style="margin:0 0 6px">
     dual 要求至少两家不同 family，证伪者取第三家。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。
+    点「检测」发一个最小请求验证端点（不写入配置）：绿勾可用，红叉不可用；改动字段后结果自动失效。
   </div>`);
   parts.push(`<table class="cfg"><thead><tr>
-    <th>model_id</th><th>base_url</th><th>family</th><th>api_key</th><th></th>
+    <th>model_id</th><th>base_url</th><th>family</th><th>api_key</th><th>检测</th><th></th>
   </tr></thead><tbody id="cfgRows"></tbody></table>`);
   parts.push(`<div class="actions" style="margin-top:12px">
     <button class="ghost" id="cfgAdd">+ 添加模型</button>
+    <button class="ghost" id="cfgTestAll">检测全部</button>
     <span class="spacer"></span>
     <button class="primary" id="cfgSave">保存配置</button>
   </div>`);
@@ -770,6 +817,10 @@ function renderConfig(info) {
   (info.models || []).forEach((m) => tbody.appendChild(cfgRow(m)));
   if (!tbody.children.length) tbody.appendChild(cfgRow());
   $("cfgAdd").onclick = () => tbody.appendChild(cfgRow());
+  $("cfgTestAll").onclick = async () => {
+    const rows = [...tbody.querySelectorAll("tr")];
+    for (const tr of rows) await checkCfgRow(tr);  // sequential: shared local server
+  };
   $("cfgSave").onclick = saveConfig;
 }
 

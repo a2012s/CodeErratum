@@ -157,6 +157,8 @@ The header's **Switch repo** button points the running UI at any local git repos
 
 The header's **Config** button shows the active mode and model endpoints and lets you edit them. Saving writes `.codeerratum/config.json` (mode 0600), which takes precedence over environment variables and survives a restart — the CLI reads the same file. API keys are never echoed to the browser; leave the key field blank to keep the stored value.
 
+Each model row has a **Check** button (plus **Check all**): it sends one minimal chat request (`max_tokens=1`, no retry, 10s timeout) to verify the endpoint is reachable, the key is accepted, and the model id resolves. A green tick shows the latency; a red cross explains why (401/403 auth, 404 endpoint/id, 429 rate limit, timeout). Editing any field clears the previous result. Checks are read-only, never echo the key, and require the same same-origin guard.
+
 ### Posting to a pull request
 
 ```bash
