@@ -203,9 +203,12 @@ def test_review_diff_without_changes_returns_a_message(repo, monkeypatch):
     # Commit the pending edit so `git diff HEAD` is genuinely empty.
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "wip"], cwd=repo, check=True)
+    # An explicit range, not bare HEAD: a clean tree with history now falls
+    # back to reviewing the whole worktree (see test_snapshot.py), so only a
+    # range that truly holds no commits can still be empty.
     result = call(
         "tools/call",
-        {"name": "review_diff", "arguments": {"repo": str(repo), "diff": "HEAD"}},
+        {"name": "review_diff", "arguments": {"repo": str(repo), "diff": "HEAD..HEAD"}},
     )
     payload = result["result"]
     assert payload["isError"] is False

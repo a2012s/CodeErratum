@@ -51,6 +51,11 @@
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
       "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    /* One column: header on top, the grid takes whatever is left. The height
+       must not come from a constant: the header measures 51px in Chinese but
+       57px in English (taller labels, the version pill), and `100vh - 51px`
+       then overflows by the difference and grows a scrollbar. */
+    display: flex; flex-direction: column;
   }
   code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 
@@ -58,6 +63,7 @@
     display: flex; align-items: center; gap: 12px;
     padding: 10px 18px; background: var(--panel);
     border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 10;
+    flex: none;
   }
   .brand { font-weight: 650; letter-spacing: .2px; display: flex; align-items: center; gap: 8px; }
   .brand .mark {
@@ -66,6 +72,9 @@
   }
   .ver { font-size: 11px; color: var(--muted); border: 1px solid var(--border);
     border-radius: 999px; padding: 1px 7px; font-weight: 500; }
+  /* It is a button, not a badge: clicking it opens About. */
+  button.ver { background: transparent; cursor: pointer; line-height: 1.5; }
+  button.ver:hover { color: var(--accent); border-color: var(--accent); }
   .repo { color: var(--muted); font-size: 12.5px; }
   .spacer { flex: 1; }
 
@@ -81,6 +90,9 @@
   }
   button.ghost { background: transparent; }
   #langSel { padding: 5px 7px; font-size: 12.5px; background: transparent; }
+  /* In hub mode the shell already has the one language switch, two rows above
+     this header. A second identical control 40px apart is not a feature. */
+  html.embedded #langSel { display: none; }
   button.ghost.active {
     background: var(--accent-weak); border-color: var(--accent); color: var(--accent);
   }
@@ -88,10 +100,15 @@
   .layout {
     display: grid;
     grid-template-columns: var(--sidebar-w, 292px) 7px minmax(0, 1fr);
-    height: calc(100vh - 51px);
+    /* minmax(0, 1fr) rather than an implicit auto row: a sidebar taller than the
+       viewport must scroll inside its own cell, not stretch the row and take the
+       content pane past the bottom of the window. */
+    grid-template-rows: minmax(0, 1fr);
+    flex: 1;
+    min-height: 0;
   }
   aside.sidebar {
-    background: var(--panel);
+    background: var(--panel); min-height: 0;
     padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
   }
   /* Draggable splitter between sidebar and content. */
@@ -105,7 +122,13 @@
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: 12px; color: var(--muted); }
   .field input[type=number] { width: 100%; }
-  .row2 { display: grid; grid-template-columns: 1fr 84px; gap: 8px; align-items: end; }
+  /* minmax(0, 1fr): with a bare `1fr` the first column floors at the select's
+     min-content width, and the English option text ("committee · three models")
+     pushes the whole row 23px past the 292px sidebar. */
+  .row2 {
+    display: grid; grid-template-columns: minmax(0, 1fr) 84px;
+    gap: 8px; align-items: end;
+  }
   .check { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); }
   .check input { width: auto; }
   .rules { border: 1px solid var(--border); border-radius: 8px; padding: 0 10px;
@@ -121,8 +144,17 @@
     line-height: 1.55;
   }
   .rules textarea:focus { outline: none; border-color: var(--accent); }
-  .hint { font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 6px; }
+  /* anywhere, so the 40-char empty-tree hash can wrap inside its chip instead of
+     overflowing the 292px sidebar. */
+  .hint {
+    font-size: 11.5px; color: var(--muted); line-height: 1.55; margin-top: 6px;
+    overflow-wrap: anywhere;
+  }
   .hint.warn { color: var(--warn); font-weight: 600; }
+  /* Two one-click range presets: the empty tree is impossible to remember, and
+     "no commits yet" used to end at "No changes in diff. Nothing to review." */
+  .chips { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+  .chips button { font-size: 11.5px; padding: 3px 10px; border-radius: 999px; }
   .hint code {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
     background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px;
@@ -187,6 +219,10 @@
   }
   .card.done-accepted { border-left: 3px solid var(--ok); }
   .card.done-rejected { border-left: 3px solid var(--bad); opacity: .72; }
+  /* A live card is the same shape as a report card minus the actions: it is a
+     claim that has not been clustered or falsified yet. */
+  .card.live { border-left: 3px solid var(--accent); }
+  .card.live .claim { font-size: 14px; }
   .card-head { display: flex; gap: 9px; align-items: flex-start; padding: 12px 14px 8px; }
   .sev {
     font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px;
@@ -223,7 +259,7 @@
   .small { font-size: 11.5px; color: var(--muted); }
 
   .drawer {
-    position: fixed; right: 0; top: 51px; bottom: 0; width: 340px; z-index: 20;
+    position: fixed; right: 0; top: var(--header-h, 51px); bottom: 0; width: 340px; z-index: 20;
     background: var(--panel); border-left: 1px solid var(--border); padding: 16px;
     overflow-y: auto; box-shadow: -8px 0 24px rgba(0,0,0,.08);
   }
@@ -307,8 +343,33 @@
     color: var(--text); background: var(--panel-2); border: 1px solid var(--border);
     border-radius: 8px; white-space: pre; overflow: auto; user-select: text;
   }
+  .cfg-default {
+    display: flex; align-items: flex-start; gap: 7px; margin-top: 12px;
+    font-size: 12.5px; color: var(--muted); line-height: 1.5;
+  }
+  .cfg-default input { margin-top: 2px; accent-color: var(--accent); }
+  .cfg-default code { font-size: 11.5px; }
   .errFoot {
     display: flex; justify-content: flex-end; gap: 8px; padding: 0 18px 16px;
+  }
+  /* About reuses the dialog shell; only the body differs. */
+  #aboutOverlay {
+    position: fixed; inset: 0; z-index: 61; padding: 20px;
+    background: rgba(0, 0, 0, .48); display: flex; align-items: center; justify-content: center;
+  }
+  #aboutOverlay[hidden] { display: none; }
+  .aboutBox { width: min(440px, 100%); }
+  .aboutBox .errHead { color: var(--text); display: flex; align-items: center; gap: 9px; }
+  .aboutBox .errHead .mark {
+    width: 24px; height: 24px; border-radius: 6px; background: var(--accent);
+    color: #fff; display: grid; place-items: center; font-size: 13px; font-weight: 700;
+  }
+  .aboutBody { padding: 14px 18px 16px; display: flex; flex-direction: column; gap: 10px; }
+  .aboutBody p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--muted); }
+  .aboutUrl {
+    font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    color: var(--accent); background: var(--panel-2); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 11px; user-select: all; overflow-wrap: anywhere;
   }
   .spinner {
     width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent;
@@ -349,16 +410,25 @@
   #progressLog .ln.done, #progressLog .ln.ok { color: var(--ok); }
   #progressLog .ln.err { color: var(--bad); font-weight: 600; }
   @media (max-width: 860px) {
-    .layout { grid-template-columns: 1fr; height: auto; }
+    /* Stacked panes: nothing is a viewport-height box any more, the document
+       itself scrolls. */
+    body { height: auto; min-height: 100%; }
+    .layout { grid-template-columns: 1fr; grid-template-rows: auto; flex: none; }
     .splitter { display: none; }
     aside.sidebar { border-bottom: 1px solid var(--border); }
     #progressBox { position: static; }
   }
 </style>
+<script>
+  // Runs before <body> exists so the switch never flashes in and out: when the
+  // hub shell hosts this page in a tab, that shell owns the language control
+  // and posts ce:lang here on every change.
+  if (window.self !== window.top) document.documentElement.classList.add("embedded");
+</script>
 </head>
 <body>
 <header class="top">
-  <div class="brand"><span class="mark">E</span> CodeErratum <span class="ver">UI</span></div>
+  <div class="brand"><span class="mark">E</span> CodeErratum <button class="ver" id="aboutBtn" type="button" title="关于 CodeErratum" data-en-title="About CodeErratum">UI</button></div>
   <div class="repo" id="repoLabel">…</div>
   <div class="spacer"></div>
   <select id="langSel" aria-label="界面语言 / Interface language">
@@ -376,9 +446,15 @@
     <div class="field">
       <label for="diff" data-en="git diff range">git diff 范围</label>
       <input id="diff" value="HEAD" spellcheck="false">
-      <div class="hint" data-en="<code>HEAD</code> = local uncommitted changes (staged included); <code>HEAD~1</code> = the previous commit; <code>HEAD~3..HEAD</code> = the last three commits. New files must be <code>git add</code>-ed (no commit needed) to enter the diff."><code>HEAD</code> = 本地未提交改动（含已暂存）；
+      <div class="chips">
+        <button type="button" id="diffHead" data-en="Uncommitted">未提交改动</button>
+        <button type="button" id="diffAll" data-en="Whole tree">全部代码</button>
+      </div>
+      <div class="hint" data-en="<code>HEAD</code> = local uncommitted changes (staged included); <code>HEAD~1</code> = the previous commit; <code>HEAD~3..HEAD</code> = the last three commits. New files must be <code>git add</code>-ed (no commit needed) to enter the diff. <b>No commits yet?</b> Pick <b>Whole tree</b> to review every file in the folder — no <code>git init</code>, no <code>git add</code>, and <code>.gitignore</code> is still respected. It also works for a folder that is not a repository at all."><code>HEAD</code> = 本地未提交改动（含已暂存）；
         <code>HEAD~1</code> = 上一个提交；<code>HEAD~3..HEAD</code> = 最近三个提交。
-        新文件需先 <code>git add</code>（不必 commit）才会进入 diff。</div>
+        新文件需先 <code>git add</code>（不必 commit）才会进入 diff。
+        <b>还没有任何提交？</b>选「全部代码」直接审整个目录：不用 <code>git init</code>、不用 <code>git add</code>，
+        仍然遵循 <code>.gitignore</code>；完全不是 git 仓库的目录也可以。</div>
     </div>
     <div class="field">
       <label for="paths" data-en="Path filter (optional, e.g. src/api)">路径过滤（可选，如 src/api）</label>
@@ -395,11 +471,24 @@
         </select>
       </div>
       <div class="field">
-        <label for="maxUnits" data-en="Limit">上限</label>
-        <input id="maxUnits" type="number" value="10" min="1" max="50">
+        <label for="unitBudget" data-en="Unit budget">单元数</label>
+        <select id="unitBudget">
+          <option value="auto" data-en="auto · smart">自动</option>
+          <option value="all" data-en="all units">全部</option>
+          <option value="custom" data-en="custom">自定义</option>
+        </select>
       </div>
     </div>
-    <div class="hint" id="maxUnitsHint">审查单元数，1–50；超出会按上限执行并提示。</div>
+    <div class="field" id="customUnitsField" hidden>
+      <label for="maxUnits" data-en="Units (custom)">单元数（自定义）</label>
+      <input id="maxUnits" type="number" value="60" min="1" max="500">
+    </div>
+    <div class="hint" id="maxUnitsHint">自动：按风险排序，小改动全审，大改动最多 60 个单元。</div>
+    <div class="field">
+      <label data-en="Review models">审查模型</label>
+      <div class="chips" id="modelPicker"></div>
+      <div class="hint" id="modelHint">读取模型配置中…</div>
+    </div>
     <label class="check"><input type="checkbox" id="writeMd" checked> <span data-en="Also write erratumReview.md to the repo root">同时写 erratumReview.md 到仓库根</span></label>
     <div class="field">
       <label for="authorModel" data-en="Author model (optional, kept out of the reviewer seats)">作者模型（可选，排除出审查席位）</label>
@@ -433,6 +522,14 @@
       左侧填 diff 范围，点「运行审查」。<br>
       已有运行记录时，从这里选一条打开：三区分流、逐条采纳/驳回。<br>
       <span class="small">命令行等价：<kbd>codeerratum review --diff HEAD~1</kbd></span>
+    </div>
+    <div id="liveView" hidden>
+      <div class="run-head">
+        <h1 data-en="Findings as they arrive">实时发现</h1>
+        <span class="small" id="liveCount"></span>
+      </div>
+      <div class="notes" data-en="Raw output of the running review: not clustered, not falsified yet. The report that replaces this view when the run ends is the canonical list.">审查进行中的原始输出：尚未聚类、也未做证伪。运行结束后以报告为准。</div>
+      <div id="liveCards"></div>
     </div>
     <div id="runView" hidden>
       <div class="run-head">
@@ -482,6 +579,22 @@
   </div>
 </div>
 
+<div id="aboutOverlay" hidden>
+  <div class="errBox aboutBox" role="dialog" aria-modal="true" aria-labelledby="aboutTitle">
+    <div class="errHead" id="aboutTitle"><span class="mark">E</span> CodeErratum</div>
+    <div class="aboutBody">
+      <div class="small" id="aboutVersion" data-en="Version · MIT License">版本 · MIT 许可</div>
+      <p data-en="AI code review that outputs an executable work order: every finding carries the file, the line, the evidence, and a command that proves the fix.">AI 代码审查，输出可直接执行的勘误表：每条发现都带文件、行号、证据，以及验证修复的验收命令。</p>
+      <div class="aboutUrl" id="aboutUrl">https://github.com/a2012s/CodeErratum</div>
+    </div>
+    <div class="errFoot">
+      <button class="ghost" id="aboutCopy" data-en="Copy link">复制链接</button>
+      <button class="primary" id="aboutOpen" data-en="Open on GitHub">在 GitHub 打开</button>
+      <button class="ghost" id="aboutClose" data-en="Close">关闭</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const $ = (id) => document.getElementById(id);
 // Under the multi-project shell this page is served at /p/<slug>/ and the
@@ -519,6 +632,10 @@ const STR = {
   "无法连接后端: {msg}": "Cannot reach the backend: {msg}",
   "浏览器拒绝剪贴板访问，已选中文本，请按 ⌘/Ctrl+C": "The browser blocked clipboard access; the text is selected — press ⌘/Ctrl+C",
   "浏览器拒绝剪贴板访问，请手动复制": "The browser blocked clipboard access; copy it manually",
+  // about dialog
+  "复制链接": "Copy link",
+  "版本 {v} · MIT 许可": "Version {v} · MIT License",
+  "打不开 GitHub": "Cannot open GitHub",
   // relative time
   "刚刚": "just now",
   "{n} 分钟前": "{n} min ago",
@@ -529,6 +646,13 @@ const STR = {
   "配置来源": "Config source",
   "来源：{src}": "Source: {src}",
   "配置文件": "config file",
+  "默认配置": "default config",
+  "全局默认配置 <code>{path}</code>（本项目尚未单独保存）":
+    "User default <code>{path}</code> (this project has not saved its own yet)",
+  "同时设为新项目的默认配置（写入 <code>{path}</code>）":
+    "Also make this the default for new projects (writes <code>{path}</code>)",
+  "已保存到 {path}，并更新默认配置": "Saved to {path} and updated the default",
+  "已保存到 {path}（未更新默认配置）": "Saved to {path} (default left unchanged)",
   "环境变量": "environment",
   // project rules
   "已检测到 {path} · {chars} 字": "Detected {path} · {chars} chars",
@@ -569,6 +693,8 @@ const STR = {
   "已复制验收命令": "Acceptance command copied",
   // review progress and run lifecycle
   "审查中…": "Reviewing…",
+  "审查中… 已发现 {n} 条": "Reviewing… {n} findings so far",
+  "—— 发现实时输出到右侧 ——": "— findings stream into the pane on the right —",
   "运行审查": "Run review",
   "停止审查": "Stop review",
   "停止中…": "Stopping…",
@@ -596,10 +722,24 @@ const STR = {
   "（含缓存 {cached}）": " (cached {cached})",
   "{model}：{calls} 次 · {input} 入 / {output} 出 = {total}": "{model}: {calls} calls · {input} in / {output} out = {total}",
   // unit cap hint
-  "审查单元数，1–{cap}；超出会按上限执行并提示。": "Review units, 1–{cap}; anything above the cap is clamped and reported.",
+  "审查单元数，1–{cap}；填 0 审查全部单元；超出会按上限执行并提示。":
+    "Review units, 1–{cap}; 0 means every unit; anything above the cap is clamped and reported.",
+  "审查全部单元（不限数量）。单元越多耗时越长，dual 模式下每条单元都要过两个模型。":
+    "Every unit, no limit. Time grows with the unit count — in dual mode each unit goes through both models.",
   "超出 1–{cap}，服务端会按 {used} 执行，并在进度里提示。": "Outside 1–{cap}; the server runs {used} and says so in the progress log.",
   "最多 {actual} 个审查单元。": "Up to {actual} review units.",
   "最多 {actual} 个审查单元（已到上限）。": "Up to {actual} review units (at the cap).",
+  "自动：按风险排序，小改动全审，大改动最多 {cap} 个单元。":
+    "Auto: ranked by risk — small diffs are fully covered, large ones up to {cap} units.",
+  "全部单元：数量越多耗时越长，费用与单元数成正比。":
+    "Every unit: time and cost both grow with the unit count.",
+  "填 1–{cap} 之间的整数。": "Enter a whole number between 1 and {cap}.",
+  "超过 {cap}，服务端会按 {cap} 执行。": "Above {cap}; the server runs {cap}.",
+  "最多 {n} 个单元。": "Up to {n} units.",
+  "{mode} 需要 {n} 个模型，已选 {k} 个；点一下可换。":
+    "{mode} takes {n} models, {k} selected — click a chip to change it.",
+  "还没有配置模型，先到设置里填端点和 key。":
+    "No models configured yet — add an endpoint and key in settings.",
   // stats drawer
   "审查运行数": "Runs",
   "发现总数": "Findings",
@@ -735,8 +875,24 @@ function applyLang() {
     const open = Object.keys(DRAWERS).find((id) => !$(id).hidden);
     if (open) { showOnlyDrawer(""); $(DRAWERS[open]).click(); }
   }
+  syncHeaderVar();
 }
 let BOOTED = false;
+
+// The header is not a fixed height: it measures 51px in Chinese and 57px in
+// English, and its repo path can wrap on a narrow window. The drawer opens
+// right below it, so publish the real number instead of assuming one.
+function syncHeaderVar() {
+  const head = document.querySelector("header.top");
+  if (!head) return;
+  const h = Math.round(head.getBoundingClientRect().height);
+  document.documentElement.style.setProperty("--header-h", `${h}px`);
+}
+addEventListener("resize", syncHeaderVar);
+if (typeof ResizeObserver !== "undefined") {
+  const head = document.querySelector("header.top");
+  if (head) new ResizeObserver(syncHeaderVar).observe(head);
+}
 
 // The multi-project shell hosts this page in an iframe; switching language there
 // must repaint the tab too, without reloading it (a reload would drop the log).
@@ -787,8 +943,46 @@ function showError(message, title = T("操作失败")) {
 function closeError() { $("errOverlay").hidden = true; }
 $("errClose").onclick = closeError;
 $("errOverlay").onclick = (ev) => { if (ev.target === $("errOverlay")) closeError(); };
+
+// ---- about ---------------------------------------------------------------
+// The packaged app's About is a system panel: macOS renders a static copyright
+// line and Windows has none at all, so neither can carry a clickable address.
+// This dialog can — the link is shown to copy and opened through the server,
+// because a webview page cannot hand a URL to the user's real browser.
+let HOMEPAGE = "";
+function showAbout() {
+  $("aboutOverlay").hidden = false;
+  $("aboutClose").focus();
+}
+function closeAbout() { $("aboutOverlay").hidden = true; }
+$("aboutBtn").onclick = showAbout;
+$("aboutClose").onclick = closeAbout;
+$("aboutOverlay").onclick = (ev) => { if (ev.target === $("aboutOverlay")) closeAbout(); };
+$("aboutCopy").onclick = async () => {
+  const btn = $("aboutCopy");
+  try {
+    await navigator.clipboard.writeText(HOMEPAGE || $("aboutUrl").textContent.trim());
+    btn.textContent = T("已复制");
+    setTimeout(() => { btn.textContent = T("复制链接"); }, 1500);
+  } catch {
+    toast(T("浏览器拒绝剪贴板访问，请手动复制"));
+  }
+};
+$("aboutOpen").onclick = async () => {
+  const btn = $("aboutOpen");
+  btn.disabled = true;
+  try {
+    await api("/api/open/homepage", { method: "POST", body: "{}" });
+  } catch (e) {
+    showError(e.message, T("打不开 GitHub"));
+  } finally {
+    btn.disabled = false;
+  }
+};
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && !$("errOverlay").hidden) closeError();
+  if (ev.key !== "Escape") return;
+  if (!$("aboutOverlay").hidden) { closeAbout(); return; }
+  if (!$("errOverlay").hidden) closeError();
 });
 $("errCopy").onclick = async () => {
   const btn = $("errCopy");
@@ -818,6 +1012,14 @@ function renderMeta() {
   const m = STATE.meta;
   if (!m) return;
   $("repoLabel").textContent = m.repo;
+  // Version chip doubles as the About button; the address comes from the same
+  // /api/meta payload, so a fork only edits codeerratum/__init__.py.
+  if (m.version) $("aboutBtn").textContent = `v${m.version}`;
+  if (m.homepage) {
+    HOMEPAGE = m.homepage;
+    $("aboutUrl").textContent = m.homepage;
+  }
+  if (m.version) $("aboutVersion").textContent = T("版本 {v} · MIT 许可", { v: m.version });
   const box = $("models");
   if (!m.configured) {
     const err = (m.config_error || "").split("\n")[0];
@@ -826,9 +1028,13 @@ function renderMeta() {
     box.innerHTML = m.models
       .map((x) => `<span class="chip model">${esc(x.model_id)} · ${esc(x.family)}</span>`).join("")
       + `<span class="chip" title="${esc(T("配置来源"))}">${esc(T("来源：{src}", {
-        src: m.source === "file" ? T("配置文件") : T("环境变量"),
+        src: m.source === "file" ? T("配置文件")
+          : m.source === "user" ? T("默认配置") : T("环境变量"),
       }))}</span>`;
     $("mode").value = m.mode;
+    // The saved mode decides how many seats the picker must fill; without this
+    // the page opened on "dual" with a single chip selected.
+    if (typeof renderModels === "function") renderModels();
   }
   renderRulesHint(m.house_rules);
 }
@@ -892,6 +1098,7 @@ async function openRun(id) {
 function renderRun() {
   const run = STATE.run;
   $("empty").hidden = true;
+  $("liveView").hidden = true;  // the finished report supersedes the live cards
   $("runView").hidden = false;
   $("runTitle").textContent = T("运行 {id}", { id: run.run_id });
   $("runWhen").textContent = `${ago(run.created_at)} · commit ${(run.commit || "?").slice(0, 8)}`;
@@ -1046,6 +1253,12 @@ let reviewTracking = false;    // we are following a review started elsewhere
 function progressReset() {
   $("progressLog").innerHTML = "";
   $("progressBox").hidden = false;
+  // A run is starting: swap the right pane to the live list so the first finding
+  // has somewhere to appear, instead of the "fill in a diff range" placeholder.
+  liveReset();
+  $("liveView").hidden = false;
+  $("empty").hidden = true;
+  $("runView").hidden = true;
 }
 // Colour by importance. Explicit levels from callers (done/err) always win;
 // otherwise infer from the message so both SSE frames and polled history agree.
@@ -1066,6 +1279,57 @@ function progressAddLine(text, cls = "") {
   const log = $("progressLog");
   log.appendChild(div);
   log.scrollTop = log.scrollHeight;
+}
+// Findings arrive one SSE frame at a time (see _stream_findings on the server)
+// and land in the right pane while the run is still spending tokens: waiting for
+// a single "done" frame means staring at "unit 12/53" for minutes with no sign
+// that anything is being found. These cards are raw — clustering and the
+// falsification round happen afterwards, and the report replaces this view.
+let LIVE_FINDINGS = 0;
+// id|model → already rendered. The tracking path re-reads the whole list every
+// poll, and the SSE path can overlap with it after a reconnect; without this the
+// same finding would either duplicate or flicker.
+let LIVE_IDS = new Set();
+function liveReset() {
+  LIVE_FINDINGS = 0;
+  LIVE_IDS = new Set();
+  $("liveCards").innerHTML = "";
+  $("liveCount").textContent = "";
+  $("liveView").hidden = true;
+}
+function liveAddFinding(f) {
+  const key = `${f.id || ""}|${f.model || ""}`;
+  if (key !== "|" && LIVE_IDS.has(key)) return;
+  if (!LIVE_FINDINGS) {
+    liveReset();
+    $("liveView").hidden = false;
+    $("empty").hidden = true;
+    $("runView").hidden = true;
+    progressAddLine(T("—— 发现实时输出到右侧 ——"), "hi");
+  }
+  LIVE_FINDINGS += 1;
+  if (key !== "|") LIVE_IDS.add(key);
+  const sev = String(f.severity || "");
+  const where = f.file ? f.file + (f.line ? ":" + f.line : "") : "";
+  const meta = [f.lens, f.model].filter(Boolean).join(" · ");
+  const card = document.createElement("article");
+  card.className = "card live";
+  card.dataset.fid = key;
+  card.innerHTML =
+    `<div class="card-head">` +
+    (sev ? `<span class="sev ${esc(sev)}">${esc(sev)}</span>` : "") +
+    `<div class="claim">${esc(f.claim || "")}</div>` +
+    (f.model ? `<span class="badge open">${esc(f.model)}</span>` : "") +
+    `</div>` +
+    `<div class="card-body"><div class="loc">` +
+    (where ? `<span class="path">${esc(where)}</span>` : "") +
+    (meta ? `<span>${esc(meta)}</span>` : "") +
+    `</div></div>`;
+  $("liveCards").appendChild(card);
+  $("liveCount").textContent = count(LIVE_FINDINGS, "条（实时）", "so far", "so far");
+  // A tracking tab keeps its "elapsed · scope" title; only the streaming tab
+  // swaps it for a count.
+  if (reviewStreaming) progressSetRunning(T("审查中… 已发现 {n} 条", { n: LIVE_FINDINGS }));
 }
 function progressSetRunning(text) {
   const head = $("progressHead");
@@ -1149,6 +1413,9 @@ async function pollReviewStatus() {
       log.innerHTML = "";
       msgs.forEach((m) => progressAddLine(m));
     }
+    // The SSE stream belongs to whoever opened it; every other viewer (a refresh
+    // mid-run, a second tab, a run started elsewhere) gets its findings here.
+    (st.findings || []).forEach((f) => liveAddFinding(f));
   } else if (reviewTracking) {
     reviewTracking = false;
     setRunBusy(false);
@@ -1156,6 +1423,9 @@ async function pollReviewStatus() {
       tokenSummary(st.tokens).forEach((l) => progressAddLine(l, "done"));
       progressFinishHead(T("审查完成"));
       loadRuns(false);
+      // Open the finished report here too: the live cards are raw and this tab
+      // did not receive the closing "done" frame. renderRun() hides them.
+      if (st.run_id) openRun(st.run_id);
     } else if (st.status === "empty") {
       progressFinishHead(T("无改动"));
     } else if (st.status === "cancelled") {
@@ -1176,40 +1446,119 @@ setInterval(pollReviewStatus, 1500);
 
 // The server is the authority on the cap (MAX_UNITS_CAP); this only mirrors it so
 // an out-of-range value is visible before the run starts instead of after.
-const MAX_UNITS_CAP = 50;
-// 0 must survive this: `Number(v) || 10` would silently turn 0 into 10 and the
-// server's "至少 1 个" notice would never fire from the UI.
+const MAX_UNITS_CAP = 500;
+const SEATS = { quick: 1, dual: 2, committee: 3 };
+let MODELS = [];
+let AUTO_BUDGET = 60;
+const PICKED = new Set();
+
+function budgetMode() {
+  return ($("unitBudget") && $("unitBudget").value) || "auto";
+}
+
+// 0 = every unit; "auto" leaves the count to the server; a number is literal.
+// `Number(v) || 10` used to eat 0 here, which is why this is spelled out.
 function unitsValue() {
+  const mode = budgetMode();
+  if (mode === "all") return 0;
+  if (mode === "auto") return "auto";
   const raw = $("maxUnits").value.trim();
   const n = Number(raw);
-  return raw && Number.isFinite(n) ? Math.trunc(n) : 10;
+  return raw && Number.isFinite(n) && n > 0 ? Math.trunc(n) : "auto";
 }
+
 function syncUnitsHint() {
   const hint = $("maxUnitsHint");
-  const raw = $("maxUnits").value.trim();
-  const asked = Number(raw);
-  if (!raw || !Number.isFinite(asked)) {
-    hint.textContent = T("审查单元数，1–{cap}；超出会按上限执行并提示。", { cap: MAX_UNITS_CAP });
-    hint.classList.remove("warn");
+  const mode = budgetMode();
+  $("customUnitsField").hidden = mode !== "custom";
+  hint.classList.remove("warn");
+  if (mode === "auto") {
+    hint.textContent = T("自动：按风险排序，小改动全审，大改动最多 {cap} 个单元。", {
+      cap: AUTO_BUDGET,
+    });
     return;
   }
-  const wanted = Math.trunc(asked);
-  const actual = Math.max(1, Math.min(wanted, MAX_UNITS_CAP));
-  if (actual !== wanted) {
-    hint.textContent = T("超出 1–{cap}，服务端会按 {used} 执行，并在进度里提示。", {
-      cap: MAX_UNITS_CAP, used: actual,
-    });
+  if (mode === "all") {
+    hint.textContent = T("全部单元：数量越多耗时越长，费用与单元数成正比。");
+    return;
+  }
+  const asked = Number($("maxUnits").value.trim());
+  if (!Number.isFinite(asked) || asked < 1) {
+    hint.textContent = T("填 1–{cap} 之间的整数。", { cap: MAX_UNITS_CAP });
+    hint.classList.add("warn");
+  } else if (asked > MAX_UNITS_CAP) {
+    hint.textContent = T("超过 {cap}，服务端会按 {cap} 执行。", { cap: MAX_UNITS_CAP });
     hint.classList.add("warn");
   } else {
-    hint.textContent = actual === MAX_UNITS_CAP
-      ? T("最多 {actual} 个审查单元（已到上限）。", { actual })
-      : T("最多 {actual} 个审查单元。", { actual });
-    hint.classList.remove("warn");
+    hint.textContent = T("最多 {n} 个单元。", { n: Math.trunc(asked) });
   }
 }
+
+function seatCount() {
+  return SEATS[$("mode").value] || 1;
+}
+
+// Exactly `need` seats: the mode decides how many, the user decides which.
+function renderModels() {
+  const need = seatCount();
+  const ids = MODELS.map((m) => m.id);
+  for (const id of [...PICKED]) if (!ids.includes(id)) PICKED.delete(id);
+  for (const id of ids) {
+    if (PICKED.size >= need) break;
+    PICKED.add(id);
+  }
+  while (PICKED.size > need) PICKED.delete(PICKED.values().next().value);
+  const box = $("modelPicker");
+  box.textContent = "";
+  for (const m of MODELS) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip" + (PICKED.has(m.id) ? " model" : "");
+    b.textContent = m.id;
+    b.dataset.model = m.id;
+    b.title = m.family || "";
+    b.onclick = () => pickModel(m.id);
+    box.appendChild(b);
+  }
+  $("modelHint").textContent = MODELS.length
+    ? T("{mode} 需要 {n} 个模型，已选 {k} 个；点一下可换。", {
+        mode: $("mode").value,
+        n: need,
+        k: PICKED.size,
+      })
+    : T("还没有配置模型，先到设置里填端点和 key。");
+}
+
+function pickModel(id) {
+  const need = seatCount();
+  if (PICKED.has(id)) {
+    if (PICKED.size > 1) PICKED.delete(id); // never leave zero seats
+  } else {
+    if (PICKED.size >= need) PICKED.delete(PICKED.values().next().value);
+    PICKED.add(id);
+  }
+  renderModels();
+}
+
+async function loadModels() {
+  try {
+    const d = await api("/api/models");
+    MODELS = Array.isArray(d.models) ? d.models : [];
+    if (d.seats) Object.assign(SEATS, d.seats);
+    if (Number.isFinite(d.auto_budget)) AUTO_BUDGET = d.auto_budget;
+  } catch {
+    MODELS = [];
+  }
+  renderModels();
+  syncUnitsHint();
+}
+
+if ($("unitBudget")) $("unitBudget").addEventListener("change", syncUnitsHint);
 $("maxUnits").addEventListener("input", syncUnitsHint);
 $("maxUnits").addEventListener("blur", syncUnitsHint);
+$("mode").addEventListener("change", renderModels);
 syncUnitsHint();
+loadModels();
 
 $("runBtn").onclick = async () => {
   const btn = $("runBtn");
@@ -1218,6 +1567,7 @@ $("runBtn").onclick = async () => {
     paths: $("paths").value.trim(),
     mode: $("mode").value,
     max_units: unitsValue(),
+    models: [...PICKED],
     author_model: $("authorModel").value.trim(),
     write_markdown: $("writeMd").checked,
     house_rules: $("houseRules").value,
@@ -1274,6 +1624,8 @@ $("runBtn").onclick = async () => {
         try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
         if (ev.type === "log") {
           progressAddLine(ev.message || "");
+        } else if (ev.type === "finding") {
+          liveAddFinding(ev.finding || {});
         } else if (ev.type === "empty") {
           streamCompleted = true;
           progressAddLine(ev.message || T("没有可审查的改动"), "done");
@@ -1510,9 +1862,11 @@ function renderConfig(info) {
   const parts = [];
   const src = info.source === "file"
     ? T("本地配置文件 <code>{path}</code>（保存后重启仍生效）", { path: esc(info.path) })
-    : info.source === "env"
-      ? T("环境变量（尚未保存；点「保存配置」后写入本地文件）")
-      : T("未配置");
+    : info.source === "user"
+      ? T("全局默认配置 <code>{path}</code>（本项目尚未单独保存）", { path: esc(info.path) })
+      : info.source === "env"
+        ? T("环境变量（尚未保存；点「保存配置」后写入本地文件）")
+        : T("未配置");
   parts.push(`<div class="cfg-note">${T("当前来源：{src}", { src })}</div>`);
   if (info.config_error) parts.push(`<div class="cfg-note bad" style="margin-top:8px">${esc(info.config_error)}</div>`);
   parts.push(`<div class="field" style="margin:14px 0 6px">
@@ -1524,6 +1878,8 @@ function renderConfig(info) {
   parts.push(`<table class="cfg"><thead><tr>
     <th>model_id</th><th>base_url</th><th>family</th><th>api_key</th><th>${esc(T("检测"))}</th><th></th>
   </tr></thead><tbody id="cfgRows"></tbody></table>`);
+  parts.push(`<label class="cfg-default"><input type="checkbox" id="cfgDefault" checked>
+    <span>${T("同时设为新项目的默认配置（写入 <code>{path}</code>）", { path: esc(info.default_path || "~/.codeerratum/config.json") })}</span></label>`);
   parts.push(`<div class="actions" style="margin-top:12px">
     <button class="ghost" id="cfgAdd">${esc(T("+ 添加模型"))}</button>
     <button class="ghost" id="cfgTestAll">${esc(T("检测全部"))}</button>
@@ -1566,13 +1922,16 @@ async function saveConfig() {
   const btn = $("cfgSave");
   btn.disabled = true;
   try {
+    const asDefault = $("cfgDefault") ? $("cfgDefault").checked : true;
     const info = await api("/api/config", {
-      method: "POST", body: JSON.stringify({ mode, models }),
+      method: "POST", body: JSON.stringify({ mode, models, save_as_default: asDefault }),
     });
     renderConfig(info);
     STATE.meta = await api("/api/meta");
     renderMeta();
-    toast(T("配置已保存到 {path}", { path: info.path }));
+    toast(info.default_saved
+      ? T("已保存到 {path}，并更新默认配置", { path: info.path })
+      : T("已保存到 {path}（未更新默认配置）", { path: info.path }));
   } catch (e) {
     showError(e.message, T("保存配置失败"));
   } finally {
@@ -1640,7 +1999,7 @@ async function doSwitchRepo(path) {
     rememberRepo(meta.repo);
     STATE.meta = meta;
     STATE.run = null; STATE.zone = null;
-    $("runView").hidden = true; $("empty").hidden = false;
+    $("runView").hidden = true; $("liveView").hidden = true; $("empty").hidden = false;
     renderMeta();
     showOnlyDrawer("");
     await loadRuns(true);
@@ -1853,13 +2212,29 @@ if (BASE) {
   // repo here would desync the tab from its slug, so the button goes back to
   // the project list instead.
   $("repoBtn").textContent = T("项目总览");
-  $("repoBtn").onclick = () => { location.href = "/"; };
+  // This page lives in the shell's iframe, so navigating to "/" loads the shell
+  // *inside* its own tab: one nested header per click, and the click never
+  // reaches an overview. Ask the window above to switch instead.
+  $("repoBtn").onclick = () => {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage({ type: "ce:overview" }, location.origin);
+    } else {
+      // Opened standalone (someone typed /p/<slug>/ in the address bar).
+      location.href = "/#overview";
+    }
+  };
 } else {
   $("repoBtn").onclick = () => {
     if (!toggleDrawer("repoDrawer")) return;
     renderRepoDrawer();
   };
 }
+
+// Presets for the range box. WORKTREE is understood server-side and means "read
+// the whole working tree", which is the only useful answer for a project that
+// has never been committed — and it needs no empty-tree sha memorised.
+$("diffHead").onclick = () => { $("diff").value = "HEAD"; };
+$("diffAll").onclick = () => { $("diff").value = "WORKTREE"; };
 
 $("configBtn").onclick = async () => {
   if (!toggleDrawer("configDrawer")) return;

@@ -30,6 +30,12 @@ dev = [
   "pytest-asyncio>=0.23",
   "ruff>=0.5",
 ]
+desktop = [
+  "pywebview>=6.2",
+]
+pack = [
+  "pyinstaller>=6.0",
+]
 
 [project.scripts]
 codeerratum = "codeerratum.cli:app"
@@ -45,7 +51,15 @@ path = "src/codeerratum/__init__.py"
 packages = ["src/codeerratum"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "README.md", "README.zh-CN.md", "开发计划.md", "LICENSE", "docs"]
+include = [
+  "src",
+  "packaging",
+  "README.md",
+  "README.zh-CN.md",
+  "开发计划.md",
+  "LICENSE",
+  "docs",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

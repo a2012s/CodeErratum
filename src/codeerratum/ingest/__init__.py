@@ -1,19 +1,31 @@
 from .git import (
+    EMPTY_TREE_SHA1,
     DiffError,
     detect_language,
     get_commit,
     get_diff,
+    has_commits,
+    is_git_repo,
+    is_head_family,
     new_side_sources,
     normalize_pathspec,
+    snapshot_diff,
     split_diff,
+    wants_full_worktree,
 )
 
 __all__ = [
+    "EMPTY_TREE_SHA1",
     "DiffError",
     "detect_language",
     "get_commit",
     "get_diff",
+    "has_commits",
+    "is_git_repo",
+    "is_head_family",
     "new_side_sources",
     "normalize_pathspec",
+    "snapshot_diff",
     "split_diff",
+    "wants_full_worktree",
 ]

@@ -1,9 +1,94 @@
 # Changelog
 
-## [未发布]
+## [0.4.7] — 2026-11-23
+
+### Added
+
+- **模型配置只填一次，新项目自动沿用**：过去模型清单（端点、key、席位、mode）只存在被审仓库的
+  `.codeerratum/config.json` 里，所以每加一个项目，设置抽屉都是空的，同一批 key 要重打一遍。
+  现在配置分三层解析：**项目文件 → 用户级 `~/.codeerratum/config.json` → 环境变量**，项目文件
+  仍然优先，单个仓库可以钉住不同的模型组合。保存时默认勾选「同时设为新项目的默认配置」，
+  把当前清单写到用户级（0600，目录 0700）；取消勾选则只写本项目。界面会明确显示当前来源是
+  「本地配置文件 / 全局默认配置 / 环境变量」，`/api/meta` 的 `source` 相应多一个 `user`。
+  配套改动：`__KEEP__`（沿用已存 key）现在也会去默认层找，否则一个正在用默认配置的项目第一次
+  保存时会把自己的 key 清空；`pipeline.available_models()` 与 CLI 运行同样走这条链，模型选择器
+  不会列出与真实运行不一致的清单；`CODEERRATUM_HOME` 可覆盖用户级目录（测试与便携安装）。
+  测试新增 `tests/test_config_layers.py`（10 项）并在 `tests/conftest.py` 里为每个用例隔离
+  用户目录，避免开发机上的真实 key 混进断言。全部 **357 passed**。
+
+## [0.4.6] — 2026-11-23
+
+### Added
+
+- **关于（About）里能看到 GitHub 地址**：打包应用的 About 是系统面板——macOS 只显示一行静态版权、
+  Windows 根本没有，两者都放不了可点的链接。现在三层都有：`Info.plist` 的
+  `NSHumanReadableCopyright` 写成 `MIT License · https://github.com/a2012s/CodeErratum`（系统
+  About 面板底部那行）；审查页顶栏的版本徽标改成按钮（`v0.4.6`），点开是带版本、简介、地址的
+  对话框，可复制、可「在 GitHub 打开」；外壳顶栏加 `GitHub` 入口（桌面版打开的就是外壳）。
+  地址只在 `codeerratum/__init__.py` 的 `HOMEPAGE` 定义一次，`/api/meta` 下发，spec 从源码正则读。
+  打开动作走 `POST /api/open/homepage`——URL 是常量、不接受请求参数，避免变成"打开任意链接"的
+  通用原语；webview 里的页面本来也没法自己调起系统浏览器。新增 4 项测试。
+- **实时发现现在两条路都能看到**：SSE 只属于打开它的那个请求，刷新页面、开第二个标签页、或在别处
+  启动的运行都走 `/api/review/status` 轮询——那条路过去只有进度文字，右侧一无所有。现在每条发现
+  同时写进状态快照（`WebApp._note_finding`，按 `id + model` 去重、上限 500 条），轮询端用同一套
+  卡片渲染并去重；运行结束时跟踪端会自动 `openRun` 打开报告。顺带修了一个会让"所有发现都看不见"的
+  接线错误：回调里 `self` 是 HTTP handler 而非 `WebApp`，`_note_finding` 抛 `AttributeError` 又被
+  上层的"展示失败不能中断付费运行"吞掉。现在该分支会把异常打到 stderr，同类接线错误不再静默。
+  新增 3 项测试（状态里有发现、换轮次清空、按模型去重）。
+- **发现逐条实时出现在右侧**：过去要等 `done` 帧才有结果，中途只有「单元 12/53」在动，看不出
+  到底有没有发现问题。现在每个单元解析完就发一条 `finding` SSE 帧
+  （`server._stream_findings`，只带 severity/file/line/claim/model，完整记录仍随运行归档），
+  右侧换成实时列表、一条一张卡片；运行结束后正式报告替换它。界面明说这些发现**尚未聚类、
+  未证伪**。回调在 `orchestrator._review_with` 里按单元触发，异常一律吞掉——展示层不该让跑了
+  一半的付费审查失败。新增 2 项测试（`finding` 帧必须早于 `done`；回调按单元触发，报告仍来自
+  完整集合）。
+- **Windows 打包**：`packaging/` 早有 win32 分支，缺的是两件只会在 Windows 上暴露的东西：
+  `webview` 包内自带 `WebView2Loader.dll` / `Microsoft.Web.WebView2.Core.dll`，由
+  `collect_data_files("webview")` 收集（漏了的表现是"图标闪一下、没有窗口"）；`--selftest`
+  增加 `webview.platforms.edgechromium` 导入检查——`import webview` 成功不代表后端可用，
+  真缺 pythonnet 时是开窗那一刻才炸。窗口版没有 stdout，selftest 结果写入
+  `~/.codeerratum/desktop.log`，构建脚本回显末尾几行。新增 `.github/workflows/build.yml`
+  （windows-latest + macos-latest，手动触发或推 `v*` 标签出 zip 并挂到 Release 草稿）。
 
 ### Fixed
 
+- **`调用失败：ReadTimeout` 既没说在哪一步超时，也说不清为什么**：唯一的 `timeout=120` 同时管
+  连接和读取，而 8192 的生成上限在实测 ~50 token/s 下需要 ~165s——长答案天然跑不完，表现就是一批
+  单元同时「读取超时」。重试虽然覆盖了 `TransportError`，但读取超时也吃满 3 次 ×120s（近 6 分钟），
+  每次都重发输入、重新计费。现在：连接 10s / 读取 240s（`CODEERRATUM_READ_TIMEOUT` 可调，推理型
+  模型建议 420）/ 写 30s / 连接池 10s；读取超时只重试 1 次（对端已安静一整窗），429/5xx/连接错误
+  仍是 3 次且尊重 `Retry-After`（上限 30s）。失败文案改成会解释原因的中文/英文：
+  `读取超时（240s 内没有返回任何数据；已重试 1 次）`、`鉴权失败（HTTP 401），检查 API key 与 base_url`、
+  `被限流（HTTP 429，已按 Retry-After 退避重试）`；运行结束的 notice 追加去重后的失败原因列表。
+  新增 5 项测试（窗口取值、读取超时只重试一次、Retry-After 上限、失败文案）。
+- **两个语言切换按钮**：壳（`projects.html`）顶部有语言选择，标签页里的 `index.html` 头部
+  又有一个，相隔 40px。现在内页在 iframe 里时用 `html.embedded #langSel { display: none }`
+  隐藏自己的那个，判断放在 `<head>` 的内联脚本里（`window.self !== window.top`），首帧就不闪；
+  语言切换仍由壳 `postMessage({type:"ce:lang"})` 驱动，直接打开 `/p/<slug>/` 时内页那个照常可用。
+- **「不是 git 仓库」不再是死路**：这句报错只说了不行，没说怎么办——把一份拷来的项目
+  文件夹选进界面，用户只会看到「不是 git 仓库：<路径>」。现在拒绝的理由和补救一起给出：
+  目录里没有 `.git` 就没有 diff 可读，在该目录 `git init && git add -A`（暂存即可，
+  不必 commit）；要审已有的全部代码，把审查范围填成空树
+  `4b825dc642cb6eb9a060e54bf8d69288fbee4904`。空树哈希抽成 `ingest.EMPTY_TREE_SHA1`，
+  Web、CLI、`pipeline` 三处校验共用；弹窗 `#modalMsg` 加 `white-space: pre-line`
+  让多行提示不再挤成一句，审查范围下方也补了这条说明。新增 2 项测试
+  （空树能审出单元、报错必须带上两条补救）。
+- **英文界面侧栏横向溢出 23px**：`.row2` 首列 `1fr` 会被下拉框的 min-content 撑住，
+  英文选项 `committee · three models` 把整行推出 292px 侧栏（中文不触发）。改为
+  `minmax(0, 1fr)`；实测中英两语 `asideOverflowX` 均为 0。
+- **多项目视图里每个项目只渲染出 150px 高**：外壳把项目放在 `<div id="frames">` 里，而该容器
+  没有高度，`iframe.project { height: 100% }` 无从解析，浏览器退回 iframe 默认的 150px ——
+  标签栏下方只有一条界面、其余全黑。现在 `#frames` 有 `height: 100%`，并在总览页 `hidden`
+  （两个 100% 子元素并存会把外壳撑出一屏滚动）。打包产物同样受影响，已重新构建。
+- **审查页高度硬减 51px**：`.layout { height: calc(100vh - 51px) }` 假设 header 恒为 51px，
+  实际中文/英文 57px、窄窗口换行后 78px，多出的部分让页面出现滚动条。改为 body 纵向
+  flex + `.layout { flex: 1; min-height: 0 }` + `grid-template-rows: minmax(0, 1fr)`；
+  header 实测高度写入 `--header-h`，右侧抽屉的 `top` 跟随它（原先固定 51px，英文下会压住
+  header 底部）。
+- **英文界面下外壳白屏**：`<p data-en="…">` 的英文值丢了 `<b id="maxParallel">`，`applyLang()`
+  用 `innerHTML` 覆盖后元素消失，`refresh()` 读到 null 抛 `TypeError`，标签、卡片、iframe
+  全部不渲染。文案拆成三段让数字元素不被覆盖，该行也改成可选访问。新增
+  `tests/test_layout.py`（5 项）把这三条成因锁进测试。
 - **关闭/刷新页面不再把审查整轮判失败**（本次「审查失败」的真实原因）：SSE 写帧遇到
   `BrokenPipeError: [Errno 32] Broken pipe` 时会从 `progress` 回调一路抛回 `run_review`，
   被当成 `internal error`，已跑完的评审与证伪结果全部丢在 `status=error`。
@@ -52,6 +137,44 @@
 
 ### Added
 
+- **可双击安装的桌面应用打包**：新增 `packaging/`（`desktop_entry.py` 入口、`CodeErratum.spec`、`build.py`），
+  `uv run python packaging/build.py` 产出 `dist/CodeErratum.app`（macOS）/ `dist/CodeErratum/`（Win、Linux）。
+  用 onedir 而非 onefile——onefile 每次启动都要解包到临时目录，冷启动慢且易被当释放器。实测 67 MB，
+  主体是 Python 运行时。spec 把 `codeerratum/web/static` 与 `codeerratum/prompts` 都放进包，并按平台
+  补 pywebview 的后端 hiddenimport（`webview.platforms.cocoa` 等，它用 importlib 导入，静态分析跟不到）。
+  打包脚本额外做了 ad-hoc 签名（`codesign -s -`），够在本机运行；分发到别的机器仍需 Developer ID + 公证。
+- **`--selftest`：防「启动正常、一花钱就炸」**：`prompts/*.md` 只在真发起审查时读取，漏打包不影响启动。
+  构建脚本因此执行冻结后的 `CodeErratum --selftest`，逐个检查 `static/`、`prompts/`、`webview` 是否在包内，
+  缺一个就让构建失败。实测冻结包内路径落在 `Contents/Frameworks/codeerratum/{web/static,prompts}`，
+  正是 `Path(__file__)` 与 `_locate_static()` 的解析位置，源码逻辑无需改。
+- **窗口版没有终端，所以有日志和弹窗**：入口脚本在冻结模式下把 stdout/stderr 重定向到
+  `~/.codeerratum/desktop.log`（>1 MB 轮转一份，`COLUMNS=120` 避免 rich 在日志里断词），
+  未捕获异常除了写 traceback 还会弹一个原生提示框（osascript / MessageBoxW / zenity）。
+- **双击启动强制 `--no-repo`**：Finder 拉起时 cwd 是 `/`，按 cwd 播种会以 `not a git repository` 在窗口出现前退出。
+  入口脚本因此默认加 `--no-repo`，只有显式传 `--repo` 才不加。隔离 HOME 实测：空总览、
+  `/api/projects` 为 `[]`、`/api/meta` 返回「还没有添加项目」、SIGTERM 干净退出并释放端口。
+- **桌面窗口（pywebview，可选依赖）**：新增 `codeerratum desktop`，起同一个服务、同一份界面，把回环地址交给
+  系统 WebView（WKWebView / WebView2 / WebKitGTK）显示，不打包 Chromium。窗口必须直接加载 `http://127.0.0.1:<port>/`，
+  不能用 `file://` 或自定义协议——服务端的同源校验要求 `Origin` 等于回环 `Host`，换来源会让所有 POST 403、
+  审查按钮静默失效。`text_select` 显式打开（pywebview 默认禁止选文字，报告页要能复制行号），
+  `private_mode=False` + 固定 `storage_path` 让 localStorage 里的语言与分栏宽度跨重启保留。
+  关窗即停服务、释放端口。新增 `pyproject.toml` 的 `desktop` extra、`web/desktop.py`、`web/lifecycle.py`、
+  `web/bootstrap.py`，19 项测试；真实窗口实测：页面渲染、`evaluate_js` 读到标题与按钮、SIGTERM 关窗后端口释放。
+- **服务端给启动器留的四个口子**：`ui` / `desktop` 都支持 `--no-repo`（空项目列表启动，不要求 cwd 是 git 仓库；
+  桌面应用从启动器拉起时 cwd 通常是 `/`，原来会直接报 `not a git repository` 退出）、`--port 0`（由系统分配端口，
+  `server_address[1]` 读回真实值）、`--print-port`（绑定后往 stdout 打一行 `PORT=<n>`，给外壳解析）、
+  `--parent-pid`（看门狗，见下）。空项目时根路径 `/api/*` 返回 404 并说明「还没有添加项目」，不再是 500。
+  `make_server()` 的 `app` 改为可空（必须有 hub），`make_handler()` 同步。
+- **进程看门狗与优雅退出**：`--parent-pid` 每 2 秒探一次父进程，消失即停服务——崩溃或强杀留下的孤儿会抱着
+  一次付费审查空转。POSIX 用「被 reparent 则直接父进程已死」+ `kill(pid, 0)` 兜底（纯 `kill` 会把僵尸当活的，
+  正好是崩溃场景）；Windows 的 `getppid()` 在解释器启动后就固定、`os.kill(pid, 0)` 更会直接终止进程，
+  改用 `OpenProcess` + `WaitForSingleObject(0)`，并显式声明 `HANDLE` 返回类型避免 64 位截断。
+  SIGTERM / SIGINT 从 `signal.signal` 改为阻塞信号 + 专用线程 `sigwait`：桌面窗口的主线程卡在 Cocoa 事件循环里时，
+  Python 的处理器根本没机会执行（实测 SIGTERM 十秒关不掉窗口），换线程取信号后才生效。
+  顺带把 `ui` 的中文硬编码提示（未配置模型、Ctrl+C）并入消息目录。
+- **冻结打包的静态资源查找**：`STATIC_DIR` 不再写死 `Path(__file__).parent / "static"`，
+  改为探测 `sys._MEIPASS` 下三种常见 `--add-data` 布局再回落到源码目录——否则 PyInstaller/py2app 冻出来的
+  程序首页直接白屏或 500。找不到就回落到源码路径，让错误表现成「模板 404」而不是导入期崩溃。
 - **中英双语界面**：顶栏新增语言下拉（中文 / English），默认中文，选择存 localStorage。切换会同时改界面文案与
   服务端消息——页面按请求带 `X-Lang`，SSE 进度行、错误提示、状态文案都由 `src/codeerratum/i18n.py` 的消息目录
   按当前语言渲染，语言存在 `ContextVar` 里，多标签页 / 多项目各自独立。项目外壳页切换语言时通过 `postMessage`

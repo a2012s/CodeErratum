@@ -43,6 +43,8 @@ python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```
 
 > PyPI 尚未发布，`pip install codeerratum` 现在不可用；装完 `uv sync` 后 `codeerratum` 就在 `.venv/bin/` 里。
+>
+> 想要桌面窗口，把 `.[desktop]` 一起装上：`uv sync --extra dev --extra desktop`（只多一个 `pywebview`，不装 Chromium）。
 
 ## 配置
 
@@ -64,7 +66,7 @@ cd /path/to/your-repo
 codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
-`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。审本地未提交的改动用 `--diff HEAD`（暂存与未暂存一起）；全新文件要先 `git add`（不必 commit）。加 `--path src/api` 可只审该目录的改动，已跟踪文件不需要先 `git add`。默认最多审 10 个审查单元（`--max-units` 可调，这是防超支的硬闸）。产物 `erratumReview.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
+`--diff` 收任意 git revspec：`HEAD~1`、`HEAD~3..HEAD`、`main...feature`、某个 commit sha。审本地未提交的改动用 `--diff HEAD`（暂存与未暂存一起）；全新文件要先 `git add`（不必 commit）。目录里还没有任何提交（刚 `git init`，或整份代码是拷进来的）时，`HEAD` 不存在，把空树 `4b825dc642cb6eb9a060e54bf8d69288fbee4904` 当 `--diff`，全部已暂存文件都会作为新增进入审查——一次会切出几百个单元，按目录用 `--path` 分批更实际。加 `--path src/api` 可只审该目录的改动，已跟踪文件不需要先 `git add`。默认自动决定审多少单元（`AUTO_UNIT_BUDGET=60`；`--max-units 0` 审全部，正数照用，上限 500）。产物 `erratumReview.md` 在原仓库根目录，溯源文件落在 `.codeerratum/runs/<run_id>/`。
 
 > 审 `main...feature` 这类**未 checkout 的版本**时，源码、摘录与锚点校验都直接取 diff 版本的 git blob，不需要先切分支。只有当某个文件的 blob 取不到（例如未提交的工作区改动）时才回退到工作区，内容对不上会跳过该文件并在「本次覆盖说明」写明。
 
@@ -110,6 +112,8 @@ codeerratum review --diff HEAD~1 -o erratumReview.md
 异构判据是锁定版本的 `model_id`：`qwen3.8-flash` 与 `qwen4-max-preview` 算两个独立评审者（版本侧重点不同）。相同 `model_id` 重复配置会被拒绝。`family` 仅是展示/报告标签，留空按 model_id 前缀推断，不影响能否同席。证伪轮优先用未参与审查的空闲模型；没有空闲模型时，在评审者之间交叉证伪（发现由谁提出，就换另一个没提过的模型来推翻）。
 如果这段代码是某个模型写的，用 `--author-model <model_id>` 把它排除出审查席位（设计底线第 1 条）。
 
+超时按「连接」和「读取」分开算：连接 10s（端点挂死就别等了），读取默认 240s，可用 `CODEERRATUM_READ_TIMEOUT` 调（推理型模型建议 420）。240s 不是拍的——生成上限 8192 token、实测约 50 token/s，满长度需要 ~165s，过去统一 120s 等于把长答案掐死。读取超时只重试 1 次：对端已经安静了一整窗，再等一整窗通常只是多花时间与输入费用；429/5xx 与连接错误重试 3 次，并且在对方给了 `Retry-After` 时按它退避（上限 30s）。
+
 产出 `erratumReview.md` 交给 Claude Code / Cursor / Cline 执行；每次运行的可追溯产物落在 `.codeerratum/runs/<run_id>/`（`input.diff` / `units.json` / `calls.json` / `findings.json` / `static_diags.json`），反馈数据库在同一目录，不会污染工作区。
 
 不花 token 就能看到真实格式的产物：[`examples/sample-review.md`](examples/sample-review.md)——格式是真的，内容来自仓库自带的假模型端点。
@@ -154,12 +158,91 @@ codeerratum ui --port 9000 --no-browser
 
 点「运行审查」后侧栏展开**实时进度日志**（SSE）：diff 切分、每个模型的单元评审、证伪轮、报告落盘逐条刷出，不用再对着一个转圈干等——一次模型调用可能就要几十秒。进度面板在侧栏内**粘性置顶**，滚动历史运行也不会把它顶出视野；日志区默认 300px 高，拖底部手柄可调（双击复位），侧栏太窄时拖左侧栏与报告之间的**竖直分割线**即可加宽。宽度与日志高度记在浏览器 localStorage，刷新后保持。日志按重要程度着色：阶段行蓝色、警告/证据不足/被证伪琥珀色、确认与整体完成绿色、失败与超时红色加粗，逐单元例行信息保持灰色。证伪行显示完整发现结论，不再截成半句话。失败原因会保留在 `GET /api/review/status` 的 `error` 字段并回显给所有标签页（下发前已抹掉本地路径）。进度走同源 POST `POST /api/review/stream`，结束帧关闭连接；参数错误和审查锁冲突仍是真 400/409，不会伪装成流里的错误。
 
+### 桌面窗口（可选）
+
+不想在浏览器里开一个标签页，可以把它当成一个本地窗口用：
+
+```bash
+uv pip install -e '.[desktop]'   # 可选依赖 pywebview，驱动系统 WebView，不带 Chromium
+codeerratum desktop --no-repo
+```
+
+`desktop` 起的是同一个服务、同一份界面，只是把 `http://127.0.0.1:<随机端口>/` 交给系统 WebView（macOS WKWebView / Windows WebView2 / Linux WebKitGTK）显示。窗口必须直接加载这个回环地址、不能用 `file://` 或自定义协议，原因是服务端的同源校验要求 `Origin` 与回环 `Host` 严格相等——换个来源，审查按钮会静默失效。
+
+`--no-repo` 表示不预置仓库：窗口直接开在项目总览上，从 `~/.codeerratum/projects.json` 恢复或现场添加。桌面应用没有"当前工作目录"，从启动器拉起时 cwd 通常是 `/`，要求它有 git 仓库是行不通的。
+
+关窗即停服务、释放端口；`--parent-pid <pid>` 盯着启动它的进程，对方消失后 2 秒内自行退出——崩溃或强杀留下的孤儿会带着一次付费审查空转。SIGTERM / SIGINT 由一个独立线程 `sigwait` 取，所以即使主线程卡在系统事件循环里，信号照样能把窗口关掉。
+
+给启动器用的四个口子，命令行同样可用：
+
+| 参数 | 用途 |
+|---|---|
+| `--no-repo` | 空项目列表启动，不要求 cwd 是 git 仓库 |
+| `--port 0` | 由系统分配端口，避免与既有实例抢 8765 |
+| `--print-port` | 绑定成功后往 stdout 打一行 `PORT=<n>` |
+| `--parent-pid <pid>` | 该进程消失时自动退出 |
+
+#### 打成可双击的应用
+
+```bash
+uv sync --extra desktop --extra pack
+uv run python packaging/build.py           # 产出 dist/CodeErratum.app
+uv run python packaging/build.py --clean   # 连 build/ 一起清掉重来
+```
+
+macOS 产出 `dist/CodeErratum.app`，Windows / Linux 产出 `dist/CodeErratum/` 文件夹。用 onedir 而不是 onefile：
+onefile 每次启动都要解包到临时目录，冷启动慢好几秒，还容易被杀软当成释放器。体积 60–90 MB，主体是 Python
+运行时，不是这个项目。
+
+`--selftest` 是打包脚本里最要紧的一步。`src/codeerratum/prompts/*.md` 只在真正发起审查时才读——漏打包
+**不影响启动**，只会让人花钱跑到一半才发现炸了。所以构建完会执行冻结后的 `CodeErratum --selftest`，
+逐个检查 `static/`、`prompts/`、`webview` 是否真的在包里，缺一个就让构建失败。
+
+双击启动时工作目录是 `/`，入口脚本因此强制 `--no-repo`（除非显式传 `--repo`），窗口直接落在项目总览。
+窗口版没有终端，启动失败会写进 `~/.codeerratum/desktop.log`（超过 1 MB 轮转一份），同时弹一个原生提示框。
+
+签名只做了 ad-hoc（`codesign -s -`），够在本机跑；发给别人要 Developer ID + `notarytool` 公证，否则对方
+首次打开会被 Gatekeeper 拦下。图标是 `packaging/icon/icon-1024.png` 生成的 `.icns`（Dock）和 `.ico`
+（资源管理器 / 任务栏），spec 里都接好了，换图只需替换这两个文件。
+
+产物是**单架构**的：用什么 Python 打包就是什么架构（macOS 上 `arm64` 或 `x86_64`，取决于当前解释器），
+不是 universal2。要给 Intel Mac 用，得在 Intel 机器或 universal2 的 Python 下再打一次。
+
+#### 打 Windows 包
+
+PyInstaller 不支持交叉编译：`.exe` 只能在 Windows 上产出，`.app` 只能在 macOS 上产出。两条路：
+
+**1. 交给 GitHub Actions（没有 Windows 机器也能出包）**
+
+`.github/workflows/build.yml` 同时跑 `windows-latest` 和 `macos-latest`：Actions 页面点 *Run workflow*，
+产物是 `CodeErratum-windows-x64.zip`，解压即用（`CodeErratum.exe` 就在文件夹根上，不需要安装）；推 `v*`
+标签则把两个平台挂到 Release 草稿。
+
+**2. 在 Windows 11 本机打**
+
+```powershell
+uv sync --extra desktop --extra pack
+uv run python packaging/build.py
+# 产物在 dist\CodeErratum\，整个文件夹压缩发人，双击 CodeErratum.exe
+```
+
+Windows 上多两件 macOS 不需要处理的事，spec 里已经写死：
+
+- `webview` 包内自带 `WebView2Loader.dll`、`Microsoft.Web.WebView2.Core.dll`，由
+  `collect_data_files("webview")` 收集。漏了不会报错——现象是"图标闪一下就没了"，所以只能靠打包时收集。
+- `--selftest` 会额外 import `webview.platforms.edgechromium`。`import webview` 成功不代表后端可用，
+  真正缺 pythonnet / .NET 时是开窗那一刻才炸，那已经是用户下载之后了。
+
+Win11 自带 Edge WebView2 运行时；Win10 可能需要装一次（微软官方 Evergreen 安装包）。
+窗口版在 Windows 上没有 stdout，`--selftest` 的输出写进 `~/.codeerratum/desktop.log`，构建脚本会把末尾
+几行回显到控制台。
+
 ### 多项目（便签页）
 
 `/` 现在是项目外壳：顶部一条便签栏，一个项目一个标签，标签里嵌的是完整界面；「总览」把每个项目的状态、当前进度和 token 摊成卡片。
 
 - **添加**：粘贴绝对路径、用系统文件夹选择器，或直接把文件夹拖进窗口（拖在某个项目的标签页里也算，会转给外壳处理）。
-- **隔离**：每个项目独立 `.codeerratum/config.json`、`feedback.db`、运行归档和审查锁；`/p/<slug>/api/*` 只作用于该项目，根路径 `/api/*` 仍指向第一个项目以保持兼容。
+- **隔离**：每个项目独立 `.codeerratum/config.json`、`feedback.db`、运行归档和审查锁（没保存过配置的项目用用户级默认清单，见下方「配置」）；`/p/<slug>/api/*` 只作用于该项目，根路径 `/api/*` 仍指向第一个项目以保持兼容。
 - **持久化**：项目列表存 `~/.codeerratum/projects.json`，重启自动恢复，路径已失效的项目会被静默跳过（只移除入口，不动磁盘上的代码）。
 - **并发**：默认最多 2 个项目同时审查（`--max-parallel` 可调）——每个项目内部本来就有 N 个模型并发，无上限并行只会撞限流。超出的项目显示「排队中」，可在总览卡片或项目页里取消排队。
 - **断连**：关闭或刷新任何标签页都不会中断审查，服务端跑完后回到标签或总览就能看到结果。
@@ -169,9 +252,9 @@ codeerratum ui --port 9000 --no-browser
 
 审查完成后进度面板显示本次 **token 消耗**：输入 / 输出 / 缓存 token 总量，以及按模型分解的调用次数与小计。数据来自每次模型调用原本就记录的 usage，按仓库累计在 `GET /api/review/status` 里也能查到，方便对账成本。
 
-顶栏「切换仓库」可把运行中的界面指向任意本地 git 仓库，三种方式：点「浏览本地…」弹出系统原生文件夹选择器（跑在本地服务进程里——网页读不到目录对话框的绝对路径）；把文件夹直接拖到窗口（按名字在最近仓库和家目录有限深度内定位）；或粘贴绝对路径（`~` 也支持）。填仓库内子目录会自动定位到 git 根；每个仓库读各自的 `.codeerratum/config.json`，保存的模型配置跟着仓库走。审查运行中拒绝切换（产物按仓库路径落盘，中途切换会写错地方），三条入口都走同源 Origin / Host 校验。抽屉里显示当前仓库路径，点「打开当前仓库文件夹」可在系统文件管理器（Finder / 资源管理器 / 文件管理器）中查看该目录；按钮只打开服务端已定位的 git 根，不接受页面传入路径，失败会弹可复制对话框。
+顶栏「切换仓库」可把运行中的界面指向任意本地 git 仓库，三种方式：点「浏览本地…」弹出系统原生文件夹选择器（跑在本地服务进程里——网页读不到目录对话框的绝对路径）；把文件夹直接拖到窗口（按名字在最近仓库和家目录有限深度内定位）；或粘贴绝对路径（`~` 也支持）。填仓库内子目录会自动定位到 git 根；配置查找顺序是项目 `.codeerratum/config.json` → 用户级 `~/.codeerratum/config.json` → 环境变量，所以新加的项目直接沿用你上次保存的模型，只有在项目里单独保存过才会分叉。审查运行中拒绝切换（产物按仓库路径落盘，中途切换会写错地方），三条入口都走同源 Origin / Host 校验。抽屉里显示当前仓库路径，点「打开当前仓库文件夹」可在系统文件管理器（Finder / 资源管理器 / 文件管理器）中查看该目录；按钮只打开服务端已定位的 git 根，不接受页面传入路径，失败会弹可复制对话框。
 
-顶栏「配置」可查看并修改当前模式与模型端点：保存后写入 `.codeerratum/config.json`（权限 0600），优先级高于环境变量，重启界面依然生效，命令行也读同一份。api_key 不会回显到浏览器，留空即沿用已保存的值。
+顶栏「配置」可查看并修改当前模式与模型端点：保存后写入项目 `.codeerratum/config.json`（权限 0600），并默认同时刷新用户级 `~/.codeerratum/config.json`（权限 0600，目录 0700）作为新项目的默认清单——不想覆盖默认就在保存前取消那个勾选。两层都优先于环境变量，重启界面依然生效，命令行与 MCP 也读同一条链。抽屉顶部会写明当前清单来自哪个文件。api_key 不会回显到浏览器，留空即沿用已保存的值。
 
 每个模型行有「检测」按钮（也有「检测全部」）：发一个最小 chat 请求（`max_tokens=1`、不重试、10s 超时）验证端点可达、鉴权通过、model_id 有效。绿勾显示延迟，红叉悬停提示原因（401/403 鉴权、404 端点或模型、429 限流、超时等）。改动任意字段后旧结果自动失效。检测不写配置、不回显密钥，同样要求同源校验。
 

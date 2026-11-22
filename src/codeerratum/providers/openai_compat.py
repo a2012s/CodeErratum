@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,15 +34,48 @@ from .base import (
 )
 
 _MAX_TRANSPORT_ATTEMPTS = 3
+# A read timeout is not a flaky blip: the endpoint took the request and then sent
+# nothing for the whole window. Waiting a second full window is rarely cheaper
+# than letting the next unit run, and both windows are billed for their input.
+_MAX_READ_TIMEOUT_ATTEMPTS = 2
+
+# 120 s used to be the only timeout, which silently capped the *answer length*:
+# at the ~50 tok/s these endpoints actually deliver, an 8192-token answer needs
+# ~165 s, so a legitimate long answer could never finish. Connect stays short so
+# a dead endpoint fails fast instead of looking like a slow model.
+DEFAULT_CONNECT_TIMEOUT = 10.0
+DEFAULT_READ_TIMEOUT = 240.0
+WRITE_TIMEOUT = 30.0
+POOL_TIMEOUT = 10.0
+RETRY_AFTER_CAP = 30.0
+
+
+def read_timeout() -> float:
+    """Read window per attempt, overridable for slow reasoning endpoints."""
+    raw = os.environ.get("CODEERRATUM_READ_TIMEOUT", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_READ_TIMEOUT
+    return value if value > 0 else DEFAULT_READ_TIMEOUT
 
 
 class OpenAICompatProvider:
     family = "openai_compat"
 
-    def __init__(self, base_url: str, api_key: str, timeout: float = 120.0):
+    def __init__(self, base_url: str, api_key: str, timeout: float | None = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
-        self.timeout = timeout
+        # `timeout` stays a plain float for callers that override the read window;
+        # connect/write/pool keep their own (short) budgets either way.
+        self.read_timeout = float(timeout) if timeout else read_timeout()
+        self._timeout = httpx.Timeout(
+            self.read_timeout,
+            connect=min(DEFAULT_CONNECT_TIMEOUT, self.read_timeout),
+            write=WRITE_TIMEOUT,
+            pool=POOL_TIMEOUT,
+        )
+        self.timeout = self.read_timeout  # kept for existing readers/tests
         self.parse_stats: dict[str, int] = {
             "calls": 0,
             "first_try": 0,
@@ -49,6 +83,10 @@ class OpenAICompatProvider:
             "retry": 0,  # alias of repaired, kept for existing callers
             "failed": 0,
             "schema_fallbacks": 0,
+            # Transport retries actually consumed, so a run can report "12 calls,
+            # 5 of them retries" instead of hiding a flaky endpoint in latency.
+            "transport_retries": 0,
+            "read_timeouts": 0,
         }
         self.failure_log: list[ParseFailure] = []
         self._use_json_schema = True
@@ -60,7 +98,7 @@ class OpenAICompatProvider:
         return headers
 
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers=self._headers(),
@@ -70,29 +108,62 @@ class OpenAICompatProvider:
             return response.json()
 
     async def _post_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Retry transient failures instead of dropping the whole review unit."""
+        """Retry transient failures instead of dropping the whole review unit.
+
+        Read timeouts get one retry, not two: the endpoint already had a full
+        window and produced nothing, so a third window mostly buys latency and a
+        second billed input. 429/5xx and connection errors keep three attempts,
+        and an explicit ``Retry-After`` is honoured (capped) instead of the
+        additive backoff — a provider asking for 20 s and getting 0.5 s just
+        fails again.
+        """
         delay = 0.5
+        attempts_allowed = _MAX_TRANSPORT_ATTEMPTS
         last_error: Exception | None = None
-        for attempt in range(_MAX_TRANSPORT_ATTEMPTS):
+        attempt = 0
+        while attempt < attempts_allowed:
+            attempt += 1
             try:
                 return await self._post(payload)
+            except httpx.ReadTimeout as exc:
+                # Subclass of TransportError: must be handled before the generic
+                # transport branch, or it would consume all three attempts.
+                last_error = exc
+                self.parse_stats["read_timeouts"] += 1
+                attempts_allowed = _MAX_READ_TIMEOUT_ATTEMPTS
+                if attempt >= attempts_allowed:
+                    raise
+                self.parse_stats["transport_retries"] += 1
+                await asyncio.sleep(2.0)
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code
                 if status == 429 or 500 <= status < 600:
                     last_error = exc
-                    if attempt < _MAX_TRANSPORT_ATTEMPTS - 1:
-                        await asyncio.sleep(delay)
+                    if attempt < attempts_allowed:
+                        self.parse_stats["transport_retries"] += 1
+                        await asyncio.sleep(self._retry_after(exc, delay))
                         delay *= 3
                         continue
                 raise
             except httpx.TransportError as exc:
                 last_error = exc
-                if attempt < _MAX_TRANSPORT_ATTEMPTS - 1:
+                if attempt < attempts_allowed:
+                    self.parse_stats["transport_retries"] += 1
                     await asyncio.sleep(delay)
                     delay *= 3
                     continue
                 raise
         raise last_error or RuntimeError("request failed without a recorded error")
+
+    @staticmethod
+    def _retry_after(exc: httpx.HTTPStatusError, fallback: float) -> float:
+        """Honour Retry-After when the provider bothers to send one, but cap it."""
+        raw = (exc.response.headers.get("retry-after") or "").strip()
+        try:
+            seconds = float(raw)
+        except ValueError:
+            return fallback
+        return min(max(seconds, 0.0), RETRY_AFTER_CAP)
 
     def _build_payload(
         self,

@@ -67,3 +67,81 @@ async def test_parse_hard_failure_logged(monkeypatch, tmp_path):
     out = tmp_path / "failures.json"
     provider.dump_failures(out)
     assert len(json.loads(out.read_text())) == 2
+
+
+def test_read_window_is_sized_for_full_length_answers(monkeypatch):
+    """120 s could never finish an 8192-token answer at ~50 tok/s.
+
+    The single 120 s timeout silently capped answer *length*: a legitimate long
+    review needed ~165 s of generation and was cut off mid-stream every time,
+    which surfaced as ``ReadTimeout`` on every other unit.
+    """
+    monkeypatch.delenv("CODEERRATUM_READ_TIMEOUT", raising=False)
+    provider = OpenAICompatProvider("http://localhost", "key")
+    assert provider.read_timeout >= 240
+    # A dead endpoint must fail fast instead of looking like a slow model.
+    assert provider._timeout.connect == 10.0
+    assert provider._timeout.read >= 240
+
+    monkeypatch.setenv("CODEERRATUM_READ_TIMEOUT", "420")
+    assert OpenAICompatProvider("http://localhost", "k").read_timeout == 420
+
+
+@pytest.mark.asyncio
+async def test_read_timeout_gets_one_retry_not_three(monkeypatch):
+    """A read timeout means the endpoint went quiet, not that it was flaky.
+
+    Three full windows would be 12 minutes per unit and a second billed input;
+    the policy is one retry, then let the unit fail with an explanation.
+    """
+    import httpx
+
+    provider = OpenAICompatProvider("http://localhost", "key", timeout=5)
+    calls = {"n": 0}
+    sleeps: list[float] = []
+
+    async def fake_post(payload):
+        calls["n"] += 1
+        raise httpx.ReadTimeout("timed out")
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+    monkeypatch.setattr("codeerratum.providers.openai_compat.asyncio.sleep", fake_sleep)
+
+    with pytest.raises(httpx.ReadTimeout):
+        await provider._post_with_retry({"model": "m"})
+
+    assert calls["n"] == 2, "read timeout must not burn the full three attempts"
+    assert provider.parse_stats["read_timeouts"] == 2
+    assert sleeps and sleeps[0] >= 2.0
+
+
+def test_retry_after_is_honoured_and_capped():
+    """A provider asking for 20 s and getting 0.5 s just fails again."""
+    import httpx
+
+    provider_cls = OpenAICompatProvider
+    request = httpx.Request("POST", "http://x")
+    honoured = httpx.Response(429, headers={"retry-after": "7"}, request=request)
+    assert (
+        provider_cls._retry_after(
+            httpx.HTTPStatusError("429", request=request, response=honoured), 0.5
+        )
+        == 7.0
+    )
+    capped = httpx.Response(429, headers={"retry-after": "600"}, request=request)
+    assert (
+        provider_cls._retry_after(
+            httpx.HTTPStatusError("429", request=request, response=capped), 0.5
+        )
+        == 30.0
+    )
+    silent = httpx.Response(429, request=request)
+    assert (
+        provider_cls._retry_after(
+            httpx.HTTPStatusError("429", request=request, response=silent), 0.5
+        )
+        == 0.5
+    )

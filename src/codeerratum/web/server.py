@@ -22,13 +22,16 @@ import sys
 import threading
 import time
 import traceback
+import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .. import HOMEPAGE, __version__
 from ..config_store import KEEP_SECRET
 from ..config_store import load as load_config
+from ..config_store import load_user as load_user_config
 from ..config_store import public as public_config
 from ..config_store import save as save_config_file
 from ..i18n import set_lang, t
@@ -36,11 +39,13 @@ from ..ingest import DiffError, normalize_pathspec
 from ..model_check import probe_model
 from ..models import ModelRegistry
 from ..pipeline import (
+    AUTO_UNIT_BUDGET,
     HOUSE_RULES_FILE,
     STATE_DIR,
     NoChanges,
     PipelineError,
     ReviewCancelled,
+    available_models,
     execute_review,
     find_repo_root,
     resolve_house_rules,
@@ -48,7 +53,33 @@ from ..pipeline import (
 )
 from ..review import MAX_HOUSE_RULES_CHARS
 
-STATIC_DIR = Path(__file__).parent / "static"
+
+def _locate_static() -> Path:
+    """Find the bundled HTML assets, frozen or from source.
+
+    A frozen build (PyInstaller/py2app) has no ``__file__``-relative package
+    directory: data files live under ``sys._MEIPASS`` and the layout depends on
+    how ``--add-data`` was written. Probe the plausible roots and keep the
+    in-tree path as the last resort so a mistake surfaces as a clear 404 rather
+    than an import-time crash.
+    """
+    candidates: list[Path] = []
+    bundle = getattr(sys, "_MEIPASS", None)
+    if bundle:
+        candidates += [
+            Path(bundle) / "codeerratum" / "web" / "static",
+            Path(bundle) / "web" / "static",
+            Path(bundle) / "static",
+        ]
+    here = Path(__file__).parent / "static"
+    candidates.append(here)
+    for candidate in candidates:
+        if (candidate / "index.html").is_file():
+            return candidate
+    return here
+
+
+STATIC_DIR = _locate_static()
 RUN_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 FINDING_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 LOOPBACK_HOST_RE = re.compile(r"^(?:127\.0\.0\.1|localhost|\[::1\]|::1)(?::\d+)?$", re.I)
@@ -56,7 +87,7 @@ MAX_BODY = 2 * 1024 * 1024
 # Cost guard for the web UI. The CLI trusts --max-units as given; the UI is a
 # click-away surface (and reachable by any local page script), so an absurd value
 # is clamped here — and the clamp is announced instead of applied silently.
-MAX_UNITS_CAP = 50
+MAX_UNITS_CAP = 500
 
 
 def _write_sse(wfile, kind: str, payload: dict) -> bool:
@@ -75,15 +106,19 @@ def _write_sse(wfile, kind: str, payload: dict) -> bool:
 
 
 def resolve_git_root(candidate: Path) -> Path:
-    """Validate a directory and snap it to its git root, with a clear message."""
+    """Validate a directory and snap it to its git root when it has one.
+
+    A folder without ``.git`` is accepted: the review pipeline can snapshot the
+    working tree, so requiring a repository first would refuse exactly the case
+    people hit most — a project that has not been committed yet. When the folder
+    does live inside a repository the root still wins, so one entry covers the
+    whole work tree.
+    """
     if not candidate.exists():
         raise PipelineError(t("server.path_missing", path=candidate))
     if not candidate.is_dir():
         raise PipelineError(t("server.not_a_folder", path=candidate))
-    root = find_repo_root(candidate)
-    if not (root / ".git").exists():
-        raise PipelineError(t("server.not_a_repo", path=root))
-    return root
+    return find_repo_root(candidate)
 
 
 def pick_folder(title: str | None = None) -> Path:
@@ -133,6 +168,44 @@ def _safe_error(exc: Exception, repo_root: Path) -> str:
     return text[:400] or type(exc).__name__
 
 
+def open_homepage() -> dict:
+    """Open the project's GitHub page in the user's real browser.
+
+    The URL is a constant, never a request field: this is a "show the project
+    page" button, not a generic ``open any URL`` primitive a same-origin page
+    could aim anywhere. It lives outside ``WebApp`` because it must work with
+    zero projects open — the shell that shows About may not hold a repository,
+    and the desktop webview cannot hand a URL to the real browser by itself.
+    """
+    try:
+        opened = webbrowser.open(HOMEPAGE, new=2)
+    except OSError as exc:  # no browser association at all
+        raise PipelineError(t("server.open_failed", error=exc)) from exc
+    if not opened:
+        raise PipelineError(t("server.open_failed", error="no browser found"))
+    return {"opened": True, "url": HOMEPAGE}
+
+
+def _finding_brief(finding, model_id: str) -> dict:
+    """The three fields a live list needs — not the whole work order.
+
+    The full record (detail, snippet, suggestion, verdicts) is fetched with the
+    finished run. Streaming it per unit would push kilobytes through the stream
+    for a line of text the panel is going to truncate anyway.
+    """
+    anchor = finding.anchors[0] if finding.anchors else None
+    return {
+        "id": finding.id,
+        "model": model_id,
+        "severity": str(finding.severity),
+        "lens": str(finding.lens),
+        "claim": finding.claim,
+        "file": anchor.file if anchor else "",
+        "line": anchor.start_line if anchor else 0,
+        "unit_id": finding.unit_id,
+    }
+
+
 class WebApp:
     """Request-independent application logic, so tests can call it without sockets."""
 
@@ -165,6 +238,10 @@ class WebApp:
             "params": {},
             "tokens": None,
             "error": "",
+            # Findings seen so far, so a tab that joined mid-run (refresh, second
+            # tab, run started elsewhere) can draw them too — the SSE connection
+            # only reaches the request that opened it.
+            "findings": [],
         }
 
     @property
@@ -173,10 +250,32 @@ class WebApp:
 
     # ---- reads -----------------------------------------------------------
 
+    def models(self) -> dict:
+        """The model picker's source of truth: ids, families, and seat counts.
+
+        Keys never leave the process; the picker only needs names to choose from.
+        """
+        if self.registry is not None:
+            rows = [
+                {"id": m.model_id, "family": m.resolved_family(), "measured_n": m.measured_n}
+                for m in self.registry.models
+            ]
+        else:
+            rows = available_models(self.repo_root)
+        return {
+            "models": rows,
+            "seats": {"quick": 1, "dual": 2, "committee": 3},
+            "auto_budget": AUTO_UNIT_BUDGET,
+        }
+
     def meta(self) -> dict:
         info = public_config(self.repo_root)
         info["repo"] = str(self.repo_root)
         info["state_dir"] = str(self.repo_root / STATE_DIR)
+        # Cheap and fixed: the tab header shows the version, and the About dialog
+        # reads the address from here rather than hard-coding it a third time.
+        info["version"] = __version__
+        info["homepage"] = HOMEPAGE
         info["house_rules"] = self.house_rules_info()
         # /api/meta keeps its original two-field chip shape; the settings
         # drawer reads /api/config for the rest (endpoints, keys masked, ...).
@@ -350,7 +449,9 @@ class WebApp:
         if api_key == KEEP_SECRET:
             api_key = ""
             try:
-                saved = load_config(self.repo_root)
+                # A project with no file of its own is reading the default
+                # roster; the masked placeholder the user sees came from there.
+                saved = load_config(self.repo_root) or load_user_config()
             except (OSError, ValueError):
                 saved = None
             if saved:
@@ -485,6 +586,7 @@ class WebApp:
         with self._state_lock:
             state = dict(self._review_state)
             state["messages"] = list(state["messages"])
+            state["findings"] = list(state.get("findings") or [])
             state["params"] = dict(state["params"])
             if state["started_at"] is not None and state["finished_at"] is None:
                 state["elapsed_s"] = round(time.monotonic() - state["started_at"], 1)
@@ -513,6 +615,23 @@ class WebApp:
             if len(msgs) > 400:
                 del msgs[:-400]
 
+    def _note_finding(self, brief: dict) -> None:
+        """Remember a live finding for everyone who is not on the SSE connection.
+
+        The same finding is reported once per model, so the identity is
+        ``id + model``; two models reporting the same claim are two rows until the
+        run's clustering merges them, which is exactly what the panel claims.
+        """
+        key = (brief.get("id"), brief.get("model"))
+        with self._state_lock:
+            items = self._review_state.setdefault("findings", [])
+            if any((i.get("id"), i.get("model")) == key for i in items):
+                return
+            items.append(brief)
+            # Bound it like the message log: a committee run can produce hundreds.
+            if len(items) > 500:
+                del items[:-500]
+
     # ---- writes ----------------------------------------------------------
 
     def prepare_review(self, payload: dict) -> dict:
@@ -523,18 +642,31 @@ class WebApp:
         """
         diff_spec = str(payload.get("diff") or "HEAD~1").strip() or "HEAD~1"
         mode = str(payload.get("mode") or "").strip().lower()
-        try:
-            requested_units = int(payload.get("max_units", 10))
-        except (TypeError, ValueError) as exc:
-            raise PipelineError("max_units must be an integer") from exc
-        # Clamp, but never silently: an out-of-range value becomes a notice that
-        # rides the progress log (and the JSON summary) so the user knows the run
-        # covers fewer (or more) units than the number they typed.
+        raw_units = payload.get("max_units", "auto")
+        auto_units = raw_units is None or (
+            isinstance(raw_units, str) and raw_units.strip().lower() in ("", "auto")
+        )
+        # None → let the pipeline decide from the unit count. 0 → every unit.
+        # A positive number is a budget and stays clamped, but never silently: the
+        # clamp rides the progress log so the run explains how many units it covers.
+        max_units: int | None = None
         notices: list[str] = []
-        max_units = max(1, min(requested_units, MAX_UNITS_CAP))
-        if max_units != requested_units:
-            key = "server.units_clamped_low" if requested_units < 1 else "server.units_clamped_high"
-            notices.append(t(key, asked=requested_units, used=max_units, cap=MAX_UNITS_CAP))
+        if not auto_units:
+            try:
+                requested_units = int(raw_units)
+            except (TypeError, ValueError) as exc:
+                raise PipelineError("max_units must be an integer, 0 or 'auto'") from exc
+            if requested_units == 0:
+                max_units = 0
+            else:
+                max_units = max(1, min(requested_units, MAX_UNITS_CAP))
+                if max_units != requested_units:
+                    key = (
+                        "server.units_clamped_low"
+                        if requested_units < 1
+                        else "server.units_clamped_high"
+                    )
+                    notices.append(t(key, asked=requested_units, used=max_units, cap=MAX_UNITS_CAP))
         author = str(payload.get("author_model") or "").strip() or None
         # Validate here so a bad path is a 400 with a clear message, not a
         # git failure buried in a 500 after the review has started.
@@ -544,6 +676,19 @@ class WebApp:
             raise PipelineError(str(exc)) from exc
         # Rules arrive as text, never as a path: the UI must not be able to read
         # arbitrary local files, even though it only listens on loopback.
+        raw_models = payload.get("models")
+        models: list[str] = []
+        if isinstance(raw_models, list):
+            models = [str(m).strip() for m in raw_models if str(m).strip()]
+        elif isinstance(raw_models, str) and raw_models.strip():
+            models = [part.strip() for part in raw_models.split(",") if part.strip()]
+        if models:
+            # A typo in a model id must be a 400 at submit time, not a 500 once the
+            # diff has been read and the run has started.
+            known = {row["id"] for row in self.models()["models"]}
+            unknown = [mid for mid in models if mid not in known]
+            if unknown:
+                raise PipelineError(t("server.unknown_models", ids=", ".join(unknown)))
         house_rules = str(payload.get("house_rules") or "")
         if len(house_rules) > MAX_HOUSE_RULES_CHARS * 2:
             raise PipelineError(
@@ -563,6 +708,7 @@ class WebApp:
             "diff_spec": diff_spec,
             "mode": mode,
             "max_units": max_units,
+            "models": models,
             "author": author,
             "out": out,
             "house_rules": house_rules,
@@ -587,12 +733,16 @@ class WebApp:
                     "params": {
                         "diff": (params or {}).get("diff_spec", ""),
                         "mode": (params or {}).get("mode", ""),
-                        "max_units": (params or {}).get("max_units", 10),
+                        "max_units": (params or {}).get("max_units"),
                         "paths": (params or {}).get("paths", ""),
                         "notices": (params or {}).get("notices", []),
                     },
                     "tokens": None,
                     "error": "",
+                    # A new run starts with an empty live list; otherwise the
+                    # panel would show the previous run's findings as if they
+                    # had just been found.
+                    "findings": [],
                 }
             )
 
@@ -646,7 +796,7 @@ class WebApp:
                 raise ReviewCancelled(t("server.queue_cancelled"))
         self._set_status("running")
 
-    def execute_prepared(self, params: dict, progress=None) -> dict:
+    def execute_prepared(self, params: dict, progress=None, on_findings=None) -> dict:
         def both(msg: str) -> None:
             self._note_progress(msg)
             if progress:
@@ -663,6 +813,7 @@ class WebApp:
                 diff_spec=params["diff_spec"],
                 mode=params["mode"],
                 max_units=params["max_units"],
+                models=params.get("models") or None,
                 author_model=params["author"],
                 out=params["out"],
                 registry=self.registry,
@@ -670,6 +821,7 @@ class WebApp:
                 paths=params["paths"],
                 progress=both,
                 should_stop=self._stop_event.is_set,
+                on_findings=on_findings,
             )
         finally:
             if self._gate is not None:
@@ -735,13 +887,16 @@ def _split_zones(findings: list[dict], mode: str) -> dict:
     return zones
 
 
-def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
+def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
     """Build the request handler.
 
     ``hub`` is optional: without it this is the classic single-repo UI (``/`` is
     the review page and ``/api/*`` targets ``app``). With it, ``/`` becomes the
     project shell and every project lives under ``/p/<slug>/`` while the legacy
     root API keeps pointing at the first project for compatibility.
+
+    ``app`` is optional only in hub mode, for a launcher that starts with no
+    repository selected yet.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -789,12 +944,35 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
             self.send_header("X-Content-Type-Options", "nosniff")
             self.end_headers()
 
-        def _sse_event(self, kind: str, payload: dict) -> None:
-            """Write one SSE frame; flush so the browser sees progress immediately."""
+        def _sse_event(self, kind: str, payload: dict) -> bool:
+            """Write one SSE frame; flush so the browser sees progress immediately.
+
+            False means the reader is gone — callers that emit many frames (one
+            per finding) can stop early instead of paying for failed writes.
+            """
             if self._client_gone:
-                return
+                return False
             if not _write_sse(self.wfile, kind, payload):
                 self._client_gone = True
+                return False
+            return True
+
+        def _stream_findings(self, app: WebApp, _unit, findings, model_id: str) -> None:
+            """Push each unit's findings as they are parsed, not at end of run.
+
+            One frame per finding keeps the tab's list truthful while the run is
+            still on: a 40-unit review takes minutes, and a log that only ever
+            says "unit 12/53" gives no reason to believe anything is being found.
+
+            Every brief is recorded on the app before it is sent, and recording
+            continues after the client goes away — the run outlives the tab, and
+            whoever picks it up through /api/review/status must still see them.
+            """
+            for finding in findings:
+                brief = _finding_brief(finding, model_id)
+                app._note_finding(brief)
+                if not self._client_gone:
+                    self._sse_event("finding", {"finding": brief})
 
         def _stream_review(self, app: WebApp, body: dict) -> None:
             """Run a review while pushing progress frames over one SSE response.
@@ -822,7 +1000,11 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
                     self._client_gone = True
                 self._sse_event("log", {"message": t("server.stream_connected")})
                 summary = app.execute_prepared(
-                    params, progress=lambda msg: self._sse_event("log", {"message": msg})
+                    params,
+                    progress=lambda msg: self._sse_event("log", {"message": msg}),
+                    on_findings=lambda unit, found, model: self._stream_findings(
+                        app, unit, found, model
+                    ),
                 )
                 final_run_id = summary.get("run_id")
                 final_tokens = summary.get("tokens")
@@ -898,6 +1080,10 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
                 return app, path, None
             m = re.fullmatch(r"/p/([0-9a-f]{6,12})(/.*)?", path)
             if not m:
+                # Desktop/bare launch: the hub may legitimately hold zero
+                # projects, and then there is no root app to answer /api/*.
+                if app is None:
+                    raise LookupError(t("server.no_project"))
                 return app, path, None
             slug = m.group(1)
             inner = (m.group(2) or "/").rstrip("/") or "/"
@@ -961,6 +1147,8 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, app.meta())
                 elif path == "/api/config":
                     self._json(HTTPStatus.OK, app.config_info())
+                elif path == "/api/models":
+                    self._json(HTTPStatus.OK, app.models())
                 elif path == "/api/runs":
                     self._json(HTTPStatus.OK, app.list_runs())
                 elif path == "/api/stats":
@@ -997,6 +1185,10 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
                 return
             try:
                 body = self._body()
+                if path == "/api/open/homepage":
+                    # Project-independent: works from the shell with no repo open.
+                    self._json(HTTPStatus.OK, open_homepage())
+                    return
                 if hub is not None and path.startswith("/api/projects"):
                     self._hub_post(path, body)
                     return
@@ -1053,11 +1245,19 @@ def make_handler(app: WebApp, hub=None) -> type[BaseHTTPRequestHandler]:
 
 
 def make_server(
-    app: WebApp,
+    app: WebApp | None = None,
     host: str = "127.0.0.1",
     port: int = 8765,
     hub=None,
 ) -> ThreadingHTTPServer:
+    """Bind a loopback server. ``port=0`` lets the OS pick — callers read
+    ``server_address[1]`` for the port that was actually granted.
+
+    ``app`` may be None when a hub is given: the desktop launcher starts with an
+    empty project list and lets the shell add repositories.
+    """
+    if app is None and hub is None:
+        raise ValueError("make_server needs either an app or a hub")
     httpd = ThreadingHTTPServer((host, port), make_handler(app, hub))
     httpd.daemon_threads = True
     return httpd

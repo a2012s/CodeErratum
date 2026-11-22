@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import sys
 import threading
 import webbrowser
 from datetime import UTC, datetime
@@ -13,6 +15,7 @@ import typer
 from rich.console import Console
 
 from . import __version__
+from .i18n import t
 from .pipeline import (
     ConfigError,
     DiffFailed,
@@ -64,7 +67,11 @@ def review(
     diff: str = typer.Option("HEAD~1", "--diff", help="Git diff spec, e.g. HEAD~1 or HEAD~3..HEAD"),
     out: Path = typer.Option(Path("erratumReview.md"), "--out", "-o", help="Output markdown path"),
     repo: Path = typer.Option(Path("."), "--repo", help="Repository root"),
-    max_units: int = typer.Option(10, "--max-units", help="Max review units per run (cost guard)"),
+    max_units: int | None = typer.Option(
+        None,
+        "--max-units",
+        help="Units to review. Default: auto (all if small, else 60). 0 = every unit",
+    ),
     mode: str = typer.Option(
         "", "--mode", help="quick|dual|committee (overrides CODEERRATUM_MODE)"
     ),
@@ -142,7 +149,11 @@ def pr(
     max_inline: int = typer.Option(
         5, "--max-inline", help="Inline comments cap (GitHub noise limit)"
     ),
-    max_units: int = typer.Option(10, "--max-units", help="Max review units (cost guard)"),
+    max_units: int | None = typer.Option(
+        None,
+        "--max-units",
+        help="Units to review. Default: auto (all if small, else 60). 0 = every unit",
+    ),
     mode: str = typer.Option("", "--mode", help="quick|dual|committee"),
     rules: Path | None = typer.Option(None, "--rules", help="Project rules file"),
     path: str = typer.Option("", "--path", help="Limit the diff to a git pathspec, e.g. src/api"),
@@ -355,54 +366,175 @@ def mcp(
     raise typer.Exit(serve())
 
 
+def _resolve_repo_or_exit(repo: Path) -> Path:
+    # A plain folder is reviewable now — the snapshot path reads its files — so
+    # only a missing path is fatal here. Which range makes sense for a folder
+    # without history is decided by the pipeline, which can explain itself.
+    if not repo.exists():
+        console.print(f"[red]{t('server.path_missing', path=repo)}[/red]")
+        raise typer.Exit(1)
+    return find_repo_root(repo)
+
+
+def _bind_or_exit(repo_root, host: str, port: int, max_parallel: int):
+    from .web.bootstrap import build
+
+    try:
+        return build(repo_root, host=host, port=port, max_parallel=max_parallel)
+    except OSError as exc:
+        console.print(f"[red]Cannot bind {host}:{port} — {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _url_for(httpd, host: str, print_port: bool) -> str:
+    """Actual bound URL, plus the machine-readable line a shell waits for.
+
+    ``--port 0`` is the desktop case: the launcher cannot know which port was
+    granted, so it reads this line off stdout instead of polling for a listener.
+    """
+    port = httpd.server_address[1]
+    if print_port:
+        print(f"PORT={port}", flush=True)
+    return f"http://{host}:{port}/"
+
+
+def _watch_owner(parent_pid: int, httpd, extra=None) -> None:
+    """Stop when the launcher exits — otherwise a crash leaves a paid review
+    running with nobody to read the result."""
+    if parent_pid <= 0:
+        return
+    from .web.lifecycle import stop_server, watch_parent
+
+    def _orphaned() -> None:
+        print(t("desk.parent_gone"), file=sys.stderr)
+        if extra is not None:
+            extra()  # close the GUI, which owns the main thread
+        if not stop_server(httpd):
+            os._exit(1)  # accept a lost request over an unreachable orphan
+
+    watch_parent(parent_pid, _orphaned)
+
+
+def _on_terminate(httpd, extra=None) -> None:
+    """Make SIGTERM graceful so a shell can close us with a plain kill."""
+    from .web.lifecycle import stop_server
+
+    def _handler(signum, frame) -> None:
+        if extra is not None:
+            extra()
+        stop_server(httpd)
+
+    try:
+        signal.signal(signal.SIGTERM, _handler)
+    except (AttributeError, OSError, ValueError):
+        pass  # not the main thread, or a platform that will not take the handler
+
+
 @app.command()
 def ui(
     repo: Path = typer.Option(Path("."), "--repo", help="Repository root to review"),
-    port: int = typer.Option(8765, "--port", help="Loopback port for the local UI"),
+    port: int = typer.Option(
+        8765, "--port", help="Loopback port for the local UI; 0 lets the OS pick"
+    ),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address (keep it on loopback)"),
     no_browser: bool = typer.Option(False, "--no-browser", help="Do not open a browser tab"),
+    no_repo: bool = typer.Option(
+        False, "--no-repo", help="Start with an empty project list; no repository needed"
+    ),
+    print_port: bool = typer.Option(
+        False, "--print-port", help="Print PORT=<n> on stdout once bound, for a launcher"
+    ),
+    parent_pid: int = typer.Option(
+        0, "--parent-pid", help="Exit when this PID disappears (desktop shells)"
+    ),
     max_parallel: int = typer.Option(
         2, "--max-parallel", help="How many projects may run a review at the same time"
     ),
 ) -> None:
     """Open the local web UI (multi-project tabs, run history, report, accept/reject)."""
-    from .web import ProjectHub, make_server
+    repo_root = None if no_repo else _resolve_repo_or_exit(repo)
+    _hub, httpd, app_ui = _bind_or_exit(repo_root, host, port, max_parallel)
 
-    repo_root = find_repo_root(repo)
-    if not (repo_root / ".git").exists():
-        console.print(f"[red]Error: {repo_root} is not a git repository[/red]")
-        raise typer.Exit(1)
-
-    hub = ProjectHub(
-        state_file=Path.home() / ".codeerratum" / "projects.json",
-        max_parallel=max_parallel,
-    )
-    seed = hub.add(str(repo_root))
-    hub.restore()  # previously added projects come back after a restart
-    app_ui = hub.get(seed["slug"])
-    try:
-        httpd = make_server(app_ui, host=host, port=port, hub=hub)
-    except OSError as exc:
-        console.print(f"[red]Cannot bind {host}:{port} — {exc}[/red]")
-        raise typer.Exit(1) from exc
-
-    url = f"http://{host}:{httpd.server_address[1]}/"
+    url = _url_for(httpd, host, print_port)
     console.print(f"[green]CodeErratum UI[/green] on {url}")
-    console.print(f"Repo: {repo_root}")
-    if not app_ui.meta()["configured"]:
-        console.print(
-            "[yellow]尚未配置模型（CODEERRATUM_BASE_URL / API_KEY / MODEL），"
-            "界面可以看历史记录，但不能发起新审查。[/yellow]"
-        )
-    console.print("[dim]Ctrl+C 停止[/dim]")
+    if repo_root is not None:
+        console.print(f"Repo: {repo_root}")
+    elif app_ui is not None:
+        # --no-repo still restores the saved list; name the project the root API
+        # points at instead of leaving the line out.
+        console.print(f"Repo: {app_ui.repo_root}")
+    else:
+        console.print(f"[dim]{t('server.no_project')}[/dim]")
+    if app_ui is not None and not app_ui.meta()["configured"]:
+        console.print(f"[yellow]{t('cli.models_missing')}[/yellow]")
+    console.print(f"[dim]{t('cli.stop_hint')}[/dim]")
+    _watch_owner(parent_pid, httpd)
+    _on_terminate(httpd)
     if not no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        console.print("\nStopped.")
+        console.print(f"\n{t('cli.stopped')}")
     finally:
         httpd.server_close()
+
+
+@app.command()
+def desktop(
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository to open first"),
+    no_repo: bool = typer.Option(
+        False, "--no-repo", help="Open the project overview with nothing selected yet"
+    ),
+    port: int = typer.Option(0, "--port", help="Loopback port; 0 lets the OS pick"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address (keep it on loopback)"),
+    parent_pid: int = typer.Option(
+        0, "--parent-pid", help="Exit when this PID disappears (launcher watchdog)"
+    ),
+    max_parallel: int = typer.Option(
+        2, "--max-parallel", help="How many projects may run a review at the same time"
+    ),
+    width: int = typer.Option(1280, "--width", help="Window width"),
+    height: int = typer.Option(860, "--height", help="Window height"),
+) -> None:
+    """Open the UI in a native window — same server, system WebView, no browser tab."""
+    from .web.desktop import close_window, launch
+    from .web.lifecycle import defer_signals, stop_server
+
+    repo_root = None if no_repo else _resolve_repo_or_exit(repo)
+    _hub, httpd, app_ui = _bind_or_exit(repo_root, host, port, max_parallel)
+    url = _url_for(httpd, host, False)
+
+    # Closing the window must stop the server, and a stop signal must close the
+    # window — either alone leaves a live half behind. Bound after the server
+    # exists, but before any thread starts, so every thread inherits the mask.
+    def _teardown(_signum: int = 0) -> None:
+        close_window()
+        stop_server(httpd)
+
+    deferred = defer_signals(_teardown)
+
+    console.print(f"[green]CodeErratum[/green] on {url}")
+    if repo_root is not None:
+        console.print(f"Repo: {repo_root}")
+    elif app_ui is not None:
+        console.print(f"Repo: {app_ui.repo_root}")
+    else:
+        console.print(f"[dim]{t('server.no_project')}[/dim]")
+    if app_ui is not None and not app_ui.meta()["configured"]:
+        console.print(f"[yellow]{t('cli.models_missing')}[/yellow]")
+
+    _watch_owner(parent_pid, httpd, extra=close_window)
+    if not deferred:
+        _on_terminate(httpd, extra=close_window)
+    try:
+        launch(httpd, url, t("desk.title"), width=width, height=height)
+    except RuntimeError as exc:
+        # Only the optional GUI extra is allowed to fail with RuntimeError here;
+        # the server and its socket are already released by launch().
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    console.print(f"[dim]{t('desk.closed')}[/dim]")
 
 
 @app.command()

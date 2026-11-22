@@ -169,7 +169,10 @@ def test_default_out_filename_is_erratum_review_md(client, repo):
 def test_empty_diff_is_reported_without_error_status(client, repo):
     subprocess.run(["git", "add", "."], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-qm", "apply"], cwd=repo, check=True)
-    resp = client.post("/api/review", json={"diff": "HEAD"})
+    # HEAD..HEAD rather than HEAD: bare HEAD on a clean tree reviews everything
+    # now, which would try to reach a model. An empty range still answers
+    # "no changes" without failing the request.
+    resp = client.post("/api/review", json={"diff": "HEAD..HEAD"})
     assert resp.status_code == 200
     assert "No changes" in resp.json()["error"]
 
@@ -259,11 +262,16 @@ def test_zone_split_maps_agreement_to_sections():
     assert [f["id"] for f in zones["consensus"]] == ["3", "4"]
 
 
-def test_pipeline_refuses_non_repository(tmp_path):
+def test_pipeline_refuses_an_unknown_revision_in_a_plain_folder(tmp_path):
+    """No repository means no revisions, but it does not mean "nothing to review".
+
+    ``HEAD``-style ranges fall back to a snapshot (covered in test_snapshot.py);
+    an explicit revision cannot, and that is the only remaining refusal.
+    """
     from codeerratum.pipeline import NotARepository, execute_review
 
-    with pytest.raises(NotARepository):
-        execute_review(tmp_path)
+    with pytest.raises(NotARepository, match="WORKTREE"):
+        execute_review(tmp_path, diff_spec="main")
 
 
 # --- configuration read / write -------------------------------------------
@@ -461,12 +469,15 @@ def test_switch_repo_rejects_bad_paths(client, path, fragment):
     assert fragment in resp.json()["error"]
 
 
-def test_switch_repo_requires_git(client):
-    """A plain folder with no .git anywhere above it is refused."""
+def test_switch_repo_accepts_a_plain_folder(client):
+    """A folder with no .git is switchable: the pipeline snapshots it instead.
+
+    Requiring a repository here was the wall behind "my new project is not
+    committed, so I cannot review it at all".
+    """
     with tempfile.TemporaryDirectory() as plain:
         resp = client.post("/api/repo", json={"path": plain})
-    assert resp.status_code == 400
-    assert "不是 git 仓库" in resp.json()["error"]
+    assert resp.status_code == 200, resp.text
 
 
 def test_switch_repo_post_requires_same_origin(client, tmp_path):
@@ -707,6 +718,12 @@ def test_review_stream_pushes_progress_then_done(client):
     assert "log" in kinds
     assert kinds[-1] == "done", kinds
     assert any("审查单元" in e.get("message", "") for e in events if e["type"] == "log")
+    # Findings travel as their own frames, and they arrive before the run ends:
+    # a panel that only learns the total at "done" shows nothing for minutes.
+    assert "finding" in kinds, kinds
+    assert kinds.index("finding") < kinds.index("done")
+    brief = next(e["finding"] for e in events if e["type"] == "finding")
+    assert brief["claim"] and brief["file"] and brief["model"]
     done = events[-1]
     assert done["findings"] == 1
     assert done["run_id"]
@@ -879,7 +896,7 @@ def test_run_review_cancels_inflight_model_calls(monkeypatch, tmp_path):
         model_id = "slow-model"
 
     class Registry:
-        def route(self, mode, author_model=None):
+        def route(self, mode, author_model=None, pinned=None):
             return [Spec()], None
 
     async def slow_review(*_args, **_kwargs):
@@ -980,22 +997,49 @@ def test_stream_handler_survives_closed_tab(client):
     assert "_write_sse" in src
 
 
+def test_models_endpoint_lists_choices_without_keys(client):
+    """The picker needs ids to offer; it must never receive the api_key."""
+    resp = client.get("/api/models")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["seats"] == {"quick": 1, "dual": 2, "committee": 3}
+    assert body["auto_budget"] >= 1
+    assert "gpt-stub" in [row["id"] for row in body["models"]]
+    assert "api_key" not in resp.text and "sk-" not in resp.text
+
+
+def test_unknown_model_selection_is_a_400_before_the_run_starts(client):
+    resp = client.post("/api/review", json={"diff": "HEAD", "models": ["gpt-nope"]})
+    assert resp.status_code == 400
+    assert "gpt-nope" in resp.json()["error"]
+
+
 def test_out_of_range_max_units_is_clamped_with_a_notice(client):
     """Above the cap the run is clamped, and it says so instead of doing it quietly."""
-    params = client.app.prepare_review({"diff": "HEAD", "max_units": 200})
-    assert params["max_units"] == 50
-    assert params["notices"] == ["上限 200 超出范围（最多 50 个审查单元），已按 50 执行"]
+    params = client.app.prepare_review({"diff": "HEAD", "max_units": 5000})
+    assert params["max_units"] == 500
+    assert params["notices"] == ["上限 5000 超出范围（最多 500 个审查单元），已按 500 执行"]
 
-    summary = client.post("/api/review", json={"diff": "HEAD", "max_units": 200}).json()
+    summary = client.post("/api/review", json={"diff": "HEAD", "max_units": 5000}).json()
     assert summary["notices"] == params["notices"]
     # Other tabs read the same notice from the shared status, not just the initiator.
     assert client.get("/api/review/status").json()["params"]["notices"] == params["notices"]
 
 
-def test_max_units_below_one_clamps_to_one(client):
+def test_max_units_zero_means_every_unit(client):
+    """0 is the documented spelling of "no budget", not an out-of-range value.
+
+    Coercing it to 1 (the old behaviour) made the one setting people need for a
+    full sweep impossible to express from the UI.
+    """
     params = client.app.prepare_review({"diff": "HEAD", "max_units": 0})
-    assert params["max_units"] == 1
-    assert "至少 1 个" in params["notices"][0]
+    assert params["max_units"] == 0
+    assert params["notices"] == []
+
+    # A negative number is still nonsense and still gets clamped.
+    negative = client.app.prepare_review({"diff": "HEAD", "max_units": -3})
+    assert negative["max_units"] == 1
+    assert "至少 1 个" in negative["notices"][0]
 
 
 def test_in_range_max_units_carries_no_notice(client):
@@ -1025,7 +1069,7 @@ def test_units_hint_mirrors_the_cap_in_the_page():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert 'id="maxUnitsHint"' in html
     assert "function syncUnitsHint" in html
-    assert "const MAX_UNITS_CAP = 50;" in html
+    assert "const MAX_UNITS_CAP = 500;" in html
     assert ".hint.warn { color: var(--warn)" in html
     assert "max_units: unitsValue()," in html  # 0 must not become 10
 
@@ -1043,13 +1087,15 @@ def test_language_header_switches_repo_errors(client):
 
 
 def test_language_header_switches_run_notices(client):
+    # 5000 is above the 500 cap, so this run produces a clamp notice in whichever
+    # language the tab asked for.
     en = client.post(
-        "/api/review", json={"diff": "HEAD", "max_units": 200}, headers={"X-Lang": "en"}
+        "/api/review", json={"diff": "HEAD", "max_units": 5000}, headers={"X-Lang": "en"}
     )
-    assert "Limit 200" in en.json()["notices"][0]
+    assert "Limit 5000" in en.json()["notices"][0]
 
-    zh = client.post("/api/review", json={"diff": "HEAD", "max_units": 200})
-    assert "已按 50 执行" in zh.json()["notices"][0]
+    zh = client.post("/api/review", json={"diff": "HEAD", "max_units": 5000})
+    assert "已按 500 执行" in zh.json()["notices"][0]
 
 
 def test_language_header_switches_lock_messages(client):
@@ -1071,3 +1117,85 @@ def test_pages_expose_a_language_switch():
         assert "codeerratum.lang" in html, name
         assert "function T(" in html, name
         assert 'value="en">English' in html, name
+
+
+def test_meta_carries_version_and_homepage(client):
+    """The About dialog reads both from /api/meta instead of hard-coding them."""
+    import codeerratum
+
+    data = client.get("/api/meta").json()
+    assert data["version"] == codeerratum.__version__
+    assert data["homepage"] == codeerratum.HOMEPAGE
+    assert data["homepage"].startswith("https://github.com/")
+
+
+def test_open_homepage_uses_the_constant_not_the_request(client, monkeypatch):
+    """A page must not be able to aim this at an arbitrary URL."""
+    import codeerratum.web.server as web_server
+
+    opened: list[str] = []
+    monkeypatch.setattr(
+        web_server.webbrowser, "open", lambda url, new=0: opened.append(url) or True
+    )
+
+    resp = client.post("/api/open/homepage", json={"url": "http://evil.example"})
+    assert resp.status_code == 200
+    assert resp.json()["url"] == web_server.HOMEPAGE
+    assert opened == [web_server.HOMEPAGE]
+
+
+def test_open_homepage_is_same_origin_only(client):
+    resp = client.post("/api/open/homepage", json={}, headers={"Origin": "http://evil.example"})
+    assert resp.status_code == 403
+
+
+def test_about_dialog_and_shell_entry_point():
+    """The packaged app's About panel cannot carry a link; these can."""
+    from codeerratum.web.server import STATIC_DIR
+
+    review = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    shell = (STATIC_DIR / "projects.html").read_text(encoding="utf-8")
+    assert 'id="aboutBtn"' in review and 'id="aboutOverlay"' in review
+    assert 'id="aboutUrl"' in review
+    assert 'api("/api/open/homepage"' in review
+    assert 'id="githubBtn"' in shell
+    assert 'api("/api/open/homepage"' in shell
+
+
+def test_status_carries_live_findings_for_tabs_that_joined_mid_run(client):
+    """The SSE connection belongs to the tab that opened it.
+
+    A refresh, a second tab, or a run started elsewhere polls
+    /api/review/status — and used to get progress lines with no findings at all
+    until the report was written, which is exactly "右边没显示出来".
+    """
+    with client.stream("POST", "/api/review/stream", json={"diff": "HEAD"}) as resp:
+        for _ in resp.iter_text():
+            pass
+    status = client.get("/api/review/status").json()
+    findings = status.get("findings") or []
+    assert findings, "tracking tabs need the findings, not just the log"
+    assert findings[0]["claim"] and findings[0]["file"]
+
+
+def test_new_run_starts_with_an_empty_live_list(client):
+    """Otherwise the panel shows the previous run's findings as freshly found."""
+    app = client.app
+    app._note_finding({"id": "abc", "model": "m", "claim": "stale"})
+    assert app.review_status()["findings"]
+
+    app.acquire_review_lock({})
+    try:
+        assert app.review_status()["findings"] == []
+    finally:
+        app.release_review_lock()
+
+
+def test_live_findings_are_deduped_per_model(client):
+    """Same claim from two models is two rows, the same model twice is one."""
+    app = client.app
+    brief = {"id": "f1", "model": "m1", "claim": "c"}
+    app._note_finding(brief)
+    app._note_finding(dict(brief))
+    app._note_finding({"id": "f1", "model": "m2", "claim": "c"})
+    assert len(app.review_status()["findings"]) == 2

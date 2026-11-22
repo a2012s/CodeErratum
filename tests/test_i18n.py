@@ -128,7 +128,7 @@ def test_pipeline_notice_english():
     ("key", "kwargs", "expected"),
     [
         ("orch.unit_start", {"model": "m", "idx": 1, "total": 2, "file": "a.py"}, "[m] review"),
-        ("server.units_clamped_high", {"asked": 200, "used": 50, "cap": 50}, "Limit 200"),
+        ("server.units_clamped_high", {"asked": 5000, "used": 500, "cap": 500}, "Limit 5000"),
         ("model.timeout", {"seconds": 10}, "timed out"),
     ],
 )

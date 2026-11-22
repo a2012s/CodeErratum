@@ -19,10 +19,21 @@ from pathlib import Path
 
 from .config import Config
 from .config_store import CONFIG_REL
-from .config_store import load as load_saved_config
+from .config_store import effective as effective_config
 from .i18n import t
-from .ingest import DiffError, get_commit, get_diff, new_side_sources, split_diff
+from .ingest import (
+    DiffError,
+    get_commit,
+    get_diff,
+    is_git_repo,
+    is_head_family,
+    new_side_sources,
+    snapshot_diff,
+    split_diff,
+    wants_full_worktree,
+)
 from .models import FindingCollection, ModelRegistry, ReviewUnit
+from .repo_ignore import ensure_state_dir_ignored
 from .report import render_markdown
 from .review import (
     MAX_HOUSE_RULES_CHARS,
@@ -151,6 +162,9 @@ def find_repo_root(path: Path) -> Path:
 
 
 def store_for(repo_root: Path) -> ReviewStore:
+    # Review history and run artefacts land in the reviewed repository, so the
+    # exclude rule is set up here too — not only when the UI saves a config.
+    ensure_state_dir_ignored(repo_root)
     return ReviewStore(repo_root / STATE_DIR / "feedback.db")
 
 
@@ -164,6 +178,50 @@ def prioritize(units: list[ReviewUnit]) -> list[ReviewUnit]:
             -u.changed_lines,
         ),
     )
+
+
+# "Decide for me" covers the ordinary case: a normal diff is a few dozen units,
+# and stopping at 60 keeps a mechanical full sweep from quietly turning into a
+# 600-call bill. Anything bigger is a deliberate "review everything" (0), and the
+# notice says which one happened.
+AUTO_UNIT_BUDGET = 60
+
+
+def available_models(repo_root: Path) -> list[dict]:
+    """Configured models, for the UI picker. Ids only — never the api_key.
+
+    Same precedence as a review (saved config wins over the environment), so the
+    list the user picks from is exactly the list a run would use.
+    """
+    # Same resolution as a real run (project file → user default → env), so the
+    # picker never offers a different roster than the one a run would use.
+    try:
+        config, _source = effective_config(repo_root)
+    except ValueError:
+        return []
+    if config is None:
+        return []
+    return [
+        {
+            "id": m.model_id,
+            "family": m.resolved_family(),
+            "measured_n": m.measured_n,
+        }
+        for m in config.registry.models
+    ]
+
+
+def _unit_budget(max_units: int | None, total: int) -> tuple[int, str]:
+    """Resolve the unit budget and say how it was decided.
+
+    ``None`` → auto, ``0`` → everything, positive → literal. The second element
+    only picks which notice to print, so the report can explain itself.
+    """
+    if max_units is None:
+        return min(total, AUTO_UNIT_BUDGET), "auto"
+    if max_units <= 0:
+        return total, "all"
+    return max_units, "fixed"
 
 
 def resolve_mode(mode: str, config: Config) -> str:
@@ -265,14 +323,16 @@ def execute_review(
     repo_root: Path,
     diff_spec: str = "HEAD~1",
     mode: str = "",
-    max_units: int = 10,
+    max_units: int | None = None,
     author_model: str | None = None,
+    models: list[str] | None = None,
     out: Path | None = None,
     registry: ModelRegistry | None = None,
     progress: Callable[[str], None] | None = None,
     house_rules: str = "",
     paths: str = "",
     should_stop: Callable[[], bool] | None = None,
+    on_findings: Callable[[object, list, str], None] | None = None,
 ) -> ReviewOutcome:
     """Run the whole pipeline and persist artifacts + feedback rows.
 
@@ -283,6 +343,15 @@ def execute_review(
     staging changes first. ``should_stop`` is polled by the orchestrator; when
     it turns true, in-flight model calls are cancelled and ReviewCancelled is
     raised instead of persisting a partial report.
+
+    ``max_units=None`` means "decide for me" (see ``AUTO_UNIT_BUDGET``), ``0``
+    means every unit, and a positive number is taken literally. ``models`` pins
+    the review seats by model id instead of letting the scorer choose.
+
+    ``on_findings(unit, findings, model_id)`` fires per reviewed unit, before the
+    run is over, so a caller can stream results as they land. Nothing downstream
+    depends on it: the report is still built from the full collection, so a
+    listener that returns early only affects what the caller chose to display.
     """
     emit = progress or (lambda _msg: None)
 
@@ -294,21 +363,24 @@ def execute_review(
         emit(message)
 
     repo_root = repo_root.resolve()
-    if not (repo_root / ".git").exists():
-        raise NotARepository(f"{repo_root} is not a git repository")
+    # Decide what the range means before loading models: a folder that cannot
+    # support the requested revision is a cheaper and clearer failure than
+    # "missing API key", and it is the question the user actually asked.
+    run_spec = diff_spec.strip() or "HEAD"
+    snapshot = wants_full_worktree(run_spec, repo_root)
+    explicit_snapshot = run_spec.strip().upper() in ("WORKTREE", "ALL")
+    if not snapshot and not is_git_repo(repo_root):
+        raise NotARepository(t("server.not_a_repo", path=repo_root, spec=run_spec))
 
     # A saved config (written by the UI) wins over env so an edit sticks across
     # process restarts. A corrupt file is an error, never a silent fallback —
     # otherwise the user thinks the old model set is still in force.
     try:
-        config = load_saved_config(repo_root)
+        config, _source = effective_config(repo_root)
     except (OSError, ValueError) as exc:
         raise ConfigError(f"cannot read {CONFIG_REL}: {exc}") from exc
     if config is None:
-        try:
-            config = Config.from_env()
-        except ValueError as exc:
-            raise ConfigError(str(exc)) from exc
+        raise ConfigError(str(t("config.no_models", path=CONFIG_REL)))
     if registry is not None:
         config = Config(
             base_url=config.base_url,
@@ -318,14 +390,46 @@ def execute_review(
             mode=config.mode,
         )
     run_mode = resolve_mode(mode, config)
+    if models:
+        # Validate here, before the diff is read: a typo in a model id should be a
+        # clear error at submit time, not a 500 ten minutes into a run.
+        try:
+            config.registry.route(run_mode, pinned=models)  # type: ignore[arg-type]
+        except ValueError as exc:
+            raise ConfigError(t("pipeline.models_invalid", detail=str(exc))) from exc
 
-    run_spec = diff_spec.strip() or "HEAD"
+    # A project that was never committed has no revision to diff against, but it
+    # does have code. Snapshot the working tree instead of failing at "no
+    # changes" — the user asked to review the code, not to see git's opinion.
     try:
-        diff_text = get_diff(run_spec, repo_root, paths=paths)
+        diff_text = (
+            snapshot_diff(repo_root, paths=paths)
+            if snapshot
+            else get_diff(run_spec, repo_root, paths=paths)
+        )
     except DiffError as exc:
         raise DiffFailed(str(exc)) from exc
+
+    # Everything committed, working tree clean: HEAD is legitimately empty, but
+    # the code is still on disk and the user just pressed Review. Answering
+    # "Nothing to review" is technically correct and completely useless — it was
+    # the third time this exact wall came back. Fall back to the whole worktree
+    # and say so, instead of making the user discover the scope switch.
+    scope_fallback = False
+    if not diff_text.strip() and not snapshot and is_head_family(run_spec):
+        try:
+            whole_tree = snapshot_diff(repo_root, paths=paths)
+        except DiffError:
+            whole_tree = ""
+        if whole_tree.strip():
+            diff_text = whole_tree
+            snapshot = True
+            scope_fallback = True
+
     if not diff_text.strip():
-        raise NoChanges("No changes in diff. Nothing to review.")
+        raise NoChanges(
+            t("pipeline.snapshot_empty") if snapshot else "No changes in diff. Nothing to review."
+        )
 
     run_id = uuid.uuid4().hex[:12]
     run_dir = repo_root / STATE_DIR / "runs" / run_id
@@ -333,39 +437,71 @@ def execute_review(
     (run_dir / "input.diff").write_text(diff_text, encoding="utf-8")
 
     notices: list[str] = []
+    announced: set[str] = set()
+
+    def announce(message: str) -> None:
+        """Record a notice and show it once, now.
+
+        The list is replayed after the split for anything ``split_diff`` added
+        (skipped files); without this bookkeeping every early notice printed
+        twice — once live and once in the replay.
+        """
+        notices.append(message)
+        announced.add(message)
+        say(message)
+
+    if scope_fallback:
+        announce(t("pipeline.scope_fallback", spec=run_spec))
+    elif snapshot:
+        announce(
+            t(
+                "pipeline.worktree_requested"
+                if explicit_snapshot
+                else "pipeline.no_commits_snapshot"
+            )
+        )
     if paths.strip():
-        notices.append(t("pipeline.path_scope", paths=paths.strip()))
-        say(notices[-1])
+        announce(t("pipeline.path_scope", paths=paths.strip()))
     rules = resolve_house_rules(house_rules, repo_root)
     if rules.truncated:
-        notices.append(t("pipeline.rules_truncated", limit=MAX_HOUSE_RULES_CHARS))
-        say(notices[-1])
+        announce(t("pipeline.rules_truncated", limit=MAX_HOUSE_RULES_CHARS))
     if rules:
         say(f"Project rules: {rules.source} ({rules.chars} chars, sha {rules.sha})")
     # Read the new side from the diff revision, not the working tree: reviewing
     # main...feature while on main used to slice feature's line numbers into
     # main's text, and the anchor hash happily confirmed the wrong region.
-    try:
-        sources = new_side_sources(run_spec, repo_root, paths=paths)
-    except DiffError as exc:
-        sources = {}
-        notices.append(t("pipeline.snapshot_fallback", error=exc))
-        say(notices[-1])
+    if snapshot:
+        sources: dict[str, str] = {}  # the new side *is* the working tree
+    else:
+        try:
+            sources = new_side_sources(run_spec, repo_root, paths=paths)
+        except DiffError as exc:
+            sources = {}
+            announce(t("pipeline.snapshot_fallback", error=exc))
     units = split_diff(diff_text, repo_root, notices=notices, sources=sources)
     (run_dir / "units.json").write_text(
         json.dumps([u.model_dump() for u in units], ensure_ascii=False, indent=2), encoding="utf-8"
     )
     say(f"Split diff into {len(units)} review unit(s)")
     for note in notices:
-        say(note)
+        if note not in announced:
+            say(note)
     if not units:
         raise NoChanges("No reviewable units found.")
 
-    selected = prioritize(units)[:max_units]
-    if len(units) > max_units:
-        capped = t("pipeline.units_capped", kept=max_units, total=len(units))
-        notices.append(capped)
-        say(capped)
+    # A budget of 0 means "no budget": every unit the diff produced. The cap is
+    # there to stop a typo from launching a thousand calls, not to hide work
+    # the user asked for — 332 units of 332 is a legitimate request.
+    budget, how = _unit_budget(max_units, len(units))
+    selected = prioritize(units)[:budget]
+    if len(units) > budget:
+        announce(
+            t(
+                "pipeline.units_auto" if how == "auto" else "pipeline.units_capped",
+                kept=budget,
+                total=len(units),
+            )
+        )
 
     say(f"Mode: {run_mode} | models: {len(config.registry.models)}")
 
@@ -395,6 +531,8 @@ def execute_review(
                 sources=sources,
                 progress=say,
                 should_stop=should_stop,
+                pinned=models,
+                on_findings=on_findings,
             )
         )
         say(t("pipeline.report_writing"))
@@ -404,6 +542,15 @@ def execute_review(
     failed = [r for r in collection.rejected if r.get("reason") == "provider_error"]
     if failed:
         notices.append(t("pipeline.units_failed", n=len(failed)))
+        # A count alone leaves the reader guessing between "my key is wrong" and
+        # "the endpoint was slow". The hints are already human sentences.
+        reasons: list[str] = []
+        for r in failed:
+            hint = r.get("error_hint") or r.get("error") or ""
+            if hint and hint not in reasons:
+                reasons.append(hint)
+        if reasons:
+            notices.append(t("pipeline.units_failed_reason", reasons=" · ".join(reasons[:3])))
 
     # A high abstain rate is a signal about *our* context, not about the code: the
     # falsifier keeps saying it cannot decide. Surfacing it turns a silent

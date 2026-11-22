@@ -101,6 +101,7 @@ class ModelRegistry(BaseModel):
         mode: Mode,
         author_model: str | None = None,
         lenses: list[str] | None = None,
+        pinned: list[str] | None = None,
     ) -> tuple[list[ModelSpec], ModelSpec | None]:
         """Pick reviewers and an optional falsifier.
 
@@ -109,13 +110,34 @@ class ModelRegistry(BaseModel):
         falsifier is a model not used as a reviewer (a spare model when one is
         available), else None — callers then fall back to cross-falsification
         between the reviewers themselves.
+
+        ``pinned`` names the seats explicitly, in order. The user picked those
+        models because they know which one writes the reviews they trust — the
+        scorer is only a default, never an override.
         """
         lenses = lenses or []
+        n = {"quick": 1, "dual": 2, "committee": 3}[mode]
+        if pinned:
+            by_id = {m.model_id: m for m in self.models}
+            unknown = [mid for mid in pinned if mid not in by_id]
+            if unknown:
+                raise ValueError(f"unknown model id(s): {', '.join(unknown)}")
+            # Dedupe while keeping the user's order, and never seat one model twice.
+            reviewers = [by_id[mid] for mid in dict.fromkeys(pinned)]
+            if len(reviewers) != n:
+                raise ValueError(
+                    f"mode '{mode}' takes {n} model(s) but {len(reviewers)} were selected"
+                )
+            taken = {m.model_id for m in reviewers}
+            falsifier = (
+                next((m for m in self.models if m.model_id not in taken), None) if n >= 2 else None
+            )
+            return reviewers, falsifier
+
         pool = self.available(author_model)
         if not pool:
             raise ValueError("no eligible review model (all excluded as author?)")
 
-        n = {"quick": 1, "dual": 2, "committee": 3}[mode]
         ranked = sorted(pool, key=lambda m: -m.score(lenses))
 
         reviewers = ranked[:n]

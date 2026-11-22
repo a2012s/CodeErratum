@@ -44,8 +44,11 @@ def test_add_dedupes_and_validates(tmp_path):
 
     with pytest.raises(PipelineError, match="绝对路径"):
         hub.add("relative/path")
-    with pytest.raises(PipelineError, match="不是 git 仓库"):
-        hub.add(str(tmp_path))
+    # A folder with no .git is a valid project now: the pipeline snapshots the
+    # working tree, so refusing it here would block the "brand new project" case.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert hub.add(str(plain))["name"] == "plain"
 
 
 def test_hub_persists_and_restores_existing_paths(tmp_path):
@@ -59,7 +62,9 @@ def test_hub_persists_and_restores_existing_paths(tmp_path):
     assert state.exists()
 
     # beta disappears from disk: restore keeps alpha and skips the dead path.
-    (beta / ".git").rename(beta / ".git-away")
+    # The check is "does the folder still exist", not "does it still have .git",
+    # because a folder without history is reviewable too.
+    beta.rename(tmp_path / "beta-gone")
     restored = ProjectHub(state_file=state)
     assert restored.restore() == 1
     rows = restored.snapshot()["projects"]
@@ -140,10 +145,12 @@ def test_add_and_remove_project_over_http(hub_client, tmp_path):
     assert removed.status_code == 200
     assert slug not in {p["slug"] for p in hub_client.get("/api/projects").json()["projects"]}
 
-    # Non-git path is a real 400, not a 500.
-    bad = hub_client.post("/api/projects", json={"path": str(tmp_path)})
-    assert bad.status_code == 400
-    assert "不是 git 仓库" in bad.json()["error"]
+    # A folder without .git is accepted: the review snapshots the working tree.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    loose = hub_client.post("/api/projects", json={"path": str(plain)})
+    assert loose.status_code == 200, loose.text
+    assert loose.json()["name"] == "plain"
 
 
 def test_hub_survives_duplicate_add(hub_client):

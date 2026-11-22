@@ -42,6 +42,8 @@
   button.primary:hover:not(:disabled) { color: #fff; filter: brightness(1.05); }
   button:disabled { opacity: .55; cursor: not-allowed; }
   button.danger:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+  /* Reads as a link in the top bar, not as a second primary action. */
+  button.ghost { background: transparent; color: var(--muted); }
 
   header.top {
     display: flex; align-items: center; gap: 12px; padding: 9px 16px;
@@ -65,6 +67,11 @@
   @keyframes pulse { 50% { opacity: .35; } }
 
   main { flex: 1; min-height: 0; position: relative; }
+  /* Without this the wrapper has no height at all, `height: 100%` on the iframe
+     has nothing to resolve against, and every project falls back to the browser
+     default 150px — a sliver of UI over a black void. */
+  #frames { height: 100%; }
+  #frames[hidden] { display: none; }
   iframe.project { border: 0; width: 100%; height: 100%; display: block; background: var(--bg); }
   iframe.project[hidden] { display: none; }
 
@@ -111,7 +118,12 @@
   .dialog input:focus { outline: 2px solid var(--accent-weak); border-color: var(--accent); }
   .drop-hint { margin-top: 10px; border: 1px dashed var(--border); border-radius: 8px;
     padding: 14px; text-align: center; color: var(--muted); font-size: 12.5px; }
-  #modalMsg { margin-top: 8px; font-size: 12.5px; color: var(--bad); min-height: 17px; }
+  /* pre-line: the "not a git repository" message carries its remedy on extra
+     lines, and a plain div would fold them into one run-on sentence. */
+  #modalMsg {
+    margin-top: 8px; font-size: 12.5px; color: var(--bad); min-height: 17px;
+    white-space: pre-line; overflow-wrap: anywhere; line-height: 1.55;
+  }
   #modalMsg.ok { color: var(--ok); }
   .dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
   .candidates { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; max-height: 190px; overflow-y: auto; }
@@ -124,6 +136,10 @@
   }
   body.dragging.lang-en::after { content: "Drop the folder here to add a project"; }
   #langSel { background: transparent; }
+  /* The shell is meant to be the top document. If something loads "/" inside a
+     tab anyway, drawing another header is what turns one click into a stack of
+     them, so the header is dropped and only the list is shown. */
+  html[data-nested="1"] header.top { display: none; }
 </style>
 </head>
 <body>
@@ -131,6 +147,7 @@
   <div class="brand">CodeErratum <span data-en="· Projects">· 项目</span></div>
   <div id="tabs"></div>
   <button id="overviewBtn" data-en="Overview">总览</button>
+  <button id="githubBtn" class="ghost" title="GitHub · CodeErratum" data-en-title="GitHub · CodeErratum">GitHub</button>
   <select id="langSel" aria-label="界面语言 / Interface language">
     <option value="zh">中文</option>
     <option value="en">English</option>
@@ -145,7 +162,9 @@
     <div class="empty" id="empty" hidden>
       <h2 data-en="No projects yet">还没有项目</h2>
       <p data-en="Press + Add project: paste an absolute path, use the native folder picker, or drag a folder onto this window.">点右上角「+ 添加项目」：粘贴绝对路径、用系统文件夹选择器，或把文件夹直接拖进窗口。</p>
-      <p data-en="Each project keeps its own models and run history; up to 2 projects review at the same time.">每个项目独立配置模型与运行历史，最多 <b id="maxParallel">2</b> 个项目同时审查。</p>
+      <p><span data-en="Each project keeps its own models and run history; up to">每个项目独立配置模型与运行历史，最多</span>
+        <b id="maxParallel">2</b>
+        <span data-en="projects review at the same time.">个项目同时审查。</span></p>
     </div>
   </section>
 </main>
@@ -320,6 +339,9 @@ function renderCards() {
 function activate(slug) {
   ACTIVE = slug;
   $("overview").hidden = slug !== "overview";
+  // Both the tabs and the overview claim the full height of <main>; showing
+  // them together would stack two viewports and grow the shell a scrollbar.
+  $("frames").hidden = slug === "overview";
   for (const [s, frame] of FRAMES) frame.hidden = s !== slug;
   if (slug !== "overview" && !FRAMES.has(slug)) {
     const frame = document.createElement("iframe");
@@ -343,7 +365,10 @@ async function refresh() {
   let data;
   try { data = await api("/api/projects"); } catch { return; }
   PROJECTS = data.projects || [];
-  $("maxParallel").textContent = data.max_parallel ?? 2;
+  // Optional on purpose: this runs before anything is painted, and a missing
+  // node here used to abort the whole boot (empty shell, no tabs, no iframe).
+  const mp = $("maxParallel");
+  if (mp) mp.textContent = data.max_parallel ?? 2;
   if (!ACTIVE) ACTIVE = PROJECTS.length ? PROJECTS[0].slug : "overview";
   if (ACTIVE !== "overview" && !PROJECTS.some((p) => p.slug === ACTIVE)) ACTIVE = "overview";
   renderTabs();
@@ -389,6 +414,21 @@ $("confirmBtn").onclick = addByPath;
 $("pathInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addByPath(); });
 $("modal").addEventListener("click", (e) => { if (e.target === $("modal")) closeModal(); });
 $("overviewBtn").onclick = () => activate("overview");
+
+// The shell is the desktop entry point (it opens here, not on a project tab), so
+// the repository belongs in its top bar. No dialog here on purpose: the tab page
+// owns the full About panel; this is just the way out to GitHub.
+$("githubBtn").onclick = async () => {
+  const btn = $("githubBtn");
+  btn.disabled = true;
+  try {
+    await api("/api/open/homepage", { method: "POST", body: "{}" });
+  } catch (e) {
+    msg(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+};
 
 $("pickBtn").onclick = async () => {
   $("pickBtn").disabled = true;
@@ -450,14 +490,27 @@ async function resolveDroppedName(name) {
   } catch (err) { msg(err.message); }
 }
 
-// Drops inside a project iframe are forwarded here so the tab keeps its slug.
+// Drops inside a project iframe are forwarded here so the tab keeps its slug;
+// the tab's "项目总览" button arrives the same way instead of navigating the
+// frame to "/" (which would stack one shell inside another on every click).
 window.addEventListener("message", (e) => {
   if (e.origin !== location.origin) return;
   const data = e.data;
-  if (data && data.type === "ce:add-project" && data.name) resolveDroppedName(data.name);
+  if (!data) return;
+  if (data.type === "ce:add-project" && data.name) resolveDroppedName(data.name);
+  if (data.type === "ce:overview") activate("overview");
 });
 
 // ---- boot --------------------------------------------------------------
+// Guard: this page is the shell and belongs at the top. If it ever runs inside
+// a frame (a tab that navigated itself to "/"), show the list quietly and tell
+// the window above to do the same, instead of nesting shell inside shell.
+const NESTED = Boolean(window.parent && window.parent !== window);
+if (NESTED) {
+  try { window.top.postMessage({ type: "ce:overview" }, location.origin); } catch { /* cross-origin */ }
+  document.documentElement.dataset.nested = "1";
+}
+
 $("langSel").value = LANG;
 $("langSel").onchange = (e) => saveLang(e.target.value);
 applyLang();
@@ -468,6 +521,10 @@ applyLang();
     const slug = hash.slice(2);
     if (PROJECTS.some((p) => p.slug === slug)) activate(slug);
     else activate(PROJECTS.length ? PROJECTS[0].slug : "overview");
+  } else if (hash === "overview" || NESTED) {
+    // An explicit "show me the list" must win over the single-project shortcut
+    // below, otherwise 项目总览 bounces straight back into the only project.
+    activate("overview");
   } else {
     activate(PROJECTS.length === 1 ? PROJECTS[0].slug : "overview");
   }

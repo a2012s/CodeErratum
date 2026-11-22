@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -40,6 +41,23 @@ HOUSE_RULES_FOOTER = "</house_rules>"
 EXCERPT_PAD = 6
 MAX_EXCERPT_LINES = 240
 ENCLOSING_TRIM = 40
+
+# The prompt allows up to 10 findings, each carrying a verbatim snippet, a claim
+# and a suggestion. 4096 truncated that answer on a real project, and truncation
+# is not a cheap failure: the provider doubles the budget and re-sends, so every
+# unit paid two long calls (measured: 82 s then 150 s+) instead of one. A budget
+# that fits is strictly cheaper than a halving that does not.
+REVIEW_MAX_TOKENS = 8192
+
+
+def review_max_tokens() -> int:
+    """Output budget per unit, overridable for endpoints with a hard cap."""
+    raw = os.environ.get("CODEERRATUM_REVIEW_MAX_TOKENS", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return REVIEW_MAX_TOKENS
+    return value if value > 0 else REVIEW_MAX_TOKENS
 
 
 def sanitize_house_rules(text: str) -> str:
@@ -350,6 +368,7 @@ async def review_unit(
         ),
         schema=LLMReview,
         temperature=0.0,
+        max_tokens=review_max_tokens(),
     )
     parsed = completion.parsed
     if not isinstance(parsed, LLMReview):

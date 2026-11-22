@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from ..i18n import t
 from ..models import Hunk, ReviewUnit
+from ..repo_ignore import STATE_DIR as STATE_DIR_NAME
+
+# The empty tree as a diff base: `git diff <this>` reports every tracked file as
+# an addition. It is the only way to review a codebase that was copied in without
+# history (a fresh `git init` has no HEAD to diff against). Staged files only — an
+# untracked file never enters `git diff`, whatever the base is.
+EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 DIFF_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+)$")
 HUNK_HEADER = re.compile(
@@ -68,13 +77,150 @@ def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or f"git diff {spec} failed"
-        if "ambiguous argument" in detail and spec.startswith("HEAD~"):
-            # A repo with one commit has no HEAD~1. The raw git message is
-            # English and suggests an unrelated fix (--), which leaves users
-            # stuck; say what to type instead and keep the original for copying.
-            detail = t("git.diff_unresolvable", spec=spec, detail=detail)
+        if "ambiguous argument" in detail:
+            if not has_commits(repo_root):
+                # A copied-in codebase that was `git init`ed but never committed:
+                # HEAD does not exist at all, so both the fix and the vocabulary
+                # of "one commit" are wrong. Name the empty-tree recipe instead.
+                detail = t("git.no_commits", tree=EMPTY_TREE_SHA1, spec=spec, detail=detail)
+            elif spec.startswith("HEAD~"):
+                # A repo with one commit has no HEAD~1. The raw git message is
+                # English and suggests an unrelated fix (--), which leaves users
+                # stuck; say what to type instead and keep the original for copying.
+                detail = t("git.diff_unresolvable", spec=spec, detail=detail)
         raise DiffError(detail)
     return result.stdout
+
+
+def has_commits(repo_root: Path) -> bool:
+    """Whether HEAD resolves to an actual commit.
+
+    ``git init`` writes a HEAD that points at an unborn branch: the ref exists,
+    ``git rev-parse HEAD`` still fails. The distinction decides which remedy to
+    print, so it is checked rather than guessed from the spec.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def is_git_repo(repo_root: Path) -> bool:
+    """True when ``git`` can find a repository for this directory.
+
+    Asks git rather than testing ``.git``: a subdirectory of a repository has no
+    ``.git`` of its own but is still inside one.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-dir"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def wants_full_worktree(spec: str, repo_root: Path) -> bool:
+    """Whether a commit-relative spec can only mean "review everything".
+
+    A repository with zero commits has no HEAD, no HEAD~1 and no HEAD^, so a
+    spec spelled from those cannot describe anything else. Neither does a plain
+    folder with no repository at all. Refusing outright ("ambiguous argument",
+    "not a git repository") is technically right and practically useless: the
+    code is sitting there and the user asked to review it. Also accepts the
+    explicit aliases WORKTREE / ALL, which work with or without history.
+    """
+    upper = spec.strip().upper()
+    if upper in ("WORKTREE", "ALL"):
+        return True
+    head_ref = upper.split("...")[0].split("..")[0]
+    if not (head_ref == "HEAD" or head_ref.startswith(("HEAD~", "HEAD^"))):
+        return False
+    if not is_git_repo(repo_root):
+        return True
+    return not has_commits(repo_root)
+
+
+def is_head_family(spec: str) -> bool:
+    """A spec that names one commit-relative point, never an explicit range.
+
+    ``HEAD~1..HEAD`` and ``main...feature`` say "these commits and no others",
+    so an empty diff there is a real answer. Bare ``HEAD`` / ``HEAD~1`` do not:
+    when they resolve to nothing the only reason is that everything is already
+    committed, and the code the user wants read is still in the working tree.
+    """
+    s = spec.strip()
+    if ".." in s:
+        return False
+    upper = s.upper()
+    return upper == "HEAD" or upper.startswith(("HEAD~", "HEAD^"))
+
+
+# A first review of an unversioned tree walks the whole folder; anything past
+# this is almost certainly a missing .gitignore (.venv, node_modules, build).
+SNAPSHOT_TIMEOUT_S = 180
+
+
+def snapshot_diff(repo_root: Path, paths: str = "") -> str:
+    """Every file that would be committed, as an addition diff.
+
+    Built inside a throwaway git directory (``GIT_DIR`` in a temp dir, work tree
+    pointing at the real folder), so the user's repository is untouched: no
+    ``git init``, no index write, no blobs in their object database. Their
+    ``.gitignore`` still decides what counts as source, which is the whole point
+    — dumping ``.venv`` and ``node_modules`` into a review would be worse than
+    refusing.
+
+    ``.codeerratum/`` is excluded by pathspec on top of that: it holds
+    ``config.json`` with API keys, and on a repo whose ignore rule lives in
+    ``.git/info/exclude`` (not read here, because GIT_DIR is a temp dir) it would
+    otherwise be reviewed and echoed back through a model.
+    """
+    pathspec = normalize_pathspec(paths)
+    exclude = ":!" + STATE_DIR_NAME
+    with tempfile.TemporaryDirectory(prefix="codeerratum-snapshot-") as tmp:
+        env = {
+            **os.environ,
+            "GIT_DIR": str(Path(tmp) / "git"),
+            "GIT_WORK_TREE": str(repo_root),
+            # A leaked GIT_INDEX_FILE would point the throwaway repo at the
+            # user's real index and stage their files for real.
+            "GIT_INDEX_FILE": str(Path(tmp) / "index"),
+        }
+
+        def git(*args: str) -> subprocess.CompletedProcess[str]:
+            try:
+                return subprocess.run(
+                    ["git", *args],
+                    cwd=repo_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    check=False,
+                    timeout=SNAPSHOT_TIMEOUT_S,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise DiffError(t("git.snapshot_timeout", seconds=SNAPSHOT_TIMEOUT_S)) from exc
+
+        init = git("init", "-q", "--template=")
+        if init.returncode != 0:
+            raise DiffError(init.stderr.strip() or "git init failed for the snapshot")
+
+        targets = [*pathspec.split(), exclude] if pathspec else [".", exclude]
+        added = git("add", "-A", "--", *targets)
+        if added.returncode != 0:
+            raise DiffError(added.stderr.strip() or "git add failed for the snapshot")
+
+        diff = git("diff", "--cached", "--no-color", "--unified=3", EMPTY_TREE_SHA1)
+        if diff.returncode != 0:
+            raise DiffError(diff.stderr.strip() or "git diff failed for the snapshot")
+        return diff.stdout
 
 
 def get_commit(repo_root: Path) -> str:

@@ -64,7 +64,21 @@ MESSAGES: dict[str, tuple[str, str]] = {
     # ---- server: local paths and the native folder picker ----
     "server.path_missing": ("路径不存在：{path}", "Path does not exist: {path}"),
     "server.not_a_folder": ("不是文件夹：{path}", "Not a folder: {path}"),
-    "server.not_a_repo": ("不是 git 仓库：{path}", "Not a git repository: {path}"),
+    # Not just "no": the fix has to travel with the refusal, or the reader is left
+    # with a dead end. Reviews come from `git diff`, so a plain folder has no
+    # changes to read at all; the two lines below are the whole remedy.
+    "server.not_a_repo": (
+        "目录不是 git 仓库，也没有 {spec} 可以对比：{path}\n"
+        "\n"
+        "· 要审整个目录的代码，把审查范围填 WORKTREE（界面里点「全部代码」），不需要 git init\n"
+        "· 想按 diff 审查，就先在该目录 git init && git add -A（不必 commit），再填 HEAD",
+        "Not a git repository, and {spec} does not exist in it: {path}\n"
+        "\n"
+        "· To review the whole folder, set the range to WORKTREE (the “Whole tree” button) — "
+        "no git init needed\n"
+        "· To review a diff instead, run git init && git add -A there (no commit needed), "
+        "then use HEAD",
+    ),
     "server.picker_title": ("选择要审查的 git 仓库", "Choose a git repository to review"),
     "server.picker_no_zenity": (
         "本系统未安装 zenity，无法弹出文件夹选择器；请粘贴路径",
@@ -107,7 +121,16 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "server.dropped_name_invalid": ("拖入的文件夹名无效", "That dropped folder name is unusable"),
     "server.open_unknown": ("系统返回失败", "the system reported no detail"),
+    # ---- server: no project selected (desktop/bare launch) ----
+    "server.no_project": (
+        "还没有添加项目：先在总览页添加一个 git 仓库",
+        "No project yet: add a git repository on the overview page first",
+    ),
     # ---- server: the unit budget ----
+    "server.unknown_models": (
+        "没有配置这些模型：{ids}",
+        "These models are not configured: {ids}",
+    ),
     "server.units_clamped_low": (
         "上限 {asked} 超出范围（至少 1 个审查单元），已按 {used} 执行",
         "Limit {asked} is out of range (at least 1 review unit); running with {used}",
@@ -161,6 +184,27 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "[{model}] 单元 {idx}/{total} 完成（{n} 条发现）",
         "[{model}] unit {idx}/{total} done ({n} findings)",
     ),
+    "orch.err_read_timeout": (
+        "读取超时（{seconds}s 内没有返回任何数据；已重试 1 次）",
+        "read timeout (no data for {seconds}s; retried once)",
+    ),
+    "orch.err_connect": (
+        "连接失败（端点无响应，已重试）",
+        "connection failed (endpoint unreachable, retried)",
+    ),
+    "orch.err_auth": (
+        "鉴权失败（HTTP {status}），检查 API key 与 base_url",
+        "auth failed (HTTP {status}); check the API key and base_url",
+    ),
+    "orch.err_rate_limited": (
+        "被限流（HTTP 429，已按 Retry-After 退避重试）",
+        "rate limited (HTTP 429, retried after Retry-After)",
+    ),
+    "orch.err_server": (
+        "服务端错误（HTTP {status}，已重试）",
+        "server error (HTTP {status}, retried)",
+    ),
+    "orch.err_transport": ("网络异常（{kind}）", "network error ({kind})"),
     "orch.start": (
         "启动 {models} 个审查模型并行评审 {units} 个单元",
         "Starting {models} review models over {units} units in parallel",
@@ -195,7 +239,58 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "(which needs at least two commits).\n\n"
         "git said:\n{detail}",
     ),
+    "git.no_commits": (
+        "这个仓库还没有任何提交，所以 {spec} 不存在（HEAD 指向一个空分支）。\n\n"
+        "两条路，选一条：\n"
+        "1. 先提交一次，再审查这次的提交：\n"
+        '   git add -A && git commit -m "baseline"\n'
+        "   然后把审查范围填成 HEAD（或 HEAD~1 审上一个提交）。\n"
+        "2. 不想提交，直接审全部已暂存代码：\n"
+        "   把审查范围填成 {tree}\n"
+        "   （空树。每个 git add 过的文件都算“新增”，未 add 的文件不进 diff。）\n\n"
+        "git 原始错误：\n{detail}",
+        "This repository has no commits yet, so {spec} does not exist "
+        "(HEAD points at an unborn branch).\n\n"
+        "Pick one:\n"
+        "1. Commit once, then review that commit:\n"
+        '   git add -A && git commit -m "baseline"\n'
+        "   then set the range to HEAD (or HEAD~1 for the previous commit).\n"
+        "2. Review everything staged, without committing:\n"
+        "   set the range to {tree}\n"
+        "   (the empty tree: every `git add`ed file counts as an addition; "
+        "files you never added stay out of the diff.)\n\n"
+        "git said:\n{detail}",
+    ),
+    "git.snapshot_timeout": (
+        "扫描整个工作区超过 {seconds} 秒，已中止。多半是缺少 .gitignore，"
+        ".venv / node_modules / dist 被逐个读入了；补上忽略规则再重试。",
+        "Scanning the working tree took longer than {seconds}s and was aborted. The "
+        "project probably has no .gitignore, so .venv / node_modules / dist were "
+        "being walked; add one and retry.",
+    ),
     # ---- pipeline notices ----
+    "pipeline.no_commits_snapshot": (
+        "仓库还没有提交，已改为审查全部工作区文件（遵循 .gitignore，跳过 .codeerratum）",
+        "No commits yet, so the whole working tree is reviewed instead "
+        "(honouring .gitignore, skipping .codeerratum)",
+    ),
+    "pipeline.worktree_requested": (
+        "已按要求审查全部工作区文件（遵循 .gitignore，跳过 .codeerratum）",
+        "Reviewing the whole working tree as requested "
+        "(honouring .gitignore, skipping .codeerratum)",
+    ),
+    "pipeline.snapshot_empty": (
+        "工作区里没有可审查的文件：都被 .gitignore 忽略，或者目录是空的",
+        "Nothing reviewable in the working tree: everything is gitignored, or it is empty",
+    ),
+    "pipeline.scope_fallback": (
+        "{spec} 没有未提交改动（工作区是干净的），已自动改为审查全部代码"
+        "（遵循 .gitignore，跳过 .codeerratum）。只想审某次改动的话，先改几个文件再发起，"
+        "或把范围写成某个提交区间。",
+        "{spec} has no uncommitted changes (the tree is clean), so this run reviews all "
+        "the code instead (honouring .gitignore, skipping .codeerratum). To review only a "
+        "change, edit something first or use a commit range.",
+    ),
     "pipeline.abstain": (
         "证伪轮 {n}/{total} 判为证据不足（>30%），上下文构建可能不足，结论请谨慎采用",
         "Falsification returned insufficient_context for {n}/{total} (over 30%), so "
@@ -214,6 +309,15 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Could not read file contents at the diff revision ({error}); anchors fall back "
         "to the working tree",
     ),
+    "pipeline.units_auto": (
+        "自动选定 {kept}/{total} 个单元（按风险排序）。想全审请把上限设为「全部」。",
+        "Auto-selected {kept} of {total} units (highest risk first). Choose "
+        "\u201ceverything\u201d to review all of them.",
+    ),
+    "pipeline.models_invalid": (
+        "模型选择不合法：{detail}",
+        "Invalid model selection: {detail}",
+    ),
     "pipeline.units_capped": (
         "仅审查 {kept}/{total} 个单元（--max-units 可调整）",
         "Reviewing {kept} of {total} units (raise it with --max-units)",
@@ -224,6 +328,7 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "{n} 个单元调用模型失败，相关文件未被审查",
         "Model calls failed for {n} units; those files were not reviewed",
     ),
+    "pipeline.units_failed_reason": ("失败原因：{reasons}", "Reason: {reasons}"),
     # ---- model probe ----
     "model.timeout": ("连接超时（{seconds:g}s）", "Connection timed out ({seconds:g}s)"),
     "model.unreachable": (
@@ -273,6 +378,26 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "未配置模型：设置环境变量，或在界面里保存配置到 {path}",
         "No models configured: set the environment variables, or save a config to {path} "
         "from the UI",
+    ),
+    # ---- desktop window ----
+    "cli.models_missing": (
+        "尚未配置模型（CODEERRATUM_BASE_URL / API_KEY / MODEL），"
+        "界面可以看历史记录，但不能发起新审查。",
+        "No model configured (CODEERRATUM_BASE_URL / API_KEY / MODEL): history is "
+        "readable, but a new review cannot start.",
+    ),
+    "cli.stop_hint": ("Ctrl+C 停止", "Ctrl+C to stop"),
+    "cli.stopped": ("已停止", "Stopped"),
+    "desk.missing": (
+        "缺少图形组件 pywebview：先执行 uv pip install -e '.[desktop]'，或改用 codeerratum ui",
+        "The pywebview GUI extra is missing: run uv pip install -e '.[desktop]', "
+        "or use codeerratum ui instead",
+    ),
+    "desk.title": ("CodeErratum 代码审查", "CodeErratum"),
+    "desk.closed": ("窗口已关闭，服务停止", "Window closed; server stopped"),
+    "desk.parent_gone": (
+        "启动本服务的进程已退出，服务随之停止",
+        "The process that launched this server exited; stopping",
     ),
 }
 

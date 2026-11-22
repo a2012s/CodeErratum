@@ -43,6 +43,8 @@ python3.11 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```
 
 > Not on PyPI yet — `pip install codeerratum` will not work today. After `uv sync` the command lives in `.venv/bin/`.
+>
+> For the desktop window, add the extra: `uv sync --extra dev --extra desktop` (one dependency, `pywebview`; no Chromium).
 
 ## Configuration
 
@@ -64,7 +66,7 @@ cd /path/to/your-repo
 codeerratum review --diff HEAD~1 -o erratumReview.md
 ```
 
-`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. For local uncommitted work use `--diff HEAD` (staged and unstaged together); brand-new files must be `git add`-ed first, but never committed. Add `--path src/api` to review only that folder's changes (no `git add` needed for tracked files). At most 10 review units per run by default (`--max-units` to change it) — a hard cost gate, not a suggestion. The `erratumReview.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
+`--diff` takes any git revspec: `HEAD~1`, `HEAD~3..HEAD`, `main...feature`, a raw commit sha. For local uncommitted work use `--diff HEAD` (staged and unstaged together); brand-new files must be `git add`-ed first, but never committed. A repository with no commits yet (fresh `git init`, or a codebase copied in without history) has no `HEAD`, so pass the empty tree `4b825dc642cb6eb9a060e54bf8d69288fbee4904` as `--diff` to treat every staged file as an addition — that splits into hundreds of units, so batch it per folder with `--path`. Add `--path src/api` to review only that folder's changes (no `git add` needed for tracked files). The unit count is decided automatically by default (`AUTO_UNIT_BUDGET=60`); `--max-units 0` means every unit, a positive number is taken literally, and the UI caps it at 500. The `erratumReview.md` lands in the root of the reviewed repo; trace artifacts go to `.codeerratum/runs/<run_id>/`.
 
 > Reviewing a revision that is **not checked out** (e.g. `main...feature`): sources, excerpts and anchor checks all read the diff revision's git blob, so no checkout is needed. Only files whose blob is unavailable (e.g. uncommitted working-tree edits) fall back to the working tree; a mismatch there skips the file and is listed in the run's coverage notes.
 
@@ -151,7 +153,7 @@ The docs drawer is the same server, one click away — module map and signature 
 
 Standard library only — no FastAPI, no bundler, no `node_modules`. The install story stays "three environment variables and you're done", and the UI adds what a terminal can't show: the three zones side by side, evidence strength per finding, the falsification trail, and accept/reject buttons that write straight into `feedback.db`.
 
-Pick the diff range, path filter, mode, unit cap and author model in the left panel; the run history below it reopens any past run. The unit cap is clamped to **1–50** in the UI: an inline hint warns as you type, the server clamps the value, and the progress log says exactly what happened — `上限 200 超出范围（最多 50 个审查单元），已按 50 执行` — so a number is never changed behind your back. (The CLI's `--max-units` has no hard cap; the budget there is yours to police.) The header switches between **中文 and English** (Chinese by default); the choice lives in localStorage and survives reloads and restarts. It is not just chrome: the page sends `X-Lang`, so SSE progress lines, errors and status text come back in the same language (the server keeps the language per thread, so two tabs can disagree). The `erratumReview.md` skeleton and notices archived in older runs stay in the language they were generated in. For CLI and MCP runs set `CODEERRATUM_LANG=en`. It binds loopback only, rejects non-loopback Hosts (DNS rebinding), and requires a same-origin `Origin` on every POST, so a random web page cannot trigger a paid review through your browser.
+Pick the diff range, path filter, mode, unit cap and author model in the left panel; the run history below it reopens any past run. The unit cap is a select — *auto*, *every unit*, or a number — and the number is clamped to **1–500** on the server; the progress log says exactly what happened (`上限 900 超出范围（最多 500 个审查单元），已按 500 执行`), so a value is never changed behind your back. `--max-units 0` on the CLI means every unit. The header switches between **中文 and English** (Chinese by default); the choice lives in localStorage and survives reloads and restarts. It is not just chrome: the page sends `X-Lang`, so SSE progress lines, errors and status text come back in the same language (the server keeps the language per thread, so two tabs can disagree). The `erratumReview.md` skeleton and notices archived in older runs stay in the language they were generated in. For CLI and MCP runs set `CODEERRATUM_LANG=en`. It binds loopback only, rejects non-loopback Hosts (DNS rebinding), and requires a same-origin `Origin` on every POST, so a random web page cannot trigger a paid review through your browser.
 
 Pressing **Run review** expands a **live progress log** (SSE): diff splitting, each model's per-unit review, falsification and report writing stream in line by line — no more staring at a spinner while a single model call can take tens of seconds. The progress panel is **sticky** within the sidebar, so scrolling the run history never pushes it out of view; the log is 300px tall by default with a drag handle at its bottom to resize (double-click resets), and the vertical **splitter** between the sidebar and the report lets you widen the log when lines wrap too much. Both sizes persist in localStorage. Log lines are coloured by importance: phases blue, warnings / insufficient context / refuted amber, confirmed and overall completion green, failures and timeouts bold red; routine per-unit lines stay grey. Falsification lines show the full claim instead of a half-cut prefix. The failure reason is retained in `GET /api/review/status` under `error` and shown in every tab (local paths are redacted before sending). Progress rides a same-origin `POST /api/review/stream`; the terminal frame closes the connection. Bad input and lock contention still return real 400/409 responses rather than masquerading as stream errors.
 
@@ -159,20 +161,89 @@ Only one review runs at a time process-wide: pressing **Run review** while one i
 
 When a review finishes, the progress panel reports **token usage**: input / output / cached totals plus per-model call counts and subtotals. The numbers come from the usage already recorded on each model call; the last run's totals are also in `GET /api/review/status` for cost reconciliation.
 
-The header's **Switch repo** button points the running UI at any local git repository. Three ways in: click **Browse local…** to open the native folder picker (running in this local process — a browser page cannot read a directory dialog's absolute path), drag a folder onto the window (matched by name against recent repos and a bounded home-directory search), or paste an absolute path (`~` works). A subdirectory snaps up to the git root; each repo reads its own `.codeerratum/config.json`, so saved model settings follow the target. Switching is refused while a review runs (artifacts are keyed to the repo path), and all three routes require the same same-origin Origin / Host guard. The drawer shows the current repo path; **Open current repo folder** reveals that directory in the OS file manager (Finder / Explorer / xdg-open). It only opens the server-resolved git root — the page cannot supply an arbitrary path — and failures surface in a copyable dialog.
+The header's **Switch repo** button points the running UI at any local git repository. Three ways in: click **Browse local…** to open the native folder picker (running in this local process — a browser page cannot read a directory dialog's absolute path), drag a folder onto the window (matched by name against recent repos and a bounded home-directory search), or paste an absolute path (`~` works). A subdirectory snaps up to the git root; config resolution is project `.codeerratum/config.json` → user default `~/.codeerratum/config.json` → environment, so a newly added project inherits your last saved roster unless it has saved one of its own. Switching is refused while a review runs (artifacts are keyed to the repo path), and all three routes require the same same-origin Origin / Host guard. The drawer shows the current repo path; **Open current repo folder** reveals that directory in the OS file manager (Finder / Explorer / xdg-open). It only opens the server-resolved git root — the page cannot supply an arbitrary path — and failures surface in a copyable dialog.
+
+### Desktop window (optional)
+
+If you would rather not keep a browser tab around, run it as a local window:
+
+```bash
+uv pip install -e '.[desktop]'   # optional pywebview extra; drives the system WebView, no Chromium
+codeerratum desktop --no-repo
+```
+
+`desktop` starts the same server and the same UI; it only hands `http://127.0.0.1:<random port>/` to the system WebView (WKWebView on macOS, WebView2 on Windows, WebKitGTK on Linux). The window has to load that loopback URL directly — `file://` or a custom protocol will not do. The server's same-origin check requires `Origin` to equal the loopback `Host`, so any other origin gets a 403 on every POST and the review button silently does nothing.
+
+`--no-repo` starts with nothing preselected: the window opens on the project overview and restores the list from `~/.codeerratum/projects.json`. A desktop app has no meaningful working directory — launched from an app bundle, the cwd is usually `/` — so requiring a git repo there cannot work.
+
+Closing the window stops the server and releases the port. `--parent-pid <pid>` watches the process that launched us and exits within about two seconds of it disappearing — a crash would otherwise leave an orphan holding a paid review nobody will read. SIGTERM / SIGINT are dequeued by a dedicated `sigwait` thread, so they still close the window when the main thread is stuck inside the platform event loop.
+
+The four launcher-facing flags work with `ui` as well:
+
+| Flag | Purpose |
+|---|---|
+| `--no-repo` | Start with an empty project list; no git repo required |
+| `--port 0` | Let the OS pick a port instead of fighting over 8765 |
+| `--print-port` | Print `PORT=<n>` on stdout once bound |
+| `--parent-pid <pid>` | Exit when that process disappears |
+
+#### Building a double-clickable app
+
+```bash
+uv sync --extra desktop --extra pack
+uv run python packaging/build.py           # produces dist/CodeErratum.app
+uv run python packaging/build.py --clean   # wipe build/ and start over
+```
+
+macOS gets `dist/CodeErratum.app`; Windows and Linux get a `dist/CodeErratum/` folder. It is onedir, not onefile:
+onefile unpacks itself to a temp directory on every launch (a multi-second cold start) and looks like a dropper to
+antivirus. Expect 60–90 MB, most of it the Python runtime rather than this project.
+
+The important step is `--selftest`. `src/codeerratum/prompts/*.md` is read only when a review actually starts, so
+forgetting it in the bundle **does not stop the app from launching** — it fails after someone has spent tokens.
+The build therefore runs the frozen `CodeErratum --selftest`, which checks `static/`, `prompts/` and `webview` inside
+the bundle, and fails the build if any of them is missing.
+
+A double-clicked app has cwd `/`, so the entry point forces `--no-repo` (unless `--repo` is passed explicitly) and
+opens on the project overview. There is no terminal in a windowed build: startup failures go to
+`~/.codeerratum/desktop.log` (rotated at 1 MB) and raise a native alert.
+
+Signing is ad-hoc (`codesign -s -`), enough to run on the machine that built it. Shipping to someone else needs a
+Developer ID plus `notarytool`, or Gatekeeper blocks the first launch. The icon is generated from
+`packaging/icon/icon-1024.png` into `CodeErratum.icns` (Dock) and `CodeErratum.ico` (Explorer/taskbar); both are
+wired into the spec, so replacing the artwork means replacing those two files.
+
+The bundle is **single-architecture**: whichever architecture the Python that built it has (`arm64` or `x86_64` on
+macOS), not universal2. Building for an Intel Mac means building on one, or under a universal2 Python.
+
+#### Windows builds
+
+PyInstaller does not cross-compile: a `.exe` can only be produced on Windows, a `.app` only on macOS.
+
+1. **GitHub Actions** — `.github/workflows/build.yml` runs `windows-latest` and `macos-latest`. *Run workflow*
+   yields `CodeErratum-windows-x64.zip`, which is unpack-and-run (no installer); a `v*` tag attaches both to a
+   draft release.
+2. **Locally on Windows 11** — `uv sync --extra desktop --extra pack` then `uv run python packaging/build.py`;
+   the app lands in `dist\CodeErratum\`, and `CodeErratum.exe` sits at its root.
+
+Two Windows-only traps the spec already handles: pywebview ships `WebView2Loader.dll` and
+`Microsoft.Web.WebView2.Core.dll` inside its own package and loads them by path, so
+`collect_data_files("webview")` is required (without it the icon flashes and no window appears); and `--selftest`
+imports `webview.platforms.edgechromium`, because `import webview` succeeds even when pythonnet/.NET is missing.
+Win11 includes the WebView2 runtime; Win10 may need it installed once.
 
 ### Multiple projects (tabs)
 
 `/` is now a project shell: one tab ("便签") per project, each embedding the full single-project UI, plus an **Overview** that lays every project's status, current progress and token usage out as cards.
 
 - **Add** by absolute path, the native folder picker, or by dropping a folder anywhere in the window (a drop inside a project tab is forwarded to the shell). A subdirectory snaps up to its git root.
-- **Isolation**: each project keeps its own `.codeerratum/config.json`, `feedback.db`, run archive and review lock; `/p/<slug>/api/*` only touches that project, while root `/api/*` still points at the first one for compatibility.
+- **Isolation**: each project keeps its own `.codeerratum/config.json`, `feedback.db`, run archive and review lock (a project that never saved one reads the user-level default roster); `/p/<slug>/api/*` only touches that project, while root `/api/*` still points at the first one for compatibility.
 - **Persistence**: the list lives in `~/.codeerratum/projects.json` and is restored on restart; paths that no longer exist are skipped silently. Removing a project only removes the entry, never disk data.
 - **Concurrency**: at most 2 projects run a review at once by default (`--max-parallel`), because every project already fans out to N models — unbounded parallelism hits rate limits instead of finishing faster. Extra projects show **排队中** and can be cancelled from the card or the tab.
 - **Disconnects**: closing or reloading any tab never aborts a review; it finishes server-side and the tab or overview picks the result up.
 - Inside a project tab the **Switch repo** button becomes **Project overview**: the tab is pinned to one slug, so switching repos there would desync the two.
 
-The header's **Config** button shows the active mode and model endpoints and lets you edit them. Saving writes `.codeerratum/config.json` (mode 0600), which takes precedence over environment variables and survives a restart — the CLI reads the same file. API keys are never echoed to the browser; leave the key field blank to keep the stored value.
+The header's **Config** button shows the active mode and model endpoints and lets you edit them. Saving writes the project's `.codeerratum/config.json` (mode 0600) and, unless you untick the box, also refreshes the user-level `~/.codeerratum/config.json` (file 0600, directory 0700) so newly added projects inherit the roster. Both layers take precedence over environment variables and survive a restart — the CLI and MCP read the same chain, and the drawer says which file answered. API keys are never echoed to the browser; leave the key field blank to keep the stored value.
 
 Each model row has a **Check** button (plus **Check all**): it sends one minimal chat request (`max_tokens=1`, no retry, 10s timeout) to verify the endpoint is reachable, the key is accepted, and the model id resolves. A green tick shows the latency; a red cross explains why (401/403 auth, 404 endpoint/id, 429 rate limit, timeout). Editing any field clears the previous result. Checks are read-only, never echo the key, and require the same same-origin guard.
 

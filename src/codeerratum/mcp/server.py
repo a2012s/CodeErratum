@@ -57,9 +57,12 @@ TOOLS: list[dict] = [
                 },
                 "max_units": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 50,
-                    "description": "Cost guard. Default 10.",
+                    "minimum": 0,
+                    "maximum": 500,
+                    "description": (
+                        "Units to review. Omit for auto (every unit when the diff is "
+                        "small, else the 60 highest-risk). Pass 0 for every unit."
+                    ),
                 },
                 "house_rules": {
                     "type": "string",
@@ -139,7 +142,9 @@ def _tool_review_diff(args: dict) -> dict:
             _root(args),
             diff_spec=str(args.get("diff") or "HEAD~1"),
             mode=str(args.get("mode") or ""),
-            max_units=int(args.get("max_units") or 10),
+            # `args.get("max_units") or 10` would turn an explicit 0 into 10 —
+            # and 0 is the documented way to say "review everything".
+            max_units=(int(args["max_units"]) if args.get("max_units") is not None else 10),
             house_rules=str(args.get("house_rules") or ""),
         )
     except NoChanges as exc:

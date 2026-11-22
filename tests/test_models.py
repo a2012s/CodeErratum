@@ -83,3 +83,42 @@ def test_review_unit_id_stable():
     b = ReviewUnit.make_id("a.py", "foo", [h])
     assert a == b
     assert len(a) == 16
+
+
+def _registry(**extra):
+    from codeerratum.models.registry import ModelRegistry
+
+    rows = [
+        {"model_id": "qwen-a", "base_url": "http://x/v1", "api_key": "k"},
+        {"model_id": "qwen-b", "base_url": "http://x/v1", "api_key": "k"},
+        {"model_id": "ds4.1", "base_url": "http://y/v1", "api_key": "k"},
+    ]
+    return ModelRegistry.model_validate({"models": rows, **extra})
+
+
+def test_route_uses_the_pinned_model_for_a_single_seat():
+    """quick + pinned is how "review with my ds4.1" is expressed."""
+    reviewers, falsifier = _registry().route("quick", pinned=["ds4.1"])
+    assert [m.model_id for m in reviewers] == ["ds4.1"]
+    assert falsifier is None  # quick has no falsification round
+
+
+def test_route_keeps_the_user_order_and_picks_a_spare_falsifier():
+    reviewers, falsifier = _registry().route("dual", pinned=["ds4.1", "qwen-a"])
+    assert [m.model_id for m in reviewers] == ["ds4.1", "qwen-a"]
+    assert falsifier is not None and falsifier.model_id == "qwen-b"
+
+
+def test_route_refuses_an_unknown_model_id():
+    with pytest.raises(ValueError, match="unknown model id"):
+        _registry().route("quick", pinned=["gpt-nope"])
+
+
+def test_route_refuses_a_seat_count_that_does_not_match_the_mode():
+    with pytest.raises(ValueError, match="takes 1 model"):
+        _registry().route("quick", pinned=["qwen-a", "qwen-b"])
+
+
+def test_route_never_seats_the_same_model_twice():
+    with pytest.raises(ValueError, match="takes 2 model"):
+        _registry().route("dual", pinned=["qwen-a", "qwen-a"])

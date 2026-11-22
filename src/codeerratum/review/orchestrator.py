@@ -10,8 +10,12 @@ Backward compatible: mode='quick' delegates to the single-model review_unit path
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
+
+import httpx
 
 from ..context import build_context
 from ..evidence import collect_static, known_facts_block
@@ -30,6 +34,57 @@ class ReviewCancelled(Exception):
 def _one_line(text: str) -> str:
     """Keep a full claim intact but flatten embedded newlines into one log frame."""
     return " ".join(text.split())
+
+
+def _failure_text(exc: Exception, provider: Provider) -> str:
+    """Turn a transport exception into something a log line can explain.
+
+    ``ReadTimeout`` on its own answers none of the questions a user actually has
+    ("did it hang? is my key wrong? did it retry?"). These strings name the
+    window that expired and point at the fix.
+    """
+    if isinstance(exc, httpx.ReadTimeout):
+        seconds = getattr(provider, "read_timeout", 0) or 0
+        return t("orch.err_read_timeout", seconds=f"{seconds:.0f}")
+    if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+        return t("orch.err_connect")
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        if status in (401, 403):
+            return t("orch.err_auth", status=status)
+        if status == 429:
+            return t("orch.err_rate_limited")
+        if 500 <= status < 600:
+            return t("orch.err_server", status=status)
+        # 4xx other than auth/rate-limit: the status code is the whole message,
+        # and it is identical in both languages by design.
+        return f"HTTP {status}"
+    if isinstance(exc, httpx.TransportError):
+        return t("orch.err_transport", kind=type(exc).__name__)
+    return type(exc).__name__
+
+
+UNIT_CONCURRENCY_ENV = "CODEERRATUM_UNIT_CONCURRENCY"
+DEFAULT_UNIT_CONCURRENCY = 4
+
+
+def unit_concurrency() -> int:
+    """How many model calls may be in flight at once, per model.
+
+    One review unit is 60–120 s of generation and the calls are pure I/O wait, so
+    running them one after another turned a 44-unit review into an hour of wall
+    time for exactly the same tokens. The ceiling is not about local CPU: it is
+    there to stay under a provider's rate limit. Override with
+    ``CODEERRATUM_UNIT_CONCURRENCY`` (set 1 for a strictly serial run).
+    """
+    raw = os.environ.get(UNIT_CONCURRENCY_ENV, "").strip()
+    if not raw:
+        return DEFAULT_UNIT_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_UNIT_CONCURRENCY
+    return value if value > 0 else DEFAULT_UNIT_CONCURRENCY
 
 
 def _make_provider(spec: ModelSpec) -> OpenAICompatProvider:
@@ -58,72 +113,108 @@ async def _review_with(
     house_rules: str = "",
     sources: dict[str, str] | None = None,
     progress: Callable[[str], None] | None = None,
+    on_findings: Callable[[ReviewUnit, list[Finding], str], None] | None = None,
 ) -> tuple[dict[str, list[Finding]], list[dict], list[dict], list[dict]]:
-    """Run one model over all units. Returns its findings + rejected + call stats + diags."""
+    """Run one model over all units, a bounded number at a time.
+
+    Returns its findings + rejected + call stats + diags. Completion order is not
+    unit order once the gate is wider than one, so the "done" counter is a
+    progress count rather than an index.
+
+    ``on_findings`` is called per unit, as soon as that unit's findings are
+    parsed — the UI streams them while the run is still going instead of staring
+    at "unit 12/53" for minutes. It is presentation, so a listener that throws
+    is swallowed: a broken log must never abandon a run someone is paying for.
+    """
     say = progress or (lambda _msg: None)
     per_unit: dict[str, list[Finding]] = {}
     rejected: list[dict] = []
     calls: list[dict] = []
     diags_all: list[dict] = []
     total = len(units)
-    for idx, unit in enumerate(units, 1):
-        say(
-            t(
-                "orch.unit_start",
-                model=spec.model_id,
-                idx=idx,
-                total=total,
-                file=unit.primary_file,
-            )
-        )
-        try:
-            findings, rej, completion, diags = await review_unit(
-                provider, spec.model_id, unit, repo_root, run_id, house_rules, sources
-            )
-        except Exception as exc:  # noqa: BLE001 - one model/unit failing must not kill the run
-            rejected.append(
-                {
-                    "unit_id": unit.unit_id,
-                    "model": spec.model_id,
-                    "reason": "provider_error",
-                    "error": str(exc),
-                }
-            )
+    gate = asyncio.Semaphore(unit_concurrency())
+    finished = 0
+    counter = asyncio.Lock()
+
+    async def one(idx: int, unit: ReviewUnit) -> None:
+        nonlocal finished
+        async with gate:
             say(
                 t(
-                    "orch.unit_failed",
+                    "orch.unit_start",
                     model=spec.model_id,
                     idx=idx,
                     total=total,
-                    error=type(exc).__name__,
+                    file=unit.primary_file,
                 )
             )
-            continue
-        per_unit.setdefault(unit.unit_id, []).extend(findings)
-        for r in rej:
-            r = dict(r)
-            r["model"] = spec.model_id
-            rejected.append(r)
-        diags_all.extend(diags)
-        calls.append(
-            {
-                "model": spec.model_id,
-                "family": spec.resolved_family(),
-                "unit_id": unit.unit_id,
-                "latency_ms": completion.latency_ms,
-                "usage": completion.usage.model_dump(),
-                "raw_request_hash": completion.raw_request_hash,
-            }
-        )
-        say(
-            t(
-                "orch.unit_done",
-                model=spec.model_id,
-                idx=idx,
-                total=total,
-                n=len(findings),
+            try:
+                findings, rej, completion, diags = await review_unit(
+                    provider, spec.model_id, unit, repo_root, run_id, house_rules, sources
+                )
+            except Exception as exc:  # noqa: BLE001 - one model/unit failing must not kill the run
+                rejected.append(
+                    {
+                        "unit_id": unit.unit_id,
+                        "model": spec.model_id,
+                        "reason": "provider_error",
+                        "error": str(exc),
+                        # Readable version for the report/notes; `error` keeps the
+                        # raw exception text for whoever debugs the endpoint.
+                        "error_hint": _failure_text(exc, provider),
+                    }
+                )
+                say(
+                    t(
+                        "orch.unit_failed",
+                        model=spec.model_id,
+                        idx=idx,
+                        total=total,
+                        error=_failure_text(exc, provider),
+                    )
+                )
+                return
+            per_unit.setdefault(unit.unit_id, []).extend(findings)
+            if on_findings and findings:
+                try:
+                    on_findings(unit, findings, spec.model_id)
+                except Exception as exc:  # noqa: BLE001 - presentation cannot fail the run
+                    # Swallowed so a broken listener cannot abandon a paid run —
+                    # but not silently: a mis-wired callback looks exactly like
+                    # "the UI shows nothing", which is the bug it exists to fix.
+                    print(
+                        f"[orchestrator] on_findings failed: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
+            for r in rej:
+                r = dict(r)
+                r["model"] = spec.model_id
+                rejected.append(r)
+            diags_all.extend(diags)
+            calls.append(
+                {
+                    "model": spec.model_id,
+                    "family": spec.resolved_family(),
+                    "unit_id": unit.unit_id,
+                    "latency_ms": completion.latency_ms,
+                    "usage": completion.usage.model_dump(),
+                    "raw_request_hash": completion.raw_request_hash,
+                }
             )
-        )
+            async with counter:
+                finished += 1
+                done = finished
+            say(
+                t(
+                    "orch.unit_done",
+                    model=spec.model_id,
+                    idx=done,
+                    total=total,
+                    n=len(findings),
+                )
+            )
+
+    await asyncio.gather(*(one(idx, unit) for idx, unit in enumerate(units, 1)))
     return per_unit, rejected, calls, diags_all
 
 
@@ -149,6 +240,8 @@ async def run_review(
     sources: dict[str, str] | None = None,
     progress: Callable[[str], None] | None = None,
     should_stop: Callable[[], bool] | None = None,
+    pinned: list[str] | None = None,
+    on_findings: Callable[[ReviewUnit, list[Finding], str], None] | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
@@ -176,7 +269,7 @@ async def run_review(
 
     watcher = asyncio.create_task(watch_stop())
     try:
-        reviewers, falsifier_spec = registry.route(mode, author_model=author_model)  # type: ignore[arg-type]
+        reviewers, falsifier_spec = registry.route(mode, author_model=author_model, pinned=pinned)  # type: ignore[arg-type]
         say(t("orch.start", models=len(reviewers), units=len(units)))
 
         providers = {m.model_id: _make_provider(m) for m in reviewers}
@@ -191,6 +284,7 @@ async def run_review(
                     house_rules,
                     sources,
                     progress=say,
+                    on_findings=on_findings,
                 )
             )
             for m in reviewers
@@ -251,7 +345,12 @@ async def run_review(
         targets = [f for f in merged if should_falsify(f)]
         if targets:
             say(t("orch.falsify_round", n=len(targets)))
-        for f in targets:
+        # Falsification is another full model call per finding. Sequentially that
+        # was another 20–40 minutes on a big run, for calls that only wait on the
+        # network — so it runs through the same gate as the review loop.
+        falsify_gate = asyncio.Semaphore(unit_concurrency())
+
+        async def falsify_one(f: Finding) -> None:
             if should_stop and should_stop():
                 raise ReviewCancelled(t("server.stopped_by_user"))
             source_models = set(f.source_models)
@@ -273,48 +372,52 @@ async def run_review(
                         chosen_model = m.model_id
                         break
             if chosen_provider is None:
-                continue  # every reviewer reported it and no spare model — leave agreement as-is
-            try:
-                falsify_task = asyncio.create_task(
-                    falsify_finding(chosen_provider, chosen_model, f, context, facts)
-                )
-                active.add(falsify_task)
-                verdict, completion = await falsify_task
-                all_calls.append(
-                    {
-                        "model": chosen_model,
-                        "family": chosen_provider.family,
-                        "unit_id": f.unit_id,
-                        "role": "falsify",
-                        "verdict": verdict.verdict,
-                        "latency_ms": completion.latency_ms,
-                        "usage": completion.usage.model_dump(),
-                    }
-                )
-                say(
-                    t(
-                        "orch.falsify_verdict",
-                        model=chosen_model,
-                        verdict=verdict.verdict,
-                        claim=_one_line(f.claim),
+                return  # every reviewer reported it and no spare model — leave agreement as-is
+            async with falsify_gate:
+                try:
+                    falsify_task = asyncio.create_task(
+                        falsify_finding(chosen_provider, chosen_model, f, context, facts)
                     )
-                )
-            except Exception as exc:  # noqa: BLE001
-                all_calls.append(
-                    {
-                        "model": chosen_model,
-                        "role": "falsify",
-                        "verdict": "error",
-                        "error": str(exc),
-                    }
-                )
-                say(
-                    t(
-                        "orch.falsify_failed",
-                        model=chosen_model,
-                        claim=_one_line(f.claim),
+                    active.add(falsify_task)
+                    verdict, completion = await falsify_task
+                    all_calls.append(
+                        {
+                            "model": chosen_model,
+                            "family": chosen_provider.family,
+                            "unit_id": f.unit_id,
+                            "role": "falsify",
+                            "verdict": verdict.verdict,
+                            "latency_ms": completion.latency_ms,
+                            "usage": completion.usage.model_dump(),
+                        }
                     )
-                )
+                    say(
+                        t(
+                            "orch.falsify_verdict",
+                            model=chosen_model,
+                            verdict=verdict.verdict,
+                            claim=_one_line(f.claim),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    all_calls.append(
+                        {
+                            "model": chosen_model,
+                            "role": "falsify",
+                            "verdict": "error",
+                            "error": str(exc),
+                        }
+                    )
+                    say(
+                        t(
+                            "orch.falsify_failed",
+                            model=chosen_model,
+                            claim=_one_line(f.claim),
+                        )
+                    )
+
+        if targets:
+            await asyncio.gather(*(falsify_one(f) for f in targets))
 
         # Recompute agreement after falsification and drop fully-refuted findings that
         # were only ever asserted by a single model (a unique claim that got broken).
