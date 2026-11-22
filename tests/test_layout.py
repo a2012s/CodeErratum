@@ -210,3 +210,36 @@ def test_findings_stream_into_the_right_pane_one_by_one():
     reset = html.split("function progressReset()", 1)[1][:600]
     assert '$("liveView").hidden = false' in reset
     assert '$("empty").hidden = true' in reset
+
+
+def test_empty_diff_offers_whole_tree_review_in_both_paths():
+    """A clean HEAD ends at "nothing to review"; the UI must offer a way out.
+
+    Two paths can end empty: the SSE frame this tab owns, and the status poll
+    tracking a run started elsewhere. Both must ask, and saying yes relaunches
+    against the whole worktree with the prompt disabled so an actually-empty
+    repo cannot trap the user in a dialog loop. Pure DOM modal only — the
+    pywebview native confirm() deadlocks the macOS main thread.
+    """
+    html = read("index.html")
+    # A DOM confirmation dialog, not a native/confirm() call.
+    assert 'id="askOverlay"' in html
+    assert 'id="askYes"' in html
+    assert 'id="askNo"' in html
+    assert "create_confirmation_dialog" not in html
+    assert "confirm(" not in html
+    assert "function askReviewWholeTree()" in html
+    # The retry uses the whole-worktree spec and does not re-prompt.
+    yes = html.split('$("askYes").onclick', 1)[1][:220]
+    assert 'startReview({ diff: "WORKTREE" }, false)' in yes
+    # Both terminal-empty paths ask.
+    sse_empty = html.split('ev.type === "empty"', 1)[1][:600]
+    assert "askReviewWholeTree()" in sse_empty
+    poll_empty = html.split('st.status === "empty"', 1)[1][:300]
+    assert "askReviewWholeTree()" in poll_empty
+    # The launch logic is a reusable function so the retry does not duplicate it.
+    assert "async function startReview(" in html
+    assert '$("runBtn").onclick = () => startReview();' in html
+    # Bilingual strings ship with the dialog.
+    assert 'data-en="No changes found"' in html
+    assert 'data-en="Review whole tree"' in html

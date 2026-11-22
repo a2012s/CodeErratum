@@ -364,6 +364,16 @@
     background: rgba(0, 0, 0, .48); display: flex; align-items: center; justify-content: center;
   }
   #aboutOverlay[hidden] { display: none; }
+  /* Whole-tree retry prompt. Same shell as the other dialogs, calm (not red)
+     because "nothing to review" is not an error. */
+  #askOverlay {
+    position: fixed; inset: 0; z-index: 62; padding: 20px;
+    background: rgba(0, 0, 0, .48); display: flex; align-items: center; justify-content: center;
+  }
+  #askOverlay[hidden] { display: none; }
+  .askBox { width: min(440px, 100%); }
+  .askBox .errHead { color: var(--text); }
+  .askBody { padding: 16px 18px 4px; font-size: 13px; line-height: 1.7; color: var(--muted); }
   .aboutBox { width: min(440px, 100%); }
   .aboutBox .errHead { color: var(--text); display: flex; align-items: center; gap: 9px; }
   .aboutBox .errHead .mark {
@@ -597,6 +607,20 @@
       <button class="ghost" id="aboutCopy" data-en="Copy link">复制链接</button>
       <button class="primary" id="aboutOpen" data-en="Open on GitHub">在 GitHub 打开</button>
       <button class="ghost" id="aboutClose" data-en="Close">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div id="askOverlay" hidden>
+  <div class="errBox askBox" role="dialog" aria-modal="true" aria-labelledby="askTitle">
+    <div class="errHead" id="askTitle" data-en="No changes found">未发现改动</div>
+    <div class="askBody">
+      <span id="askText" data-en="The selected diff range has no changes. Review every file in the whole worktree instead?">所选 diff 范围没有改动。是否改为审查整个工作区的全部代码？</span>
+      <div class="hint" data-en="This ignores the diff range and scans all files (respecting .gitignore). It can take longer.">这会忽略 diff 范围、扫描全部文件（仍遵循 .gitignore），耗时可能更长。</div>
+    </div>
+    <div class="errFoot">
+      <button class="ghost" id="askNo" data-en="Cancel">取消</button>
+      <button class="primary" id="askYes" data-en="Review whole tree">审查全部代码</button>
     </div>
   </div>
 </div>
@@ -950,6 +974,23 @@ function showError(message, title = T("操作失败")) {
 function closeError() { $("errOverlay").hidden = true; }
 $("errClose").onclick = closeError;
 $("errOverlay").onclick = (ev) => { if (ev.target === $("errOverlay")) closeError(); };
+
+// Empty-diff prompt: offer a whole-worktree review instead of a dead end.
+// Pure DOM — pywebview's native confirmation dialog deadlocks the Cocoa main
+// thread (the 0.5.0 hang), so this modal is the only dialog we use here.
+function askReviewWholeTree() {
+  if (!emptyPromptAllowed) return;
+  emptyPromptAllowed = false;  // one question per run; the retry passes false
+  $("askOverlay").hidden = false;
+  $("askYes").focus();
+}
+function closeAskWholeTree() { $("askOverlay").hidden = true; }
+$("askNo").onclick = closeAskWholeTree;
+$("askOverlay").onclick = (ev) => { if (ev.target === $("askOverlay")) closeAskWholeTree(); };
+$("askYes").onclick = () => {
+  closeAskWholeTree();
+  startReview({ diff: "WORKTREE" }, false);
+};
 
 // ---- about ---------------------------------------------------------------
 // The packaged app's About is a system panel: macOS renders a static copyright
@@ -1438,6 +1479,9 @@ async function pollReviewStatus() {
       if (st.run_id) openRun(st.run_id);
     } else if (st.status === "empty") {
       progressFinishHead(T("无改动"));
+      // A run tracked from another tab may end empty too. Offer the same
+      // whole-tree retry, using whatever the form currently asks for.
+      askReviewWholeTree();
     } else if (st.status === "cancelled") {
       progressAddLine(T("审查已停止"), "done");
       progressFinishHead(T("审查已停止"));
@@ -1570,7 +1614,15 @@ $("mode").addEventListener("change", renderModels);
 syncUnitsHint();
 loadModels();
 
-$("runBtn").onclick = async () => {
+// `overrides` lets the empty-diff prompt relaunch the same review against the
+// whole worktree without duplicating this whole stream/log/lock dance.
+// `allowEmptyPrompt=false` on that retry: if a whole-tree review is *also*
+// empty (e.g. an empty repo), asking again would trap the user in a loop.
+// Kept module-level because the tracked (cross-tab) empty path has no local
+// `allowEmptyPrompt` to consult. A fresh press of Run resets it to true.
+let emptyPromptAllowed = true;
+async function startReview(overrides = {}, allowEmptyPrompt = true) {
+  emptyPromptAllowed = allowEmptyPrompt;
   const btn = $("runBtn");
   const body = {
     diff: $("diff").value.trim() || "HEAD~1",
@@ -1581,6 +1633,7 @@ $("runBtn").onclick = async () => {
     author_model: $("authorModel").value.trim(),
     write_markdown: $("writeMd").checked,
     house_rules: $("houseRules").value,
+    ...overrides,
   };
   // Guard: if the server already has a review running (maybe started in another
   // tab, or a dropped SSE whose server work is still going), don't fire another
@@ -1640,6 +1693,11 @@ $("runBtn").onclick = async () => {
           streamCompleted = true;
           progressAddLine(ev.message || T("没有可审查的改动"), "done");
           progressFinishHead(T("无改动"));
+          // A clean HEAD with everything committed answers "no changes", but the
+          // user pressed Review to look at code. Offer the whole worktree before
+          // leaving them at a dead end. The retry disables the prompt so an
+          // actually-empty folder cannot loop.
+          if (allowEmptyPrompt) askReviewWholeTree();
         } else if (ev.type === "cancelled") {
           streamCompleted = true;
           progressAddLine(ev.message || T("审查已停止"), "done");
@@ -1713,7 +1771,8 @@ $("runBtn").onclick = async () => {
     if (streamCompleted) setRunBusy(false);
     else { reviewTracking = true; await pollReviewStatus(); }
   }
-};
+}
+$("runBtn").onclick = () => startReview();
 
 $("statsBtn").onclick = async () => {
   if (!toggleDrawer("drawer")) return;
