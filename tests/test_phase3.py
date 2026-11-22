@@ -62,29 +62,64 @@ def test_derive_family():
     assert derive_family("my-custom-model") == "my-custom-model"
 
 
-def test_registry_dual_requires_heterogeneous():
+def test_registry_dual_allows_same_vendor_versions():
+    """Pinned versions count as distinct reviewers even from one vendor.
+
+    qwen3.8-flash and qwen4-max-preview have different emphases, so they fill
+    two dual seats — vendor family is a display label, not a selection gate.
+    """
     registry = ModelRegistry(
         models=[
-            ModelSpec(model_id="gpt-4o-x", base_url="http://a"),
-            ModelSpec(model_id="gpt-3.5-x", base_url="http://b"),
+            ModelSpec(model_id="qwen3.8-flash", base_url="http://a"),
+            ModelSpec(model_id="qwen4-max-preview", base_url="http://b"),
         ]
     )
-    with pytest.raises(ValueError, match="heterogeneous"):
-        registry.route("dual")
+    reviewers, falsifier = registry.route("dual")
+    assert [m.model_id for m in reviewers] == ["qwen3.8-flash", "qwen4-max-preview"]
+    assert {m.resolved_family() for m in reviewers} == {"alibaba"}  # label only
+    assert falsifier is None  # no spare model -> caller cross-falsifies
 
 
-def test_registry_route_with_third_vendor():
+def test_registry_committee_uses_three_pinned_versions():
+    registry = ModelRegistry(
+        models=[
+            ModelSpec(model_id="qwen3.8-flash", base_url="http://a"),
+            ModelSpec(model_id="qwen4-max-preview", base_url="http://b"),
+            ModelSpec(model_id="deepseek-v4.1-flash-1017", base_url="http://c"),
+        ]
+    )
+    reviewers, falsifier = registry.route("committee")
+    assert {m.model_id for m in reviewers} == {
+        "qwen3.8-flash",
+        "qwen4-max-preview",
+        "deepseek-v4.1-flash-1017",
+    }
+    assert falsifier is None  # all three are reviewers, none left as falsifier
+
+
+def test_registry_same_model_id_rejected():
+    """Two identical model_ids are not two reviewers — registry rejects them."""
+    with pytest.raises(ValueError, match="duplicate model_id"):
+        ModelRegistry(
+            models=[
+                ModelSpec(model_id="qwen3.8-flash", base_url="http://a"),
+                ModelSpec(model_id="qwen3.8-flash", base_url="http://b"),
+            ]
+        )
+
+
+def test_registry_route_with_spare_model_as_falsifier():
     registry = ModelRegistry(
         models=[
             ModelSpec(model_id="gpt-4o-x", base_url="http://a"),
-            ModelSpec(model_id="claude-3-x", base_url="http://b"),
+            ModelSpec(model_id="qwen4-max-preview", base_url="http://b"),
             ModelSpec(model_id="deepseek-chat", base_url="http://c"),
         ]
     )
     reviewers, falsifier = registry.route("dual")
     assert len(reviewers) == 2
-    assert {m.resolved_family() for m in reviewers} == {"openai", "anthropic"}
-    assert falsifier is not None and falsifier.resolved_family() == "deepseek"
+    assert {m.model_id for m in reviewers} == {"gpt-4o-x", "qwen4-max-preview"}
+    assert falsifier is not None and falsifier.model_id == "deepseek-chat"
 
 
 def test_registry_excludes_author():

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -53,6 +54,30 @@ LOOPBACK_HOST_RE = re.compile(r"^(?:127\.0\.0\.1|localhost|\[::1\]|::1)(?::\d+)?
 MAX_BODY = 2 * 1024 * 1024
 
 
+def _write_sse(wfile, kind: str, payload: dict) -> bool:
+    """Write one SSE frame. Returns False once the client has gone away.
+
+    A closed tab must not abort a paid review: the run keeps going, other tabs
+    (and a later reload) pick it up from ``/api/review/status``.
+    """
+    data = json.dumps({"type": kind, **payload}, ensure_ascii=False)
+    try:
+        wfile.write(f"event: {kind}\ndata: {data}\n\n".encode())
+        wfile.flush()
+    except OSError:  # BrokenPipe / ConnectionReset: the reader is gone
+        return False
+    return True
+
+
+def _safe_error(exc: Exception, repo_root: Path) -> str:
+    """Show the real reason in the browser without leaking local filesystem paths."""
+    text = " ".join(str(exc).split())
+    for path in (str(repo_root), str(Path.home())):
+        if path:
+            text = text.replace(path, "<repo>" if path == str(repo_root) else "~")
+    return text[:400] or type(exc).__name__
+
+
 class WebApp:
     """Request-independent application logic, so tests can call it without sockets."""
 
@@ -76,6 +101,7 @@ class WebApp:
             "run_id": None,
             "params": {},
             "tokens": None,
+            "error": "",
         }
 
     @property
@@ -186,6 +212,42 @@ class WebApp:
         chosen = result.stdout.strip().rstrip(os.sep) or os.sep
         root = self._git_root(Path(chosen).expanduser().resolve())
         return {"path": str(root), "repo": str(root)}
+
+    def open_repo_folder(self) -> dict:
+        """Show the current repository in the OS file manager.
+
+        The target always comes from the server's resolved git root, never from
+        the request body — a same-origin page must not be able to use this as a
+        generic "open any folder" primitive. Explorer may report a non-zero
+        status after opening a window, so its status is not treated as failure.
+        """
+        target = self.repo_root
+        if not target.is_dir():
+            raise PipelineError(f"当前仓库目录不存在：{target}")
+        system = sys.platform
+        if system == "darwin":
+            cmd = ["open", str(target)]
+        elif system == "win32":
+            cmd = ["explorer", str(target)]
+        else:
+            opener = shutil.which("xdg-open") or shutil.which("gio")
+            if not opener:
+                raise PipelineError("未找到 xdg-open / gio，请在文件管理器中手动打开当前仓库")
+            cmd = (
+                [opener, "open", str(target)]
+                if Path(opener).name == "gio"
+                else [opener, str(target)]
+            )
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise PipelineError("打开文件管理器超时，请稍后重试") from exc
+        except OSError as exc:
+            raise PipelineError(f"无法打开当前仓库文件夹：{exc}") from exc
+        if result.returncode != 0 and system != "win32":
+            lines = (result.stderr or result.stdout or "").strip().splitlines()
+            raise PipelineError(f"无法打开当前仓库文件夹：{lines[-1] if lines else '系统返回失败'}")
+        return {"path": str(target), "opened": True}
 
     def find_repo_by_name(self, raw_name: str, hints: list[str] | None = None) -> dict:
         """Resolve a dropped folder name to git repos on disk.
@@ -408,7 +470,13 @@ class WebApp:
                 if state.get("started_at_wall")
                 else ""
             )
+            state["finished_at"] = (
+                time.strftime("%H:%M:%S", time.localtime(state["finished_at_wall"]))
+                if state.get("finished_at_wall")
+                else ""
+            )
             state.pop("started_at_wall", None)
+            state.pop("finished_at_wall", None)
             return state
 
     def _note_progress(self, message: str) -> None:
@@ -489,6 +557,7 @@ class WebApp:
                         "paths": (params or {}).get("paths", ""),
                     },
                     "tokens": None,
+                    "error": "",
                 }
             )
 
@@ -497,11 +566,14 @@ class WebApp:
         status: str = "done",
         run_id: str | None = None,
         tokens: dict | None = None,
+        error: str = "",
     ) -> None:
         with self._state_lock:
             self._review_state["running"] = False
             self._review_state["status"] = status
             self._review_state["finished_at"] = time.monotonic()
+            self._review_state["finished_at_wall"] = time.time()
+            self._review_state["error"] = error
             if run_id:
                 self._review_state["run_id"] = run_id
             if tokens is not None:
@@ -546,7 +618,7 @@ class WebApp:
     def start_review(self, payload: dict, progress=None) -> dict:
         params = self.prepare_review(payload)
         self.acquire_review_lock(params)
-        final_status, run_id, final_tokens = "done", None, None
+        final_status, run_id, final_tokens, final_error = "done", None, None, ""
         try:
             summary = self.execute_prepared(params, progress=progress)
             run_id = summary.get("run_id")
@@ -558,11 +630,17 @@ class WebApp:
         except ReviewCancelled:
             final_status = "cancelled"
             return {"cancelled": True, "error": "审查已被用户停止"}
-        except Exception:
+        except Exception as exc:
             final_status = "error"
+            final_error = _safe_error(exc, self.repo_root)
             raise
         finally:
-            self.release_review_lock(status=final_status, run_id=run_id, tokens=final_tokens)
+            self.release_review_lock(
+                status=final_status,
+                run_id=run_id,
+                tokens=final_tokens,
+                error=final_error,
+            )
 
     def set_status(self, finding_id: str, status: str, reason: str = "") -> dict:
         if not FINDING_ID_RE.match(finding_id):
@@ -601,13 +679,18 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
             return
 
         def _send(self, code: int, body: bytes, content_type: str) -> None:
-            self.send_response(code)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            self.wfile.write(body)
+            # A tab that closed mid-request is not a server error: drop the
+            # connection quietly instead of printing a traceback per response.
+            try:
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.wfile.write(body)
+            except OSError:
+                self.close_connection = True
 
         def _json(self, code: int, payload: dict) -> None:
             self._send(
@@ -634,17 +717,20 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
 
         def _sse_event(self, kind: str, payload: dict) -> None:
             """Write one SSE frame; flush so the browser sees progress immediately."""
-            data = json.dumps({"type": kind, **payload}, ensure_ascii=False)
-            self.wfile.write(f"event: {kind}\ndata: {data}\n\n".encode())
-            self.wfile.flush()
+            if self._client_gone:
+                return
+            if not _write_sse(self.wfile, kind, payload):
+                self._client_gone = True
 
         def _stream_review(self, app: WebApp, body: dict) -> None:
             """Run a review while pushing progress frames over one SSE response.
 
             Validation and lock contention are answered as ordinary JSON errors
             *before* the stream starts, so the browser still gets a real 400/409.
-            Once the stream starts, failures travel as an ``error`` event.
+            Once the stream starts, failures travel as an ``error`` event. If the
+            browser goes away mid-run we keep reviewing and stop writing frames.
             """
+            self._client_gone = False
             try:
                 params = app.prepare_review(body)
                 app.acquire_review_lock(params)
@@ -654,9 +740,12 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
             except (PipelineError, ValueError) as exc:
                 self._error(HTTPStatus.BAD_REQUEST, str(exc))
                 return
-            final_status, final_run_id, final_tokens = "done", None, None
+            final_status, final_run_id, final_tokens, final_error = "done", None, None, ""
             try:
-                self._sse_headers()
+                try:
+                    self._sse_headers()
+                except OSError:  # tab closed before the stream opened
+                    self._client_gone = True
                 self._sse_event("log", {"message": "已连接进度流，准备审查…"})
                 summary = app.execute_prepared(
                     params, progress=lambda msg: self._sse_event("log", {"message": msg})
@@ -672,14 +761,22 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                 self._sse_event("empty", {"message": str(exc)})
             except (PipelineError, ValueError) as exc:
                 final_status = "error"
-                self._sse_event("error", {"error": str(exc)})
+                final_error = _safe_error(exc, app.repo_root)
+                self._sse_event("error", {"error": final_error})
             except Exception as exc:  # noqa: BLE001 - keep the stream alive, hide local paths
                 final_status = "error"
-                print(f"[web] stream review: {type(exc).__name__}: {exc}", file=sys.stderr)
-                self._sse_event("error", {"error": "internal error; see server log"})
+                final_error = _safe_error(exc, app.repo_root)
+                print(
+                    f"[web] stream review: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+                    file=sys.stderr,
+                )
+                self._sse_event("error", {"error": final_error})
             finally:
                 app.release_review_lock(
-                    status=final_status, run_id=final_run_id, tokens=final_tokens
+                    status=final_status,
+                    run_id=final_run_id,
+                    tokens=final_tokens,
+                    error=final_error,
                 )
 
         def _host_ok(self) -> bool:
@@ -777,6 +874,8 @@ def make_handler(app: WebApp) -> type[BaseHTTPRequestHandler]:
                     self._json(HTTPStatus.OK, app.switch_repo(str(body.get("path") or "")))
                 elif path == "/api/pick-repo":
                     self._json(HTTPStatus.OK, app.pick_repo())
+                elif path == "/api/repo/open":
+                    self._json(HTTPStatus.OK, app.open_repo_folder())
                 elif path == "/api/model/check":
                     self._json(HTTPStatus.OK, app.check_model(body))
                 elif path == "/api/find-repo":

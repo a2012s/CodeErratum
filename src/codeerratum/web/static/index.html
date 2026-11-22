@@ -22,6 +22,7 @@
     --ok-weak: #e3f4e8;
     --bad: #b42318;
     --bad-weak: #fde8e6;
+    --warn: #a15c00;
     --code-bg: #0f1720;
     --code-text: #e6edf3;
     --radius: 10px;
@@ -36,8 +37,11 @@
       --muted: #9aa7b4;
       --accent: #4d8dff;
       --accent-weak: #16233b;
+      --ok: #5ad39a;
       --ok-weak: #12321f;
+      --bad: #ff7b72;
       --bad-weak: #3a1a16;
+      --warn: #e3a008;
       --code-bg: #0a0f16;
     }
   }
@@ -80,11 +84,23 @@
     background: var(--accent-weak); border-color: var(--accent); color: var(--accent);
   }
 
-  .layout { display: grid; grid-template-columns: 292px minmax(0, 1fr); height: calc(100vh - 51px); }
+  .layout {
+    display: grid;
+    grid-template-columns: var(--sidebar-w, 292px) 7px minmax(0, 1fr);
+    height: calc(100vh - 51px);
+  }
   aside.sidebar {
-    border-right: 1px solid var(--border); background: var(--panel);
+    background: var(--panel);
     padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px;
   }
+  /* Draggable splitter between sidebar and content. */
+  .splitter {
+    cursor: col-resize; background: var(--border); position: relative; touch-action: none;
+    transition: background .15s;
+  }
+  .splitter::after { content: ""; position: absolute; inset: 0 -4px; }  /* wider hit area */
+  .splitter:hover, .splitter.dragging { background: var(--accent); }
+  body.resizing, body.resizing * { cursor: col-resize !important; user-select: none !important; }
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field label { font-size: 12px; color: var(--muted); }
   .field input[type=number] { width: 100%; }
@@ -297,10 +313,12 @@
     border-radius: 50%; display: inline-block; animation: spin .7s linear infinite; vertical-align: -2px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  /* Live review progress (SSE). */
+  /* Live review progress (SSE) — sticky so scrolling the sidebar never hides it. */
   #progressBox {
     margin-top: 10px; border: 1px solid var(--border); border-radius: 8px;
     background: var(--panel-2); overflow: hidden;
+    position: sticky; top: 0; z-index: 5; flex-shrink: 0;
+    box-shadow: 0 4px 14px rgba(0,0,0,.10);
   }
   #progressBox[hidden] { display: none; }
   #progressHead {
@@ -308,20 +326,31 @@
     font-size: 12.5px; font-weight: 600; border-bottom: 1px solid var(--border);
   }
   #progressHead .spinner { color: var(--accent); }
-  #stopBtn { margin-left: auto; font-size: 11.5px; padding: 3px 9px; }
+  #progressTitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #stopBtn { margin-left: auto; font-size: 11.5px; padding: 3px 9px; flex: none; }
   #stopBtn[hidden] { display: none; }
   #stopBtn:hover:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+  #logResize {
+    height: 6px; cursor: row-resize; background: var(--border); touch-action: none;
+    border-top: 1px solid var(--border);
+  }
+  #logResize:hover, #logResize.dragging { background: var(--accent); }
   #progressLog {
-    margin: 0; padding: 8px 10px; max-height: 190px; overflow-y: auto;
+    margin: 0; padding: 8px 10px; height: var(--progress-h, 300px); overflow-y: auto;
     font: 11.5px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere;
   }
+  /* SSE log levels: routine lines stay quiet; failures are always red. */
   #progressLog .ln { padding: 1px 0; }
-  #progressLog .ln.done { color: var(--ok); }
-  #progressLog .ln.err { color: var(--bad); }
+  #progressLog .ln.hi { color: var(--accent); font-weight: 600; }
+  #progressLog .ln.warn { color: var(--warn); }
+  #progressLog .ln.done, #progressLog .ln.ok { color: var(--ok); }
+  #progressLog .ln.err { color: var(--bad); font-weight: 600; }
   @media (max-width: 860px) {
     .layout { grid-template-columns: 1fr; height: auto; }
-    aside.sidebar { border-right: none; border-bottom: 1px solid var(--border); }
+    .splitter { display: none; }
+    aside.sidebar { border-bottom: 1px solid var(--border); }
+    #progressBox { position: static; }
   }
 </style>
 </head>
@@ -382,11 +411,15 @@
         <button class="ghost" id="stopBtn" hidden>停止审查</button>
       </div>
       <div id="progressLog"></div>
+      <div id="logResize" title="拖动调整日志高度"></div>
     </div>
     <div id="models" class="chips"></div>
     <div class="runs-title">历史运行</div>
     <ul id="runs"></ul>
   </aside>
+
+  <div class="splitter" id="splitter" role="separator" aria-orientation="vertical"
+       aria-label="拖动调整左右宽度" title="拖动调整左右面板宽度（双击复位）"></div>
 
   <section class="content">
     <div class="empty" id="empty">
@@ -735,9 +768,19 @@ function progressReset() {
   $("progressLog").innerHTML = "";
   $("progressBox").hidden = false;
 }
+// Colour by importance. Explicit levels from callers (done/err) always win;
+// otherwise infer from the message so both SSE frames and polled history agree.
+function logLevel(text) {
+  if (/失败|错误|异常|超时|error|exception|failed|timed?\s*out/i.test(text)) return "err";
+  if (/证据不足|insufficient_context|未审|跳过|截断|降级|谨慎|警告|仅审查|refuted|abstain/i.test(text)) return "warn";
+  if (/^完成|审查完成|所有模型评审完成|生成报告|confirmed|通过/.test(text)) return "ok";
+  if (/证伪轮|启动|Mode:|Split diff|Spec level:|Project rules|开始聚类|审查范围/i.test(text)) return "hi";
+  return "";
+}
 function progressAddLine(text, cls = "") {
+  const level = cls || logLevel(text);
   const div = document.createElement("div");
-  div.className = "ln" + (cls ? " " + cls : "");
+  div.className = "ln" + (level ? " " + level : "");
   div.textContent = text;
   const log = $("progressLog");
   log.appendChild(div);
@@ -830,7 +873,13 @@ async function pollReviewStatus() {
       progressAddLine("审查已停止", "done");
       progressFinishHead("审查已停止");
     } else if (st.status === "error") {
-      progressFinishHead("审查失败");
+      const reason = st.error || (st.messages || []).slice(-1)[0] || "未知错误";
+      progressAddLine("错误：" + reason, "err");
+      progressFinishHead("审查失败：" + reason);
+      showError(
+        `其他标签页或断线前启动的审查失败。\n\n${reason}`,
+        "审查失败"
+      );
     }
   }
 }
@@ -910,7 +959,7 @@ $("runBtn").onclick = async () => {
         } else if (ev.type === "error") {
           streamCompleted = true;
           progressAddLine("错误：" + (ev.error || "未知错误"), "err");
-          progressFinishHead("审查失败");
+          progressFinishHead("审查失败：" + (ev.error || "未知错误"));
           showError(
             `审查范围：${body.diff || "(空)"}${body.paths ? ` · 路径 ${body.paths}` : ""}\n`
             + `审查模式：${body.mode}\n\n${ev.error || "未知错误"}`,
@@ -1135,7 +1184,7 @@ function renderConfig(info) {
       `<option value="${v}" ${v === info.mode ? "selected" : ""}>${label}</option>`).join("")}</select>
   </div>`);
   parts.push(`<div class="hint" style="margin:0 0 6px">
-    dual 要求至少两家不同 family，证伪者取第三家。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。
+    dual 需 2 个不同 model_id、committee 需 3 个（同厂不同版本也算）；family 只作标签，空着会自动推断。证伪者优先用未参与审查的模型，否则由其他评审者交叉验证。api_key 留空表示沿用原值，输入框里的占位符是脱敏后的提示，不是真密钥。
     点「检测」发一个最小请求验证端点（不写入配置）：绿勾可用，红叉会弹出可复制的原因；改动字段后结果自动失效。
   </div>`);
   parts.push(`<table class="cfg"><thead><tr>
@@ -1218,7 +1267,11 @@ function renderRepoDrawer() {
     `<div class="cfg-note">当前仓库：<code>${esc(cur)}</code><br>
       三种方式选仓库：① 点「浏览本地…」弹出系统文件夹选择器；
       ② 把文件夹直接拖到本窗口；③ 粘贴绝对路径（支持 <code>~</code>）。
-      填仓库内任意子目录会自动定位到 git 根目录。切换只影响当前服务进程，不会改动磁盘上的代码。</div>`,
+      填仓库内任意子目录会自动定位到 git 根目录。切换只影响当前服务进程，不会改动磁盘上的代码。<br>
+      点「打开当前仓库文件夹」可在系统文件管理器中查看这个目录。</div>`,
+    `<div class="actions" style="margin-top:10px">
+      <button class="ghost" id="repoOpen">打开当前仓库文件夹</button>
+    </div>`,
     `<div class="field" style="margin:14px 0 8px">
       <label for="repoPath">本地仓库路径</label>
       <input id="repoPath" placeholder="点「浏览本地」或粘贴 /Users/me/my-project" spellcheck="false">
@@ -1241,6 +1294,7 @@ function renderRepoDrawer() {
   $("repoSwitch").onclick = () => doSwitchRepo($("repoPath").value.trim());
   $("repoPath").onkeydown = (e) => { if (e.key === "Enter") doSwitchRepo($("repoPath").value.trim()); };
   $("repoBrowse").onclick = browseRepo;
+  $("repoOpen").onclick = openRepoFolder;
   $("repoBody").querySelectorAll(".recent-repo").forEach((b) => {
     b.onclick = () => doSwitchRepo(b.dataset.path);
   });
@@ -1264,6 +1318,21 @@ async function doSwitchRepo(path) {
     const err = $("repoErr");
     if (err) { err.textContent = e.message; err.hidden = false; }
     showError(`目标路径：${path}\n\n${e.message}`, "切换仓库失败");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function openRepoFolder() {
+  const btn = $("repoOpen");
+  btn.disabled = true;
+  try {
+    await api("/api/repo/open", { method: "POST", body: "{}" });
+    toast("已在文件管理器中打开当前仓库");
+  } catch (e) {
+    const err = $("repoErr");
+    if (err) { err.textContent = e.message; err.hidden = false; }
+    showError(e.message, "打开文件夹失败");
   } finally {
     btn.disabled = false;
   }
@@ -1357,6 +1426,87 @@ async function handleFolderDrop(e) {
     e.preventDefault(); depth = 0;
     overlay.classList.remove("show");
     handleFolderDrop(e);
+  });
+})();
+
+/* ---- Draggable layout: sidebar width + progress log height. ---------------
+   Both are pointer-driven (mouse + touch), clamped to sane bounds, persisted
+   in localStorage, and double-click resets. Kept dependency-free so the UI
+   still works with nothing installed but this package. */
+const LAYOUT_KEY = "codeerratum.layout";
+function loadLayout() {
+  try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") || {}; }
+  catch { return {}; }
+}
+function saveLayout(patch) {
+  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify({ ...loadLayout(), ...patch })); }
+  catch { /* private mode: layout still works, just not remembered */ }
+}
+(function setupSplitter() {
+  const splitter = $("splitter");
+  const clampWidth = (px) => Math.min(Math.max(px, 220), Math.max(220, window.innerWidth - 420));
+  const saved = Number(loadLayout().sidebarW);
+  if (saved) document.documentElement.style.setProperty("--sidebar-w", `${clampWidth(saved)}px`);
+  let dragging = false;
+  splitter.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    try { splitter.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    splitter.classList.add("dragging");
+    document.body.classList.add("resizing");
+    e.preventDefault();
+  });
+  window.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const w = clampWidth(e.clientX);
+    document.documentElement.style.setProperty("--sidebar-w", `${w}px`);
+  });
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false;
+    splitter.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    const w = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--sidebar-w"), 10);
+    if (w) saveLayout({ sidebarW: w });
+  };
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+  splitter.addEventListener("dblclick", () => {
+    document.documentElement.style.setProperty("--sidebar-w", "292px");
+    saveLayout({ sidebarW: 292 });
+  });
+})();
+(function setupLogResize() {
+  const handle = $("logResize");
+  const clampHeight = (px) => Math.min(Math.max(px, 90), Math.max(90, window.innerHeight - 190));
+  const saved = Number(loadLayout().logH);
+  if (saved) document.documentElement.style.setProperty("--progress-h", `${clampHeight(saved)}px`);
+  let dragging = false;
+  handle.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    try { handle.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+    handle.classList.add("dragging");
+    document.body.classList.add("resizing");
+    e.preventDefault();
+  });
+  window.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const box = $("progressBox").getBoundingClientRect();
+    const h = clampHeight(e.clientY - box.top - 20);  // header height offset
+    document.documentElement.style.setProperty("--progress-h", `${h}px`);
+  });
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    const h = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--progress-h"), 10);
+    if (h) saveLayout({ logH: h });
+  };
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+  handle.addEventListener("dblclick", () => {
+    document.documentElement.style.setProperty("--progress-h", "300px");
+    saveLayout({ logH: 300 });
   });
 })();
 

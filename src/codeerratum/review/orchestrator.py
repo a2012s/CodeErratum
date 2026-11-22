@@ -26,6 +26,11 @@ class ReviewCancelled(Exception):
     """The user stopped the run. Distinct from a failure: no error dialog, no report."""
 
 
+def _one_line(text: str) -> str:
+    """Keep a full claim intact but flatten embedded newlines into one log frame."""
+    return " ".join(text.split())
+
+
 def _make_provider(spec: ModelSpec) -> OpenAICompatProvider:
     provider = OpenAICompatProvider(spec.base_url, spec.api_key)
     # family is set per-instance so two OpenAI-compatible endpoints from different
@@ -122,9 +127,9 @@ async def run_review(
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
-    Works for quick (1 model) as well as dual/committee (N heterogeneous models).
+    Works for quick (1 model) as well as dual/committee (N pinned model versions).
     In dual/committee, findings are clustered and merged across models, then a
-    different-vendor model tries to falsify each high-value finding.
+    model that did not assert a finding tries to falsify each high-value one.
 
     ``house_rules`` only reaches the reviewers. The falsifier is deliberately left
     with the stock prompt: a falsifier that has absorbed the project's conventions
@@ -211,7 +216,7 @@ async def run_review(
         }
         merged, raw_counts = cluster_findings(per_model_flat)
 
-        # Falsification: a third vendor if available, else cross-falsify between reviewers.
+        # Falsification: a spare model if available, else cross-falsify between reviewers.
         if falsifier_spec is not None:
             falsifier_provider = _make_provider(falsifier_spec)
         else:
@@ -229,8 +234,8 @@ async def run_review(
             context, facts = (
                 _context_for(source_unit, repo_root, sources) if source_unit else ("", "")
             )
-            # Pick a falsifier from a family not among the sources; prefer the dedicated
-            # third vendor, otherwise the reviewer with a different family than source.
+            # Pick a falsifier that did not assert the finding; prefer the dedicated
+            # spare model, otherwise a reviewer outside the finding's source models.
             chosen_provider: Provider | None = None
             chosen_model = ""
             if falsifier_spec is not None and falsifier_spec.model_id not in source_models:
@@ -243,7 +248,7 @@ async def run_review(
                         chosen_model = m.model_id
                         break
             if chosen_provider is None:
-                continue  # every reviewer reported it and no third vendor — leave agreement as-is
+                continue  # every reviewer reported it and no spare model — leave agreement as-is
             try:
                 falsify_task = asyncio.create_task(
                     falsify_finding(chosen_provider, chosen_model, f, context, facts)
@@ -261,7 +266,7 @@ async def run_review(
                         "usage": completion.usage.model_dump(),
                     }
                 )
-                say(f"证伪 {chosen_model}：{verdict.verdict} · {f.claim[:40]}")
+                say(f"证伪 {chosen_model}：{verdict.verdict} · {_one_line(f.claim)}")
             except Exception as exc:  # noqa: BLE001
                 all_calls.append(
                     {
@@ -271,7 +276,7 @@ async def run_review(
                         "error": str(exc),
                     }
                 )
-                say(f"证伪 {chosen_model}：调用失败 · {f.claim[:40]}")
+                say(f"证伪 {chosen_model}：调用失败 · {_one_line(f.claim)}")
 
         # Recompute agreement after falsification and drop fully-refuted findings that
         # were only ever asserted by a single model (a unique claim that got broken).

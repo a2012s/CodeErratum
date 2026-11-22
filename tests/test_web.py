@@ -6,6 +6,7 @@ writes, artifact reads) without spending tokens or needing a real endpoint.
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import tempfile
@@ -558,6 +559,53 @@ def test_pick_and_find_require_same_origin(client):
         assert resp.status_code == 403
 
 
+def test_open_repo_folder_uses_server_side_repo_root(client, repo, monkeypatch):
+    """The button reveals the current repo, never a path supplied by the page."""
+    import codeerratum.web.server as web_server
+
+    calls = []
+
+    class Done:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(web_server.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
+    resp = client.post("/api/repo/open", json={"path": "/etc"})
+    assert resp.status_code == 200
+    assert resp.json() == {"path": str(repo.resolve()), "opened": True}
+    assert calls and calls[0][-1] == str(repo.resolve())
+
+
+def test_open_repo_folder_reports_failure_in_chinese(client, monkeypatch):
+    import codeerratum.web.server as web_server
+
+    class Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "open: no such file\n"
+
+    monkeypatch.setattr(web_server.subprocess, "run", lambda *a, **k: Failed())
+    resp = client.post("/api/repo/open", json={})
+    assert resp.status_code == 400
+    assert "无法打开当前仓库文件夹" in resp.json()["error"]
+
+
+def test_open_repo_folder_requires_same_origin(client):
+    resp = client.post("/api/repo/open", json={}, headers={"Origin": "http://evil.example"})
+    assert resp.status_code == 403
+
+
+def test_ui_exposes_open_current_repo_folder_button():
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="repoOpen"' in html
+    assert "打开当前仓库文件夹" in html
+    assert '"/api/repo/open"' in html
+    assert '("repoOpen").onclick = openRepoFolder' in html
+
+
 def test_model_check_route_ok(client, monkeypatch):
     """The browser's probe call returns a green-tick payload over HTTP."""
     import codeerratum.web.server as web_server
@@ -620,6 +668,24 @@ def test_ui_defaults_and_mutually_exclusive_drawers():
     ):
         assert f'{drawer}: "{btn}"' in html
         assert f'toggleDrawer("{drawer}")' in html
+
+
+def test_ui_has_draggable_splitter_and_sticky_progress():
+    """Sidebar/content split is resizable; progress stays visible while scrolling."""
+    from codeerratum.web.server import STATIC_DIR
+
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert 'id="splitter"' in html
+    assert 'role="separator"' in html
+    assert "grid-template-columns: var(--sidebar-w" in html
+    assert "function setupSplitter" in html
+    assert "pointermove" in html
+    assert "--sidebar-w" in html and "saveLayout({ sidebarW" in html
+    # Progress panel sticky + large, user-resizable log area.
+    assert "position: sticky; top: 0" in html
+    assert 'id="logResize"' in html
+    assert "height: var(--progress-h" in html
+    assert "function setupLogResize" in html
 
 
 def test_review_stream_pushes_progress_then_done(client):
@@ -848,3 +914,67 @@ def test_ui_exposes_stop_button_and_token_totals():
     assert 'st.status === "cancelled"' in html
     assert "tokenSummary(ev.tokens)" in html
     assert "token 消耗" in html
+
+
+def test_review_error_survives_in_status(client):
+    """A failed run must keep its reason after the SSE socket is gone."""
+    app = client.app
+    app.acquire_review_lock({"diff_spec": "HEAD", "mode": "dual", "max_units": 1, "paths": ""})
+    app.release_review_lock(status="error", error="证伪调用失败：ReadTimeout")
+    st = client.get("/api/review/status").json()
+    assert st["running"] is False
+    assert st["status"] == "error"
+    assert st["error"] == "证伪调用失败：ReadTimeout"
+    assert len(st["finished_at"]) == 8  # readable wall clock, not monotonic seconds
+
+
+def test_safe_error_redacts_local_paths():
+    from codeerratum.web.server import _safe_error
+
+    repo = Path("/tmp/my-secret-project")
+    msg = RuntimeError(f"cannot open {repo}/.codeerratum/config.json after 12s\nsecond line")
+    text = _safe_error(msg, repo)
+    assert "/tmp/my-secret-project" not in text
+    assert "<repo>/.codeerratum/config.json" in text
+    assert "\n" not in text
+
+
+def test_sse_log_levels_are_coloured_in_page(client):
+    html = client.get("/").text
+    assert "function logLevel" in html
+    assert "#progressLog .ln.err { color: var(--bad)" in html
+    assert "#progressLog .ln.warn { color: var(--warn)" in html
+    assert "st.error" in html  # other tabs see the failure reason too
+
+
+class _GoneWriter:
+    """Stands in for a socket whose browser tab was closed."""
+
+    def write(self, _data):  # noqa: ANN001
+        raise BrokenPipeError("client gone")
+
+    def flush(self) -> None:
+        pass
+
+
+def test_sse_write_reports_disconnected_client_instead_of_raising():
+    from codeerratum.web.server import _write_sse
+
+    assert _write_sse(_GoneWriter(), "log", {"message": "x"}) is False
+
+    buf = io.BytesIO()
+    assert _write_sse(buf, "log", {"message": "审查中"}) is True
+    body = buf.getvalue().decode()
+    assert body.startswith("event: log\ndata: ")
+    assert '"type": "log"' in body
+
+
+def test_stream_handler_survives_closed_tab(client):
+    """The disconnect guard must be wired in, not just defined."""
+    import inspect
+
+    from codeerratum.web import server as web_server
+
+    src = inspect.getsource(web_server.make_handler)
+    assert "_client_gone" in src
+    assert "_write_sse" in src

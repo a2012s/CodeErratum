@@ -139,3 +139,49 @@ async def test_dual_orchestration_end_to_end(repo, monkeypatch):
     assert collection.comparison["after_clustering"] == 1
     # A falsify call was recorded from the third vendor.
     assert any(c.get("role") == "falsify" for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_falsify_progress_keeps_full_claim(repo, monkeypatch):
+    """The SSE progress line must show the whole claim, not a 40-char prefix."""
+    from codeerratum.ingest import get_diff, split_diff
+
+    diff = get_diff("HEAD", repo)
+    units = split_diff(diff, repo)
+    source_lines = (repo / "m.py").read_text().splitlines(keepends=True)
+    real_line = next(i for i, line in enumerate(source_lines, 1) if "return x[0]" in line)
+    snippet = source_lines[real_line - 1]
+    claim = "verify uses npm install despite pnpm packageManager pin"
+    assert 40 < len(claim) <= 60  # regression truncated at 40; model schema caps at 60
+
+    registry = ModelRegistry(
+        models=[
+            ModelSpec(model_id="gpt-4o-x", base_url="http://a", family="openai"),
+            ModelSpec(model_id="claude-3-x", base_url="http://b", family="anthropic"),
+            ModelSpec(model_id="deepseek-chat", base_url="http://c", family="deepseek"),
+        ]
+    )
+    stubs = {
+        mid: ReviewStub(mid, fam, real_line, snippet, claim)
+        for mid, fam in [
+            ("gpt-4o-x", "openai"),
+            ("claude-3-x", "anthropic"),
+            ("deepseek-chat", "deepseek"),
+        ]
+    }
+    monkeypatch.setattr(orch, "_make_provider", lambda spec: stubs[spec.model_id])
+
+    messages: list[str] = []
+    await run_review(
+        registry,
+        "dual",
+        units,
+        repo,
+        "run-full-claim",
+        author_model=None,
+        progress=messages.append,
+    )
+
+    falsify_lines = [m for m in messages if m.startswith("证伪 ")]
+    assert falsify_lines
+    assert any(claim in m for m in falsify_lines)

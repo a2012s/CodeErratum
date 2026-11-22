@@ -1,8 +1,9 @@
 """Model registry — heterogeneous model selection and routing.
 
-Heterogeneity is judged by ``family`` (vendor), not by model version. Two models
-from the same vendor with different snapshots do NOT count as heterogeneous —
-they share correlated blind spots, which is exactly what phase 3 exists to break.
+Heterogeneity is judged by ``model_id`` (a pinned snapshot), not by vendor. Two
+versions from the same vendor DO count as distinct reviewers: different versions
+have different emphases and can catch each other's blind spots. ``family`` is
+kept as a display/report label only; it never gates reviewer selection.
 """
 
 from __future__ import annotations
@@ -14,9 +15,9 @@ from pydantic import BaseModel, Field, field_validator
 
 Mode = Literal["quick", "dual", "committee"]
 
-# Known vendor families, keyed by the leading token of model_id. Unknown models
-# fall back to their full id as the family, so distinct unknown models are still
-# treated as heterogeneous (safe default for the heterogeneity constraint).
+# Known vendor families, keyed by the leading token of model_id. Used only as a
+# display/report label — reviewer selection keys on model_id, so two versions of
+# the same vendor are both eligible. Unknown models fall back to their full id.
 _FAMILY_PREFIXES: dict[str, str] = {
     "gpt": "openai",
     "o1": "openai",
@@ -44,7 +45,7 @@ def derive_family(model_id: str) -> str:
 
 
 class ModelSpec(BaseModel):
-    """One review model endpoint. Multiple specs with distinct families enable phase 3."""
+    """One review model endpoint. Distinct model_ids enable multi-model review."""
 
     model_id: str = Field(description="Model id, pinned to a snapshot — never 'latest'")
     base_url: str
@@ -103,10 +104,11 @@ class ModelRegistry(BaseModel):
     ) -> tuple[list[ModelSpec], ModelSpec | None]:
         """Pick reviewers and an optional falsifier.
 
-        Returns (reviewers, falsifier). In dual/committee mode reviewers have
-        distinct families. The falsifier is drawn from a family not used by any
-        reviewer (a third vendor when available), else None — callers then fall
-        back to cross-falsification between reviewers.
+        Returns (reviewers, falsifier). Reviewer identity is the pinned
+        ``model_id``: two versions of the same vendor are two reviewers. The
+        falsifier is a model not used as a reviewer (a spare model when one is
+        available), else None — callers then fall back to cross-falsification
+        between the reviewers themselves.
         """
         lenses = lenses or []
         pool = self.available(author_model)
@@ -116,31 +118,20 @@ class ModelRegistry(BaseModel):
         n = {"quick": 1, "dual": 2, "committee": 3}[mode]
         ranked = sorted(pool, key=lambda m: -m.score(lenses))
 
-        reviewers: list[ModelSpec] = []
-        seen_families: set[str] = set()
-        for m in ranked:
-            fam = m.resolved_family()
-            if n >= 2 and fam in seen_families:
-                continue
-            reviewers.append(m)
-            seen_families.add(fam)
-            if len(reviewers) == n:
-                break
-
-        if n >= 2 and len(reviewers) < n:
+        reviewers = ranked[:n]
+        if len(reviewers) < n:
             raise ValueError(
                 f"mode '{mode}' needs {n} heterogeneous models but only "
-                f"{len(reviewers)} distinct families are available"
+                f"{len(reviewers)} distinct models are available"
             )
 
+        reviewer_ids = {m.model_id for m in reviewers}
         falsifier: ModelSpec | None = None
         if n >= 2:
-            for m in ranked:
-                if m.resolved_family() not in seen_families:
-                    falsifier = m
-                    break
+            falsifier = next((m for m in ranked if m.model_id not in reviewer_ids), None)
         return reviewers, falsifier
 
     @staticmethod
     def heterogenous(a: ModelSpec, b: ModelSpec) -> bool:
-        return a.resolved_family() != b.resolved_family()
+        """Two specs are heterogeneous when they are distinct pinned snapshots."""
+        return a.model_id != b.model_id

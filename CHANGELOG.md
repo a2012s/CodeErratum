@@ -4,14 +4,53 @@
 
 ### Fixed
 
+- **关闭/刷新页面不再把审查整轮判失败**（本次「审查失败」的真实原因）：SSE 写帧遇到
+  `BrokenPipeError: [Errno 32] Broken pipe` 时会从 `progress` 回调一路抛回 `run_review`，
+  被当成 `internal error`，已跑完的评审与证伪结果全部丢在 `status=error`。
+  实测 traceback 确认：标签页关闭后下一行 `say(...)` 写帧失败即中止。
+  现在 `_write_sse()` 捕获 `OSError` 并返回 False，处理函数置 `_client_gone` 后停止写帧，
+  **审查继续在服务端跑完**，其他标签页或刷新后的页面通过 `/api/review/status` 接着看；
+  `_send()` 同样吞掉断连写失败，不再为每个已关闭的请求打印 traceback。新增 2 项测试。
+- **失败原因不再丢失**：`GET /api/review/status` 过去只保留 running/status/进度，异常一句话发进 SSE 就被丢掉；
+  其他标签页看到「审查失败」四个字却无从判断。现在失败原因写入状态并回显（含其他标签页的轮询路径），
+  服务端打印完整 traceback；下发前把仓库根/家目录替换成 `<repo>` / `~`，不泄露本地路径。
+  同时修正 `finished_at` 把 `time.monotonic()` 当墙上时间下发的问题。新增 3 项测试。
+- **证伪进度截断**：SSE 里的 `证伪 …` 行过去硬切 `claim[:40]`，英文文案断在半个单词上。
+  现在输出完整 claim（Finding 本身限制 ≤60 字符），只把换行折成空格以保持单帧。新增 1 项测试。
+
+### Changed
+
+- **进度日志按重要程度着色**：阶段行（启动、Split diff、证伪轮）蓝色；警告/降级/证据不足/被证伪（refuted）琥珀色；
+  通过（confirmed）、整体完成绿色；失败、调用失败、超时、异常红色并加粗；逐单元例行日志保持灰色。
+  明暗主题分别定义 `--warn` / `--ok` / `--bad`，避免暗色下红绿字看不清。显式级别优先于自动推断。新增 1 项测试。
+
 - **审查中重复点击的反馈**：过去在审查进行中再点「运行审查」，报英文 `a review is already running in this process`，
   按钮也没进入审查态。现在 WebApp 维护全进程唯一的审查状态（running / status / 进度消息 / 范围 / 计时），
   新增 `GET /api/review/status`；各标签页每 1.5s 轮询——审查在进行中时「运行审查」显示「审查中…」并禁用，
   进度日志跟着刷新（含其他标签页或断线连接启动的审查）。抢跑 409 不再弹错误框，转为跟踪已有审查；
   进度回调统一写状态，锁冲突文案改中文。新增 2 项测试。
 
+### Changed
+
+- **可拖动左右分栏 + 进度面板常驻**：`.layout` 从固定 `292px | 1fr` 改为 `sidebar | 拖拽柄 | content` 三列，
+  拖动竖直分割线实时改变两侧占比（220px ~ 视口-420px），双击复位 292px，宽度记在 localStorage。
+  进度面板在侧栏内改为 `position: sticky; top: 0`，滚动历史运行不再被顶出视野；日志默认 300px 高，
+  底部新增拖拽手柄调高度（双击复位），同样持久化。拖动用 Pointer Events + window 级 move/up，
+  不依赖 setPointerCapture 成功与否；`flex-shrink:0` 防止 sticky 面板被 flex 容器压塌。
+  移动端（<860px）自动回退单列、隐藏分割线。新增 1 项静态断言测试，CDP 实测拖动/sticky/持久化通过。
+- **异构判据从厂商改为模型版本**：过去 dual/committee 按 `family`（厂商）去重，同厂两个版本会被拒
+  （`mode 'committee' needs 3 heterogeneous models but only 2 distinct families are available`）。
+  现在按锁定的 `model_id` 判定：`qwen3.8-flash` 与 `qwen4-max-preview` 算两个独立评审者，版本侧重点不同
+  正好互补；相同 `model_id` 重复配置仍被拒。`family` 退为展示/报告标签（留空自动推断），不影响同席。
+  证伪轮优先用未参与审查的空闲模型，没有则从提出发现之外的评审者中挑一个交叉证伪。
+  更新 registry / orchestrator 注释、配置抽屉说明、中英文 README。新增 4 项测试。
+
 ### Added
 
+- **打开当前仓库文件夹**：仓库抽屉的当前仓库信息下方新增「打开当前仓库文件夹」按钮，
+  调用 `POST /api/repo/open` 用系统文件管理器打开服务端已定位的 git 根（macOS `open` /
+  Windows `explorer` / Linux `xdg-open` 或 `gio`）。目标不接受页面传入，避免被当成任意目录打开器；
+  失败弹可复制对话框，与其他写接口一样要求同源 Origin / Host。新增 4 项测试。
 - **审查中停止**：进度面板标题栏新增「停止审查」按钮，点一次即向服务端发 `POST /api/review/stop`。
   WebApp 用线程安全 Event 传递停止信号，编排层在 asyncio 循环内轮询并 cancel 所有在途模型调用
   （httpx 请求被真正中断，不会等几十秒才响应），SSE 推 `cancelled` 帧收尾，状态记为 `cancelled`
