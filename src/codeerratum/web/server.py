@@ -187,11 +187,11 @@ def open_homepage() -> dict:
 
 
 def _finding_brief(finding, model_id: str) -> dict:
-    """The three fields a live list needs — not the whole work order.
+    """The fields a live list needs, plus the reasoning behind the claim.
 
-    The full record (detail, snippet, suggestion, verdicts) is fetched with the
-    finished run. Streaming it per unit would push kilobytes through the stream
-    for a line of text the panel is going to truncate anyway.
+    Snippet/suggestion/verdicts still wait for the finished run — they belong to
+    the report — but ``detail`` is the difference between a headline the reader
+    can judge and one they have to take on faith for minutes at a time.
     """
     anchor = finding.anchors[0] if finding.anchors else None
     return {
@@ -200,6 +200,7 @@ def _finding_brief(finding, model_id: str) -> dict:
         "severity": str(finding.severity),
         "lens": str(finding.lens),
         "claim": finding.claim,
+        "detail": finding.detail,
         "file": anchor.file if anchor else "",
         "line": anchor.start_line if anchor else 0,
         "unit_id": finding.unit_id,

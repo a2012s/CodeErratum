@@ -197,6 +197,13 @@ def test_findings_stream_into_the_right_pane_one_by_one():
     assert "liveAddFinding(ev.finding" in html
     # Raw cards are explicitly not the report.
     assert "尚未聚类" in html
+    # The streaming path must swap to the report at "done", exactly like the
+    # tracking path does — otherwise the pane stays on one-line cards and the
+    # detailed report never appears without a manual click.
+    assert "openRun(runId)" in html
+    assert 'ev.type === "done"' in html
+    # Live cards carry the reasoning behind the claim, collapsed by default.
+    assert "live-detail" in html
     # Opening a finished run (or switching repo) hides the live list.
     assert '$("liveView").hidden = true' in html
     # A run starts on the live view, not on the "fill in a diff range" placeholder.

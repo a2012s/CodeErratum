@@ -724,6 +724,9 @@ def test_review_stream_pushes_progress_then_done(client):
     assert kinds.index("finding") < kinds.index("done")
     brief = next(e["finding"] for e in events if e["type"] == "finding")
     assert brief["claim"] and brief["file"] and brief["model"]
+    # detail travels too: a one-line claim alone reads as "less detailed than
+    # the old report" — the reasoning is what makes a live card judgeable.
+    assert brief.get("detail"), "the live card needs the reasoning, not just the headline"
     done = events[-1]
     assert done["findings"] == 1
     assert done["run_id"]

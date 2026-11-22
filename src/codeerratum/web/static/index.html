@@ -223,6 +223,12 @@
      claim that has not been clustered or falsified yet. */
   .card.live { border-left: 3px solid var(--accent); }
   .card.live .claim { font-size: 14px; }
+  .live-detail { margin-top: 6px; }
+  .live-detail summary {
+    cursor: pointer; font-size: 12px; color: var(--muted);
+    user-select: none; width: fit-content;
+  }
+  .live-detail .detail { margin-top: 5px; font-size: 13px; }
   .card-head { display: flex; gap: 9px; align-items: flex-start; padding: 12px 14px 8px; }
   .sev {
     font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 6px;
@@ -646,6 +652,7 @@ const STR = {
   "配置来源": "Config source",
   "来源：{src}": "Source: {src}",
   "配置文件": "config file",
+  "详情": "Details",
   "默认配置": "default config",
   "全局默认配置 <code>{path}</code>（本项目尚未单独保存）":
     "User default <code>{path}</code> (this project has not saved its own yet)",
@@ -1315,6 +1322,7 @@ function liveAddFinding(f) {
   const card = document.createElement("article");
   card.className = "card live";
   card.dataset.fid = key;
+  const detail = String(f.detail || "").trim();
   card.innerHTML =
     `<div class="card-head">` +
     (sev ? `<span class="sev ${esc(sev)}">${esc(sev)}</span>` : "") +
@@ -1324,7 +1332,9 @@ function liveAddFinding(f) {
     `<div class="card-body"><div class="loc">` +
     (where ? `<span class="path">${esc(where)}</span>` : "") +
     (meta ? `<span>${esc(meta)}</span>` : "") +
-    `</div></div>`;
+    `</div>` +
+    (detail ? `<details class="live-detail"><summary>${esc(T("详情"))}</summary><div class="detail">${esc(detail)}</div></details>` : "") +
+    `</div>`;
   $("liveCards").appendChild(card);
   $("liveCount").textContent = count(LIVE_FINDINGS, "条（实时）", "so far", "so far");
   // A tracking tab keeps its "elapsed · scope" title; only the streaming tab
@@ -1655,6 +1665,14 @@ $("runBtn").onclick = async () => {
           }), "done");
           tokenSummary(ev.tokens).forEach((l) => progressAddLine(l, "done"));
           progressFinishHead(T("审查完成"));
+          // The tracking path opens the report at st.status === "done"; the
+          // streaming path must too, or the pane stays on the one-line live
+          // cards and the detailed report (snippet, detail, suggestion,
+          // verdicts) never shows up without a manual click.
+          if (runId) {
+            loadRuns(false);
+            openRun(runId);
+          }
         }
       }
     };
