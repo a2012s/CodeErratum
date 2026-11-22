@@ -16,6 +16,7 @@ bundle is a Python environment plus the OS runtime — no Chromium copy.
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from ..i18n import t
@@ -29,6 +30,24 @@ DEFAULT_MIN_SIZE = (980, 640)
 STORAGE_DIR = Path.home() / ".codeerratum" / "webview"
 
 
+def guard_close_while_busy(window, is_busy: Callable[[], bool]) -> Callable[[], bool | None]:
+    """Build a pywebview ``closing`` handler that asks before killing a paid run.
+
+    pywebview treats a handler that returns ``False`` as "cancel the close";
+    ``None`` means "no opinion" and keeps the normal close path. The check is
+    deliberately a callback, not a captured snapshot: a run can start after the
+    window opens, and the guard must see it at the moment the user clicks.
+    """
+    def _on_closing() -> bool | None:
+        if not is_busy():
+            return None
+        return window.create_confirmation_dialog(
+            t("desk.close_busy_title"), t("desk.close_busy_message")
+        )
+
+    return _on_closing
+
+
 def open_window(
     url: str,
     title: str,
@@ -36,6 +55,7 @@ def open_window(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     min_size: tuple[int, int] = DEFAULT_MIN_SIZE,
+    is_busy: Callable[[], bool] | None = None,
 ) -> None:
     """Open the window and block until the user closes it."""
     try:
@@ -43,7 +63,7 @@ def open_window(
     except ImportError as exc:  # optional extra, or a platform without a GUI
         raise RuntimeError(t("desk.missing")) from exc
 
-    webview.create_window(
+    window = webview.create_window(
         title,
         url,
         width=width,
@@ -53,6 +73,11 @@ def open_window(
         # whole point of the report page is copying lines out of it.
         text_select=True,
     )
+    if is_busy is not None:
+        # Only the user's close button / Cmd+Q goes through this handler.
+        # The watchdog and signal teardown call window.destroy() directly, so
+        # a crash or a parent exit can never be blocked by a confirmation box.
+        window.events.closing += guard_close_while_busy(window, is_busy)
     # private_mode (the default) drops the WebView profile on exit, and the UI
     # keeps the chosen language and the pane widths in localStorage — those
     # would reset on every launch. A fixed storage_path keeps them.
@@ -78,7 +103,15 @@ def close_window() -> None:
             pass
 
 
-def launch(httpd, url: str, title: str, *, window=None, **options) -> None:
+def launch(
+    httpd,
+    url: str,
+    title: str,
+    *,
+    window=None,
+    is_busy: Callable[[], bool] | None = None,
+    **options,
+) -> None:
     """Serve on a background thread while the window owns the main thread.
 
     The order matters on macOS: AppKit requires the GUI on the main thread, so
@@ -86,6 +119,8 @@ def launch(httpd, url: str, title: str, *, window=None, **options) -> None:
     window closes, the server is stopped and the port released before returning.
     """
     window = window or open_window
+    if is_busy is not None:
+        options["is_busy"] = is_busy
     thread = threading.Thread(target=httpd.serve_forever, name="codeerratum-ui", daemon=True)
     thread.start()
     try:

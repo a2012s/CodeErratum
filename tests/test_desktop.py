@@ -245,3 +245,94 @@ def test_seeding_a_repo_keeps_the_projects_already_saved(tmp_path):
     finally:
         httpd.server_close()
     assert len(json.loads(state.read_text(encoding="utf-8"))["projects"]) == 2
+
+
+# ---- closing guard: a paid run must not die without a question ----------------
+
+
+class _FakeClosingEvent:
+    def __init__(self):
+        self.handlers: list = []
+
+    def __iadd__(self, handler):
+        self.handlers.append(handler)
+        return self
+
+
+class _FakeWindow:
+    def __init__(self):
+        self.events = type("Events", (), {"closing": _FakeClosingEvent()})()
+        self.asked: list[tuple[str, str]] = []
+        self.answer = False
+
+    def create_confirmation_dialog(self, title, message):
+        self.asked.append((title, message))
+        return self.answer
+
+
+def test_close_guard_only_asks_while_busy():
+    win = _FakeWindow()
+    busy = [False]
+    guard = desktop.guard_close_while_busy(win, lambda: busy[0])
+
+    with language("zh"):
+        assert guard() is None, "idle close needs no question"
+        assert win.asked == []
+        busy[0] = True
+        assert guard() is False, "Cancel must keep the window open"
+        assert len(win.asked) == 1
+        assert "审查" in win.asked[0][0]
+
+    win.answer = True
+    with language("en"):
+        assert guard() is True, "OK must let the close proceed"
+        assert "Review" in win.asked[-1][0]
+
+
+def test_open_window_registers_the_closing_guard(monkeypatch, tmp_path):
+    win = _FakeWindow()
+    fake_webview = type(sys)("webview")
+    fake_webview.create_window = lambda *a, **kw: win
+    fake_webview.start = lambda **kw: None
+    monkeypatch.setitem(sys.modules, "webview", fake_webview)
+    monkeypatch.setattr(desktop, "STORAGE_DIR", tmp_path / "storage")
+
+    desktop.open_window("http://127.0.0.1:1/", "t", is_busy=lambda: True)
+
+    assert len(win.events.closing.handlers) == 1
+    assert win.events.closing.handlers[0]() is False
+    assert win.asked
+
+    # Without a busy callback the shell stays exactly as before: no handler.
+    plain = _FakeWindow()
+    fake_webview.create_window = lambda *a, **kw: plain
+    desktop.open_window("http://127.0.0.1:1/", "t")
+    assert plain.events.closing.handlers == []
+
+
+def test_launch_forwards_the_busy_callback(tmp_path):
+    _hub, httpd, _app = build_bare(tmp_path)
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    seen: dict = {}
+
+    def fake_window(url, title, **options):
+        seen["is_busy"] = options.get("is_busy")
+
+    try:
+        desktop.launch(
+            httpd, base + "/", "t", window=fake_window, is_busy=lambda: True
+        )
+    finally:
+        httpd.server_close()
+    assert seen["is_busy"] is not None
+    assert seen["is_busy"]() is True
+
+
+def test_review_busy_covers_both_modes():
+    from types import SimpleNamespace
+
+    assert cli.review_busy(None, None) is False
+    assert cli.review_busy(None, SimpleNamespace(review_status=lambda: {"running": False})) is False
+    assert cli.review_busy(None, SimpleNamespace(review_status=lambda: {"running": True})) is True
+    assert cli.review_busy(SimpleNamespace(snapshot=lambda: {"running": 0}), None) is False
+    assert cli.review_busy(SimpleNamespace(snapshot=lambda: {"running": 2}), None) is True

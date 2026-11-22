@@ -395,6 +395,12 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "desk.title": ("CodeErratum 代码审查", "CodeErratum"),
     "desk.closed": ("窗口已关闭，服务停止", "Window closed; server stopped"),
+    "desk.close_busy_title": ("审查进行中，确定退出？", "Review in progress — quit anyway?"),
+    "desk.close_busy_message": (
+        "退出会立即中断正在进行的审查，未完成的模型调用被取消；本次已产生的费用不会退回。",
+        "Quitting stops the review immediately and cancels in-flight model calls. "
+        "Tokens already used are not refunded.",
+    ),
     "desk.parent_gone": (
         "启动本服务的进程已退出，服务随之停止",
         "The process that launched this server exited; stopping",

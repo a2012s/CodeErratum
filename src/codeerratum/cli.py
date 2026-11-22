@@ -398,6 +398,20 @@ def _url_for(httpd, host: str, print_port: bool) -> str:
     return f"http://{host}:{port}/"
 
 
+def review_busy(hub, app_ui) -> bool:
+    """True while any project is running — or queued for — a review.
+
+    The CLI sees either one repo (``app_ui``) or a hub of several; the close
+    guard needs the same answer in both modes. Queued counts too: killing the
+    server while a run waits for a slot still discards work the user started.
+    """
+    if hub is not None:
+        return hub.snapshot()["running"] > 0
+    if app_ui is not None:
+        return bool(app_ui.review_status()["running"])
+    return False
+
+
 def _watch_owner(parent_pid: int, httpd, extra=None) -> None:
     """Stop when the launcher exits — otherwise a crash leaves a paid review
     running with nobody to read the result."""
@@ -512,6 +526,10 @@ def desktop(
         close_window()
         stop_server(httpd)
 
+    def _review_busy() -> bool:
+        """Any project running (or queued for) a review — hub or single-repo mode."""
+        return review_busy(_hub, app_ui)
+
     deferred = defer_signals(_teardown)
 
     console.print(f"[green]CodeErratum[/green] on {url}")
@@ -528,7 +546,14 @@ def desktop(
     if not deferred:
         _on_terminate(httpd, extra=close_window)
     try:
-        launch(httpd, url, t("desk.title"), width=width, height=height)
+        launch(
+            httpd,
+            url,
+            t("desk.title"),
+            width=width,
+            height=height,
+            is_busy=_review_busy,
+        )
     except RuntimeError as exc:
         # Only the optional GUI extra is allowed to fail with RuntimeError here;
         # the server and its socket are already released by launch().
