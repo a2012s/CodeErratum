@@ -19,15 +19,17 @@
       现已把平台显式参数化（darwin / win32 / linux），并补一条「Linux 缺 zenity
       时要指名道姓地报错」的用例；顺带钉住 Windows 特例——explorer 打开窗口后
       返回非零状态不算失败。
-    - **`--help` 断言受终端宽度影响**（run #43 ~ #45）：typer 用 rich 渲染
+    - **`--help` 断言受终端宽度影响**（run #43 ~ #46）：typer 用 rich 渲染
       help，rich 在窄终端下会折断放不下的词——20 列时 `--no-repo` 变成 `--no-`
       加 `repo`，中文短语会被逐字拆开。而 rich 在 `Console()` 构造时就把宽度
       **固化**了，`cli.py` 的模块级 `console = Console()` 于是在 import 时刻
       就把宽度定死，测试里再改环境变量已经太晚。现由 `tests/conftest.py` 在
       **导入期**（conftest 先于测试模块导入）把 `COLUMNS` 钉成 120，CI 的 Test
       步骤也显式设同样的值；断言本身也改为**先问命令对象**
-      （`get_command(app).commands["ui"].params`）再对渲染结果做去空白的宽松
-      匹配，不再把「选项存不存在」押在排版上。
+      （`get_command(app).commands["ui"].params`）再问 **click 自己的选项列表**
+      （`cmd.format_options`）——typer 只覆盖了 `format_help`，`format_options`
+      仍是 click 原生实现，输出纯文本，不经过 rich，也就不受 rich 版本、终端
+      宽度、`TERM=dumb`、`force_terminal` 这些环境影响。
 
 - 用 `ghcr.io/astral-sh/uv` 容器（Ubuntu + Python 3.11 + git）本地复现 CI，
   确认红灯来源；容器内 530 passed / 0 failed。
@@ -54,7 +56,15 @@
 
 Python 3.11 / 3.12 / 3.13 三版本各 **530 passed / 0 failed**，
 Ubuntu 容器内 530 passed / 0 failed，`ruff check .` 与 `ruff format --check .`
-全绿。
+全绿。CI 自 run #47 起重新变绿（#1 ~ #11 是上一次全绿，之后连续 29 次
+红灯）。
+
+### Known
+
+- `CliRunner` 路径下 rich 渲染的 `--help` 与真实 CLI 的输出在 CI 上不一致
+  （真实 CLI 正常，base64 实测确认 `--no-repo` 在选项列表里）。渲染断言已
+  改为不依赖 rich，但如果将来要断言「rich 渲染出的 help 里有什么」，得先
+  弄清这处差异。
 
 ## [0.7.0] — 2026-11-23
 

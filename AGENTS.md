@@ -22,7 +22,15 @@
 
 1. **版本号末位 +0.1**（0.6.2 → 0.6.3），同时改 `__init__.py` 与 `CHANGELOG.md` 顶部小节标题。
 2. **改完必须打包并替换桌面应用**：先把旧 `dist/` 移走，再 `.venv/bin/python packaging/build.py`；构建脚本内含 `--selftest`（必须过，包括 webview 后端导入）；然后跑 `packaging/install.sh`（**不要直接 `ditto` 到 `/Applications`**，见下）。用户按桌面应用使用，只改源码不算交付。
-3. **提交前跑全量测试 + ruff**。有 5 项既有基线失败，不算新回归：`test_desktop::test_seeding_a_repo_keeps_the_projects_already_saved`、`test_hub::test_add_dedupes_and_validates`、`test_hub::test_add_and_remove_project_over_http`、`test_snapshot::test_commit_relative_specs_mean_everything_only_without_history`、`test_web::test_pipeline_refuses_an_unknown_revision_in_a_plain_folder`。
+3. **提交前跑全量测试 + ruff**：`ruff check .` 与 `ruff format --check .` 都要跑（CI 查的是**全仓库**，不只是 `src tests`——`.` 里还有 `packaging/`、`scripts/`、`demo/`）。当前基线是 **530 passed / 0 failed**，没有例外项。
+
+## CI（0.7.1 修好之后，run #47 起重新变绿）
+
+CI 从 run #12 到 #46 连续红了 35 次，根因有三类，逐条别再犯：
+
+- **改了 Python 文件就顺手 `ruff format`**。只跑 `ruff check` 不跑 `ruff format`，CI 的 Format check 会红。
+- **测试不许依赖运行机器的环境**。终端宽度（`COLUMNS`）和平台（`sys.platform`）都不许靠继承：typer 用 rich 渲染 help，rich 在 `Console()` 构造时就把宽度固化，而 `cli.py` 有一个模块级 `console = Console()`；平台相关的分支（zenity / xdg-open / explorer）也各有各的前置条件。要断言「某个选项存在」，就问命令对象（`get_command(app).commands[...].params`）或 click 的 `format_options`，别去读渲染后的文本。
+- **CI 挂了先看 error annotation**，不用开原始日志：Test 步骤把 `FAILED`/`ERROR` 行以 `::error::` 输出，提交页上直接可见。
 
 ## 桌面应用安装（0.7.0 踩过的坑，务必按脚本走）
 
@@ -58,7 +66,8 @@ zlib.error: Error -3 while decompressing data: incorrect header check
 
 ## 环境坑
 
-- pytest 默认临时目录 `.../pytest-of-root` 会 EEXIST，必须 `--basetemp=<项目内目录>`。
+- pytest 的临时目录必须放在**仓库外**：`--basetemp=/tmp/ce_pytest`。放在仓库内（`--basetemp=.pytest_tmp/local`）会让 `tmp_path` 落进 git 工作树，`resolve_git_root` / `is_git_repo` 向上遍历找到项目根，于是 5 个测试**假失败**（hub 两条、snapshot、desktop、web 各一）——它们曾被误记成「既有基线失败」，害得每轮都在核对并不存在的问题。系统默认的 TMPDIR 在本机会 EEXIST，所以要显式给一个仓库外的路径。
+- 终端宽度会被测试读到：typer 用 rich 渲染 help，rich 在 `Console()` 构造时就把宽度固化，而 `cli.py` 有模块级 `console = Console()`。`tests/conftest.py` 在**导入期**（conftest 先于测试模块导入）把 `COLUMNS` 钉成 120，CI 的 Test 步骤也显式设同样的值。
 - 沙箱禁止 `rm -rf` / `shutil.rmtree` 清理构建产物；用 `mv` 到 `~/.Trash` 或 `.old_<版本>`。
 - 测试 fake provider 不必实现 `aclose`：orchestrator 用 `getattr` 保护，但真实 provider 必须关闭共享 client。
 
@@ -78,7 +87,8 @@ zlib.error: Error -3 while decompressing data: incorrect header check
 ## 测试入口
 
 ```bash
-mkdir -p .pytest_tmp/local
-.venv/bin/python -m pytest -q --basetemp=.pytest_tmp/local
-.venv/bin/ruff check src tests
+# 临时目录必须在仓库外；理由见「环境坑」
+.venv/bin/python -m pytest -q --basetemp=/tmp/ce_pytest
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
 ```
