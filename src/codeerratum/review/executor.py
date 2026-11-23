@@ -80,6 +80,7 @@ def language_directive(output_lang: str) -> str:
         "and code identifiers untranslated.\n"
     )
 
+
 # Context window sent to the model: hunk ± PAD lines, plus the enclosing symbol
 # when it fits. Sending the whole file for a one-line change multiplies cost by
 # the file size on every unit and every model.

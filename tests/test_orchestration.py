@@ -430,9 +430,7 @@ async def test_tiered_verifier_failure_becomes_a_machine_drop(repo, monkeypatch)
     assert all(r["model"] == "strong-verifier" for r in verify_errors)
     assert all(r.get("unit_id") for r in verify_errors)
     # the raw error stays visible in calls.json for whoever debugs the endpoint
-    assert any(
-        c.get("role") == "verify" and c.get("verdict") == "error" for c in calls
-    )
+    assert any(c.get("role") == "verify" and c.get("verdict") == "error" for c in calls)
     # attempted vs failed: cross-review stats must not look more complete than it was
     assert collection.comparison["verify_failed_units"] == len(verify_errors)
     assert collection.comparison["verified_units"] >= len(verify_errors)

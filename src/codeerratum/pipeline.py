@@ -132,9 +132,7 @@ class ReviewOutcome:
         # separately as failed_units. "rejected" is kept as a legacy alias of
         # "dropped"; it never meant a human rejection.
         dropped = sum(
-            1
-            for r in self.collection.rejected
-            if not is_unit_failure(str(r.get("reason") or ""))
+            1 for r in self.collection.rejected if not is_unit_failure(str(r.get("reason") or ""))
         )
         failed_units = len(self.collection.rejected) - dropped
         return {
@@ -207,8 +205,16 @@ AUTO_UNIT_BUDGET = 60
 # style opinion. Static checks (schema/lint/doc-drift) cover them better. The
 # skip is visible in the report notes and reversible with include_non_code=True.
 NON_CODE_SUFFIXES = {
-    ".md", ".mdx", ".rst", ".adoc", ".txt",
-    ".json", ".toml", ".yaml", ".yml", ".ini",
+    ".md",
+    ".mdx",
+    ".rst",
+    ".adoc",
+    ".txt",
+    ".json",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".ini",
 }
 I18N_PATH_PARTS = ("/i18n/", "/locale", "/locales/", "/translations/", "/lang/")
 
@@ -653,9 +659,7 @@ def execute_review(
     # reviewer never produced anything (unit unreviewed), verify_error means
     # the finding survived but its second opinion is missing. Counting them
     # together made users underestimate coverage.
-    provider_failures = [
-        r for r in collection.rejected if r.get("reason") == "provider_error"
-    ]
+    provider_failures = [r for r in collection.rejected if r.get("reason") == "provider_error"]
     if provider_failures:
         notices.append(t("pipeline.units_failed", n=len(provider_failures)))
         # A count alone leaves the reader guessing between "my key is wrong" and
@@ -668,9 +672,7 @@ def execute_review(
         if reasons:
             notices.append(t("pipeline.units_failed_reason", reasons=" · ".join(reasons[:3])))
 
-    verify_failures = [
-        r for r in collection.rejected if r.get("reason") == "verify_error"
-    ]
+    verify_failures = [r for r in collection.rejected if r.get("reason") == "verify_error"]
     if verify_failures:
         notices.append(t("pipeline.verify_failed", n=len(verify_failures)))
         reasons_v: list[str] = []
@@ -679,9 +681,7 @@ def execute_review(
             if hint and hint not in reasons_v:
                 reasons_v.append(hint)
         if reasons_v:
-            notices.append(
-                t("pipeline.units_failed_reason", reasons=" · ".join(reasons_v[:3]))
-            )
+            notices.append(t("pipeline.units_failed_reason", reasons=" · ".join(reasons_v[:3])))
 
     # Only per-finding drops count as "machine dropped": refuted claims, anchor
     # mismatches, duplicates. Unit failures above never removed a finding, so

@@ -153,8 +153,7 @@ def _line_window(text: str, line_no: int, pad: int) -> tuple[int, int, str] | No
     start = max(1, line_no - pad)
     end = min(len(lines), line_no + pad)
     body = "\n".join(
-        f"{i:4d} | {lines[i - 1].rstrip()[:MAX_CALLER_LINE_CHARS]}"
-        for i in range(start, end + 1)
+        f"{i:4d} | {lines[i - 1].rstrip()[:MAX_CALLER_LINE_CHARS]}" for i in range(start, end + 1)
     )
     return start, end, body
 

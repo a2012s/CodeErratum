@@ -52,6 +52,7 @@ def guard_close_while_busy(window, is_busy: Callable[[], bool]) -> Callable[[], 
     built-in flow continues. The check is a callback, not a snapshot: a run can
     start after the window opens.
     """
+
     def _on_closing() -> bool | None:
         window.confirm_close = bool(is_busy()) and not _FORCED.is_set()
         return None

@@ -246,9 +246,7 @@ def test_status_lookup_survives_rerun(repo, monkeypatch):
     }
 
 
-def test_get_run_snapshots_repo_and_store_before_a_concurrent_switch(
-    repo, tmp_path, monkeypatch
-):
+def test_get_run_snapshots_repo_and_store_before_a_concurrent_switch(repo, tmp_path, monkeypatch):
     """switch_repo only holds the review lock; a read in flight must not graft
     another project's run rows/statuses onto this project's artifacts."""
     from codeerratum.web import server as web_server

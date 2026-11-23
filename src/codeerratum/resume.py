@@ -278,15 +278,9 @@ def resume_review(
     # with both opinions is the authority for that unit; keeping the old state
     # would double-count it (one finding could appear twice under two ids).
     rerun_ids = {u.unit_id for u in batch}
-    old_rejected = [
-        r for r in old_collection.rejected if r.get("unit_id") not in rerun_ids
-    ]
-    old_findings_kept = [
-        f for f in old_collection.findings if f.unit_id not in rerun_ids
-    ]
-    old_refuted_kept = [
-        f for f in old_collection.refuted_findings if f.unit_id not in rerun_ids
-    ]
+    old_rejected = [r for r in old_collection.rejected if r.get("unit_id") not in rerun_ids]
+    old_findings_kept = [f for f in old_collection.findings if f.unit_id not in rerun_ids]
+    old_refuted_kept = [f for f in old_collection.refuted_findings if f.unit_id not in rerun_ids]
 
     merged_findings = rank_findings(old_findings_kept + list(new_collection.findings))
     merged_rejected = old_rejected + list(new_collection.rejected)

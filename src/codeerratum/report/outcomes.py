@@ -424,9 +424,7 @@ def _split_row(line: str) -> list[str]:
 def _is_separator(cells: list[str]) -> bool:
     filled = [c.strip() for c in cells if c.strip()]
     return (
-        bool(filled)
-        and all(set(c) <= set("-: ") for c in filled)
-        and any("-" in c for c in filled)
+        bool(filled) and all(set(c) <= set("-: ") for c in filled) and any("-" in c for c in filled)
     )
 
 

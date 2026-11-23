@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.7.1] — 2026-11-23
+
+### Fixed
+
+- **CI 从第 12 次提交起就没有绿过**（run #12 ~ #40 连续 29 次红灯）。三个
+  阶段各自的成因都已定位并修掉：
+  - **Lint 失败**（run #38 起）：`demo/seeded-bugs/buggy_refunds.py` 用
+    `timezone.utc`，ruff UP017 要求 `datetime.UTC` 别名（Python ≥3.11）。
+  - **Format check 失败**（此前被 Lint 提前失败掩盖）：17 个 Python 文件的
+    排版与 `ruff format` 不一致——这些文件是逐轮手工编辑的，只跑了
+    `ruff check` 没跑 `ruff format`。现已全部格式化。
+  - **Test 失败**（run #12 ~ #37）：本地复现的「5 项既有基线失败」并非产品
+    缺陷，而是 pytest 临时目录被固定在仓库内（`.pytest_tmp/local`）导致
+    `tmp_path` 落进 git 工作树，`resolve_git_root` / `is_git_repo` 向上遍历
+    找到项目根，普通文件夹被误判成仓库子目录。改用仓库外的 basetemp 后
+    三项恢复通过；`pyproject.toml` 早年的注释已警告过不要把 basetemp 钉在
+    仓库里。
+
+### Changed
+
+- `[tool.ruff] extend-exclude = ["*.md"]`：ruff 0.17 起会格式化 Markdown 里的
+  Python 代码块。本仓库的 `.md` 是审查工单与变更记录，代码片段是从 diff 里
+  摘出来的单行，ruff 无法在不改变语义的前提下重排（`x = f(a)` 会被改成
+  `x = (f(a),)`）。格式化器不应改写历史审查记录，故排除 Markdown。
+
+### Tests
+
+Python 3.11 / 3.12 / 3.13 三版本各 **521 passed / 0 failed**，
+`ruff check .` 与 `ruff format --check .` 全绿。
+
 ## [0.7.0] — 2026-11-23
 
 ### Fixed

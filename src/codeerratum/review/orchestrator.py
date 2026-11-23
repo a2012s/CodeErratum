@@ -76,9 +76,7 @@ def _parse_snapshot(providers: list) -> tuple[dict[str, int | float | None], lis
                 parse_stats[key] = parse_stats.get(key, 0) + value
         for failure in getattr(provider, "failure_log", []):
             parse_failures.append(
-                failure.model_dump(mode="json")
-                if hasattr(failure, "model_dump")
-                else dict(failure)
+                failure.model_dump(mode="json") if hasattr(failure, "model_dump") else dict(failure)
             )
     parse_calls = parse_stats.get("calls", 0)
     parse_stats["success_rate"] = (
@@ -257,9 +255,9 @@ async def _review_with(
                     return
                 per_unit.setdefault(unit.unit_id, []).extend(findings)
                 if sink is not None:
-                    sink.per_unit.setdefault(spec.model_id, {}).setdefault(
-                        unit.unit_id, []
-                    ).extend(findings)
+                    sink.per_unit.setdefault(spec.model_id, {}).setdefault(unit.unit_id, []).extend(
+                        findings
+                    )
                 if on_findings and findings:
                     try:
                         on_findings(unit, findings, spec.model_id)
@@ -392,9 +390,7 @@ def _partial_collection(
     # Coverage is counted per model. In dual/committee a unit is only fully
     # reviewed when every reviewer finished it; taking a union of unit ids would
     # report 2/2 covered when model A did unit 1 and model B did unit 2.
-    per_model_units = {
-        m.model_id: set(partial.per_unit.get(m.model_id, {})) for m in reviewers
-    }
+    per_model_units = {m.model_id: set(partial.per_unit.get(m.model_id, {})) for m in reviewers}
     unit_sets = list(per_model_units.values())
     fully_done = set.intersection(*unit_sets) if unit_sets else set()
     any_done = set.union(*unit_sets) if unit_sets else set()
@@ -515,7 +511,9 @@ async def run_review(
                 )
         else:
             reviewers, falsifier_spec = registry.route(
-                mode, author_model=author_model, pinned=pinned  # type: ignore[arg-type]
+                mode,
+                author_model=author_model,
+                pinned=pinned,  # type: ignore[arg-type]
             )
         say(t("orch.start", models=len(reviewers), units=len(units)))
         stage = "review"

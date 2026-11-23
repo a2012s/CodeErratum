@@ -72,6 +72,12 @@ asyncio_default_fixture_loop_scope = "function"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# ruff 0.17 also formats Python blocks inside Markdown. Our .md files are review
+# work orders and change logs, whose snippets are lifted from diffs: a single
+# lifted line is not a statement ruff can reformat without changing what it
+# means (it would turn `x = f(a)` into `x = (f(a),)`). Formatters must not rewrite
+# the record of a past review, so Markdown stays out of the format scope.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

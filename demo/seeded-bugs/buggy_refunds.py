@@ -10,7 +10,7 @@ The commit under review plants exactly two bugs:
 """
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def write_audit_log(entry: str, log_dir: str) -> str:
@@ -25,5 +25,5 @@ def write_audit_log(entry: str, log_dir: str) -> str:
 
 def is_refund_window_open(deadline: datetime) -> bool:
     """Refunds are accepted until the deadline (UTC-aware)."""
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     return now_utc < deadline

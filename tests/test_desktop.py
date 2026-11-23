@@ -358,9 +358,7 @@ def test_launch_forwards_the_busy_callback(tmp_path):
         seen["is_busy"] = options.get("is_busy")
 
     try:
-        desktop.launch(
-            httpd, base + "/", "t", window=fake_window, is_busy=lambda: True
-        )
+        desktop.launch(httpd, base + "/", "t", window=fake_window, is_busy=lambda: True)
     finally:
         httpd.server_close()
     assert seen["is_busy"] is not None

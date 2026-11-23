@@ -82,9 +82,7 @@ def test_non_code_units_are_skipped_by_default(tmp_path, monkeypatch):
 
     seen_all: dict = {}
     _stub_run(monkeypatch, seen_all)
-    pipeline.execute_review(
-        repo, diff_spec="HEAD", include_non_code=True, progress=notes.append
-    )
+    pipeline.execute_review(repo, diff_spec="HEAD", include_non_code=True, progress=notes.append)
     assert len(seen_all["files"]) == 4, seen_all["files"]
 
 

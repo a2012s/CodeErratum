@@ -101,13 +101,9 @@ def _stop_banner(collection: FindingCollection) -> str:
     if partial:
         coverage += f"，另有 {partial} 个单元只有部分模型完成"
     if stage == "falsify":
-        consequence = (
-            "已完成审查的发现全部保留；证伪尚未跑完，未证伪的发现按“未裁决”展示。"
-        )
+        consequence = "已完成审查的发现全部保留；证伪尚未跑完，未证伪的发现按“未裁决”展示。"
     elif stage == "verify":
-        consequence = (
-            "扫描结果已保留；验证尚未跑完，未被验证的发现按“未裁决”展示。"
-        )
+        consequence = "扫描结果已保留；验证尚未跑完，未被验证的发现按“未裁决”展示。"
     else:
         consequence = "报告只包含截止停止时的发现；证伪/验证未执行。"
     return (
@@ -264,8 +260,7 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
     if not display:
         if collection.stopped:
             parts.append(
-                "## 结论\n\n"
-                "审查已停止，已完成单元未报出发现；这不代表未覆盖单元没有问题。\n\n"
+                "## 结论\n\n审查已停止，已完成单元未报出发现；这不代表未覆盖单元没有问题。\n\n"
             )
         else:
             parts.append("## 结论\n\n本次变更未发现明确问题。\n\n")
@@ -323,9 +318,7 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
     finding_drops = [
         r for r in collection.rejected if not is_unit_failure(str(r.get("reason") or ""))
     ]
-    unit_failures = [
-        r for r in collection.rejected if is_unit_failure(str(r.get("reason") or ""))
-    ]
+    unit_failures = [r for r in collection.rejected if is_unit_failure(str(r.get("reason") or ""))]
     if finding_drops:
         parts.append("## 已丢弃的发现（定位校验未通过 / 被证伪推翻）\n\n")
         parts.append("这些结论未通过校验，请勿据此修改：\n\n")
@@ -341,8 +334,10 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
         parts.append("\n")
     if unit_failures:
         parts.append("## 失败的单元（模型调用未完成）\n\n")
-        parts.append("这些单元的调用失败；provider_error 的单元未被审查，"
-                     "verify_error 的发现保留为未验证：\n\n")
+        parts.append(
+            "这些单元的调用失败；provider_error 的单元未被审查，"
+            "verify_error 的发现保留为未验证：\n\n"
+        )
         if len(unit_failures) > 10:
             parts.append(
                 f"> 共 {len(unit_failures)} 条，仅显示前 10 条，"

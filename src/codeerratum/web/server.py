@@ -553,9 +553,7 @@ class WebApp:
         # as 机器丢弃.
         rejected_entries = collection.get("rejected", [])
         dropped_entries = [
-            r
-            for r in rejected_entries
-            if not is_unit_failure(str(r.get("reason") or ""))
+            r for r in rejected_entries if not is_unit_failure(str(r.get("reason") or ""))
         ]
         failed_unit_entries = [
             r for r in rejected_entries if is_unit_failure(str(r.get("reason") or ""))

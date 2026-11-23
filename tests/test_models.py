@@ -127,8 +127,7 @@ def test_pinned_never_seats_the_author_model():
     registry = ModelRegistry.model_validate(
         {
             "models": [
-                {"model_id": m, "base_url": "http://x/v1"}
-                for m in ("author", "b", "c", "spare")
+                {"model_id": m, "base_url": "http://x/v1"} for m in ("author", "b", "c", "spare")
             ]
         }
     )

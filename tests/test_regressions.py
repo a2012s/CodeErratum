@@ -392,9 +392,7 @@ def test_caller_fence_adapts_to_backticks_in_snippet():
     """A fixed ``` fence closes early on a docstring containing ```, leaving the
     rest of the caller source as free-form text in the review prompt."""
     snippet = '"""doc\n```\nstill source\n"""'
-    rendered = render_callers(
-        ["app.py:5"], [{"file": "app.py", "line": 5, "snippet": snippet}]
-    )
+    rendered = render_callers(["app.py:5"], [{"file": "app.py", "line": 5, "snippet": snippet}])
     assert "````python\n" in rendered  # opening fence is four ticks, not three
     assert rendered.rstrip().endswith("````")  # and it closes with four
     assert "still source" in rendered  # snippet body stays inside the block
@@ -1032,9 +1030,7 @@ def test_run_review_returns_partial_collection_when_one_unit_finished(monkeypatc
         sink=None,
     ):
         assert sink is not None
-        sink.per_unit.setdefault(spec.model_id, {}).setdefault(units[0].unit_id, []).append(
-            finding
-        )
+        sink.per_unit.setdefault(spec.model_id, {}).setdefault(units[0].unit_id, []).append(finding)
         sink.calls.append({"model": spec.model_id, "unit_id": units[0].unit_id, "usage": {}})
         sink.units_done.add(units[0].unit_id)
         raise asyncio.CancelledError()

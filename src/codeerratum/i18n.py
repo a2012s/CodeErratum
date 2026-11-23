@@ -341,8 +341,7 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "pipeline.report_writing": ("生成报告并写入存储", "Writing the report and storing findings"),
     "pipeline.stopped": ("审查已被停止", "Review stopped"),
     "pipeline.stopped_partial": (
-        "审查已停止：仅完成 {done}/{total} 个单元，报告只包含这些单元的结果；"
-        "证伪/验证未完成",
+        "审查已停止：仅完成 {done}/{total} 个单元，报告只包含这些单元的结果；证伪/验证未完成",
         "Review stopped after {done}/{total} units; the report covers only those "
         "units and falsification/verification did not finish",
     ),

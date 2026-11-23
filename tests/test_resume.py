@@ -165,10 +165,9 @@ def test_plan_resume_counts_covered_units_per_model_not_per_union(repo, monkeypa
 def test_resume_merges_batches_and_drops_stale_failures(repo, registry, monkeypatch):
     """The interrupted sitting's provider_error for u3 dies when u3 succeeds."""
     units = [_unit(f"u{i}") for i in range(1, 5)]
-    calls = (
-        [{"model": "gpt-a", "unit_id": f"u{i}"} for i in (1, 2)]
-        + [{"model": "gpt-b", "unit_id": f"u{i}"} for i in (1, 2)]
-    )
+    calls = [{"model": "gpt-a", "unit_id": f"u{i}"} for i in (1, 2)] + [
+        {"model": "gpt-b", "unit_id": f"u{i}"} for i in (1, 2)
+    ]
     old_rejected = [
         # stale: u3 failed in sitting #1, resume re-runs it successfully
         {"unit_id": "u3", "model": "gpt-a", "reason": "provider_error", "error": "boom"},
