@@ -4,23 +4,31 @@
 
 ### Fixed
 
-- **CI 从第 12 次提交起就没有绿过**（run #12 ~ #40 连续 29 次红灯）。三个
-  阶段各自的成因都已定位并修掉：
+- **CI 从第 12 次提交起就没有绿过**（run #12 ~ #43 连续 30 次红灯）。红灯分三段，
+  成因各不相同：
   - **Lint 失败**（run #38 起）：`demo/seeded-bugs/buggy_refunds.py` 用
     `timezone.utc`，ruff UP017 要求 `datetime.UTC` 别名（Python ≥3.11）。
   - **Format check 失败**（此前被 Lint 提前失败掩盖）：17 个 Python 文件的
     排版与 `ruff format` 不一致——这些文件是逐轮手工编辑的，只跑了
     `ruff check` 没跑 `ruff format`。现已全部格式化。
-  - **Test 失败**（run #12 ~ #37）：Linux 上 4 个 Web 测试失败，根因是**测试
-    依赖运行机器的平台**——`test_pick_repo_*` 与 `test_open_repo_folder_*` 没有
-    指定平台，macOS 上直接走 `osascript`/`open` 分支就通过，Linux 上则先卡在
-    「找不到 zenity / xdg-open」。实现本身早已支持三平台（zenity、xdg-open /
-    gio、explorer），是测试把平台假设写死了。现已把平台显式参数化
-    （darwin / win32 / linux），并补一条「Linux 缺 zenity 时要指名道姓地报错」
-    的用例。顺带钉住 Windows 特例：explorer 打开窗口后返回非零状态不算失败。
+  - **Test 失败**（run #12 ~ #43）：两个互相独立的原因。
+    - **测试依赖运行机器的平台**（run #12 ~ #37）：`test_pick_repo_*` 与
+      `test_open_repo_folder_*` 没有指定平台，macOS 上直接走 `osascript`/`open`
+      分支就通过，Linux 上则先卡在「找不到 zenity / xdg-open」。实现本身早已
+      支持三平台（zenity、xdg-open / gio、explorer），是测试把平台假设写死了。
+      现已把平台显式参数化（darwin / win32 / linux），并补一条「Linux 缺 zenity
+      时要指名道姓地报错」的用例；顺带钉住 Windows 特例——explorer 打开窗口后
+      返回非零状态不算失败。
+    - **`--help` 断言受终端宽度影响**（run #43）：typer 用 rich 渲染 help，rich
+      在窄终端下会折断放不下的词——20 列时 `--no-repo` 变成 `--no-` 加 `repo`，
+      中文短语会被逐字拆开。而 rich 在 `Console()` 构造时就把宽度**固化**了，
+      `cli.py` 的模块级 `console = Console()` 于是在 import 时刻就把宽度定死，
+      测试里再改环境变量已经太晚。现由 `tests/conftest.py` 在**导入期**
+      （conftest 先于测试模块导入）把 `COLUMNS` 钉成 120，CI 的 Test 步骤也
+      显式设同样的值。
 
 - 用 `ghcr.io/astral-sh/uv` 容器（Ubuntu + Python 3.11 + git）本地复现 CI，
-  确认这 4 条就是红灯的全部来源；容器内 530 passed / 0 failed。
+  确认红灯来源；容器内 530 passed / 0 failed。
 
 - **本地「5 项既有基线失败」是假的**：那 5 项（hub 两条、snapshot、desktop、
   web 各一）不是产品缺陷，而是 pytest 临时目录被固定在仓库内

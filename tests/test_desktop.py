@@ -178,6 +178,10 @@ def test_non_loopback_host_is_warned_not_silent(capsys):
 
 
 def test_launcher_flags_are_exposed():
+    # The console width is pinned by the `pinned_console_width` fixture in
+    # conftest.py: typer draws --help through rich, and rich folds an option
+    # name that does not fit the line ("--no-repo" becomes "--no-" plus "repo"
+    # at 20 columns). Whether the flag exists is the point, not how it wraps.
     runner = CliRunner()
     ui_help = " ".join(runner.invoke(cli.app, ["ui", "--help"]).output.split())
     assert "--no-repo" in ui_help

@@ -36,11 +36,19 @@ jobs:
         # a red job whose log you cannot open tells you nothing. The annotations
         # show up on the commit page and in `gh run view`, so the names of the
         # failing tests are readable without opening the raw log.
+        #
+        # COLUMNS is pinned for the same reason the test suite pins it: typer
+        # draws --help through rich, and rich folds whatever does not fit the
+        # line. A runner whose console width is not a number we control would
+        # otherwise decide which assertions pass.
+        env:
+          COLUMNS: "120"
         run: |
           set +e
           uv run pytest -q > /tmp/pytest.log 2>&1
           code=$?
           cat /tmp/pytest.log
+          echo "::notice::COLUMNS=$COLUMNS TERM=${TERM:-unset}"
           grep -E '^(FAILED|ERROR) ' /tmp/pytest.log | head -60 | while IFS= read -r line; do
             echo "::error::$line"
           done
