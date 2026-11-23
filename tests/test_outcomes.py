@@ -384,10 +384,36 @@ def test_list_runs_exposes_machine_drops_separately_from_human_verdicts(tmp_path
     rows = store.list_runs()
     assert len(rows) == 1
     row = rows[0]
-    assert row["n_dropped"] == 3
-    assert row["n_rejected"] == 3  # legacy column, same number at save time
+    # verify_error is a unit failure: the finding survived, so it is not a drop.
+    assert row["n_dropped"] == 2
+    assert row["n_failed_units"] == 1
+    assert row["n_rejected"] == 3  # legacy column, unchanged meaning
     # after a human rejects one finding, n_dropped must NOT change
     store.set_status("a" * 16, "rejected", "误报")
     rows = store.list_runs()
-    assert rows[0]["n_dropped"] == 3, "human verdicts never change machine-drop counts"
+    assert rows[0]["n_dropped"] == 2, "human verdicts never change machine-drop counts"
+    assert rows[0]["n_failed_units"] == 1
     assert rows[0]["n_rejected"] == 3
+
+
+def test_list_runs_falls_back_for_runs_without_rejection_rows(tmp_path):
+    """Runs recorded before run_rejections existed have no reason rows.
+
+    Falling back to the legacy column keeps their history visible; without
+    it, every pre-0.6.3 run would suddenly show "0 dropped".
+    """
+    collection = _collection()
+    collection.rejected = [
+        {"reason": "anchor_mismatch", "model": "gpt-a"},
+        {"reason": "refuted", "model": "falsifier", "unit_id": "u1"},
+    ]
+    store = ReviewStore(tmp_path / "feedback.db")
+    store.save_run(collection, "2026-11-23T00:00:00Z")
+    # Simulate an old database: drop the per-reason rows, keep runs.n_rejected.
+    with store._conn() as conn:
+        conn.execute("DELETE FROM run_rejections")
+
+    row = store.list_runs()[0]
+    assert row["n_rejected"] == 2
+    assert row["n_dropped"] == 2, "must fall back to the legacy column, not show 0"
+    assert row["n_failed_units"] == 0

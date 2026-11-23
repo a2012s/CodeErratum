@@ -345,6 +345,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Model calls failed for {n} units; those files were not reviewed",
     ),
     "pipeline.units_failed_reason": ("失败原因：{reasons}", "Reason: {reasons}"),
+    "pipeline.verify_failed": (
+        "{n} 个单元的验证器调用失败，对应发现保留为未验证",
+        "Verifier calls failed for {n} units; their findings were kept as unverified",
+    ),
     "pipeline.machine_dropped": (
         "机器丢弃 {n} 条（{reasons}），明细见报告末尾与 run_rejections",
         "{n} machine-dropped ({reasons}); details in the report and run_rejections",

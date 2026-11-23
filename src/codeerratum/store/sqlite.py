@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from ..models import FindingCollection
+from ..models.finding import UNIT_FAILURE_REASONS
 
 
 class ReviewStore:
@@ -322,18 +323,30 @@ class ReviewStore:
     def list_runs(self, limit: int = 50) -> list[dict]:
         """Newest first, for the UI's run history.
 
-        ``n_rejected`` is a legacy column that actually holds machine drops at
-        save time (human verdicts do not exist yet when a run is stored).
-        ``n_dropped`` is the same number derived from ``run_rejections`` — the
-        authoritative, per-reason source — and is what new callers should show.
+        ``n_dropped`` counts only findings the machine removed
+        (anchor_mismatch / duplicate / invalid_finding / refuted). Unit call
+        failures (provider_error / verify_error) never removed a finding and
+        are reported separately as ``n_failed_units``. For runs recorded
+        before run_rejections existed there are no reason rows at all, so
+        ``n_dropped`` falls back to the legacy ``n_rejected`` column rather
+        than showing a misleading 0. The legacy column keeps its old meaning;
+        new callers should read ``n_dropped``.
         """
+        unit_failure_list = ",".join(f"'{r}'" for r in sorted(UNIT_FAILURE_REASONS))
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT r.run_id, r.commit_sha, r.model_id, r.created_at, "
                 "r.n_findings, r.n_rejected, "
                 "COALESCE(("
-                "  SELECT SUM(rr.count) FROM run_rejections rr WHERE rr.run_id = r.run_id"
-                "), 0) AS n_dropped "
+                "  SELECT SUM(CASE WHEN rr.reason NOT IN (" + unit_failure_list + ") "
+                "            THEN rr.count ELSE 0 END) "
+                "  FROM run_rejections rr WHERE rr.run_id = r.run_id"
+                "), r.n_rejected) AS n_dropped, "
+                "COALESCE(("
+                "  SELECT SUM(CASE WHEN rr.reason IN (" + unit_failure_list + ") "
+                "            THEN rr.count ELSE 0 END) "
+                "  FROM run_rejections rr WHERE rr.run_id = r.run_id"
+                "), 0) AS n_failed_units "
                 "FROM runs r ORDER BY r.created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
@@ -388,8 +401,18 @@ class ReviewStore:
                 "SELECT model_id, role, COUNT(*) AS n FROM verdict_events "
                 "GROUP BY model_id, role ORDER BY model_id, role"
             ).fetchall()
+            # Unit call failures (provider_error / verify_error) removed no
+            # finding — verify_error even keeps it — so they stay out of the
+            # drop metrics and are aggregated separately.
+            unit_failure_list = ",".join(f"'{r}'" for r in sorted(UNIT_FAILURE_REASONS))
             dropped_by_reason = conn.execute(
                 "SELECT reason, SUM(count) AS n FROM run_rejections "
+                f"WHERE reason NOT IN ({unit_failure_list}) "
+                "GROUP BY reason ORDER BY n DESC"
+            ).fetchall()
+            failed_units_by_reason = conn.execute(
+                "SELECT reason, SUM(count) AS n FROM run_rejections "
+                f"WHERE reason IN ({unit_failure_list}) "
                 "GROUP BY reason ORDER BY n DESC"
             ).fetchall()
             n_runs = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
@@ -406,4 +429,6 @@ class ReviewStore:
             # Distinct from `rejected` above, which is the human verdict count.
             "dropped_by_reason": [dict(r) for r in dropped_by_reason],
             "dropped_total": sum(int(r["n"]) for r in dropped_by_reason),
+            "failed_units_by_reason": [dict(r) for r in failed_units_by_reason],
+            "failed_units_total": sum(int(r["n"]) for r in failed_units_by_reason),
         }

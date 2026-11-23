@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from ..models.finding import Finding, FindingCollection
+from ..models.finding import Finding, FindingCollection, is_unit_failure
 
 MAX_RENDER = 10
 
@@ -264,13 +264,43 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
         parts.append(f"- 聚类后：{clustered} 条；证伪后：{survived} 条\n")
         parts.append(f"- 分区：{cmp.get('zones')}\n\n")
 
-    if collection.rejected:
+    # Two different failure shapes get two different sections: drops removed a
+    # finding from this report; unit failures did not (verify_error even keeps
+    # the finding). Mixing them produced empty bullets and a title that lied.
+    finding_drops = [
+        r for r in collection.rejected if not is_unit_failure(str(r.get("reason") or ""))
+    ]
+    unit_failures = [
+        r for r in collection.rejected if is_unit_failure(str(r.get("reason") or ""))
+    ]
+    if finding_drops:
         parts.append("## 已丢弃的发现（定位校验未通过 / 被证伪推翻）\n\n")
         parts.append("这些结论未通过校验，请勿据此修改：\n\n")
-        for r in collection.rejected[:10]:
+        if len(finding_drops) > 10:
+            parts.append(
+                f"> 共 {len(finding_drops)} 条，仅显示前 10 条，"
+                "完整明细见 runs 目录与 feedback.db 的 run_rejections。\n\n"
+            )
+        for r in finding_drops[:10]:
             cited = r.get("cited", r.get("dedupe_key", ""))
             model = f"[{r.get('model')}] " if r.get("model") else ""
             parts.append(f"- `{r.get('reason')}` {model}{r.get('claim', '')} — {cited}\n")
+        parts.append("\n")
+    if unit_failures:
+        parts.append("## 失败的单元（模型调用未完成）\n\n")
+        parts.append("这些单元的调用失败；provider_error 的单元未被审查，"
+                     "verify_error 的发现保留为未验证：\n\n")
+        if len(unit_failures) > 10:
+            parts.append(
+                f"> 共 {len(unit_failures)} 条，仅显示前 10 条，"
+                "完整明细见 calls.json 与 feedback.db 的 run_rejections。\n\n"
+            )
+        for r in unit_failures[:10]:
+            model = f"[{r.get('model')}] " if r.get("model") else ""
+            hint = r.get("error_hint") or r.get("error") or ""
+            where = r.get("unit_id") or r.get("claim") or "unknown"
+            suffix = f" — {hint}" if hint else ""
+            parts.append(f"- `{r.get('reason')}` {model}{where}{suffix}\n")
         parts.append("\n")
 
     parts.append("## 执行结果（由执行方 AI 填写）\n\n")

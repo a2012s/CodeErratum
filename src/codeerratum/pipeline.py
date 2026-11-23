@@ -33,6 +33,7 @@ from .ingest import (
     wants_full_worktree,
 )
 from .models import FindingCollection, ModelRegistry, ReviewUnit
+from .models.finding import is_unit_failure
 from .repo_ignore import ensure_state_dir_ignored
 from .report import render_markdown
 from .review import (
@@ -125,6 +126,17 @@ class ReviewOutcome:
         }
 
     def summary(self) -> dict:
+        # "dropped" counts only findings the machine removed (refuted, anchor
+        # mismatch, duplicate, invalid_finding). Unit call failures never
+        # removed a finding — verify_error even keeps it — so they are counted
+        # separately as failed_units. "rejected" is kept as a legacy alias of
+        # "dropped"; it never meant a human rejection.
+        dropped = sum(
+            1
+            for r in self.collection.rejected
+            if not is_unit_failure(str(r.get("reason") or ""))
+        )
+        failed_units = len(self.collection.rejected) - dropped
         return {
             "run_id": self.run_id,
             "created_at": self.created_at,
@@ -133,7 +145,9 @@ class ReviewOutcome:
             "models": self.collection.reviewer_models,
             "falsifier": self.collection.falsifier_model,
             "findings": len(self.collection.findings),
-            "rejected": len(self.collection.rejected),
+            "dropped": dropped,
+            "failed_units": failed_units,
+            "rejected": dropped,  # legacy alias; read "dropped" in new code
             "units_total": self.units_total,
             "units_selected": self.units_selected,
             "calls": len(self.calls),
@@ -590,31 +604,49 @@ def execute_review(
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
-    failed = [
-        r
-        for r in collection.rejected
-        if r.get("reason") in ("provider_error", "verify_error")
+    # Two failure shapes must not share one sentence: provider_error means the
+    # reviewer never produced anything (unit unreviewed), verify_error means
+    # the finding survived but its second opinion is missing. Counting them
+    # together made users underestimate coverage.
+    provider_failures = [
+        r for r in collection.rejected if r.get("reason") == "provider_error"
     ]
-    if failed:
-        notices.append(t("pipeline.units_failed", n=len(failed)))
+    if provider_failures:
+        notices.append(t("pipeline.units_failed", n=len(provider_failures)))
         # A count alone leaves the reader guessing between "my key is wrong" and
         # "the endpoint was slow". The hints are already human sentences.
         reasons: list[str] = []
-        for r in failed:
+        for r in provider_failures:
             hint = r.get("error_hint") or r.get("error") or ""
             if hint and hint not in reasons:
                 reasons.append(hint)
         if reasons:
             notices.append(t("pipeline.units_failed_reason", reasons=" · ".join(reasons[:3])))
 
-    # Every entry in collection.rejected is a machine drop (anchor mismatch,
-    # provider/verify error, refuted, ...) — human rejections live in the
-    # findings.status column. Without this line the report never says why the
-    # finding count is lower than the unit count, and refuted-by-falsifier
-    # drops are invisible next to the failures above.
+    verify_failures = [
+        r for r in collection.rejected if r.get("reason") == "verify_error"
+    ]
+    if verify_failures:
+        notices.append(t("pipeline.verify_failed", n=len(verify_failures)))
+        reasons_v: list[str] = []
+        for r in verify_failures:
+            hint = r.get("error_hint") or r.get("error") or ""
+            if hint and hint not in reasons_v:
+                reasons_v.append(hint)
+        if reasons_v:
+            notices.append(
+                t("pipeline.units_failed_reason", reasons=" · ".join(reasons_v[:3]))
+            )
+
+    # Only per-finding drops count as "machine dropped": refuted claims, anchor
+    # mismatches, duplicates. Unit failures above never removed a finding, so
+    # including them here would contradict the finding count in the same report
+    # (one run could read "1 finding" and "1 dropped" for the same finding).
     drop_counts: dict[str, int] = {}
     for r in collection.rejected:
         reason = str(r.get("reason") or "unknown")
+        if is_unit_failure(reason):
+            continue
         drop_counts[reason] = drop_counts.get(reason, 0) + 1
     if drop_counts:
         top = sorted(drop_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]

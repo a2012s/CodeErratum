@@ -520,7 +520,16 @@ async def run_review(
                         "mode": "tiered",
                         "scanner": scanner_id,
                         "verifier": verifier_spec.model_id,
+                        # Attempted units, not successful ones: failed verifier
+                        # calls are counted in verify_failed_units so the cross
+                        # review stats cannot look more complete than it was.
                         "verified_units": len(verify_units),
+                        "verify_failed_units": sum(
+                            1
+                            for res in vresults
+                            if isinstance(res, BaseException)
+                            and not isinstance(res, asyncio.CancelledError)
+                        ),
                         "verify_only_findings": extra,
                     }
             merged = rank_findings(merged, rejected_category_counts)

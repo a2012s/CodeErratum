@@ -433,5 +433,8 @@ async def test_tiered_verifier_failure_becomes_a_machine_drop(repo, monkeypatch)
     assert any(
         c.get("role") == "verify" and c.get("verdict") == "error" for c in calls
     )
+    # attempted vs failed: cross-review stats must not look more complete than it was
+    assert collection.comparison["verify_failed_units"] == len(verify_errors)
+    assert collection.comparison["verified_units"] >= len(verify_errors)
     # the scanner's work survives: a broken verifier must not erase its findings
     assert collection.findings, "scanner findings must not be dropped when the verifier fails"

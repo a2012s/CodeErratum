@@ -137,7 +137,12 @@ def review(
 
     summary = outcome.summary()
     console.print(f"\n[green]Wrote {outcome.out_path or outcome.run_dir / 'review.md'}[/green]")
-    console.print(f"Findings: {summary['findings']} | Rejected: {summary['rejected']}")
+    # "Rejected" used to read like a human verdict; these are machine drops,
+    # and unit call failures never dropped a finding at all.
+    console.print(
+        f"Findings: {summary['findings']} | Machine-dropped: {summary['dropped']}"
+        + (f" | Failed units: {summary['failed_units']}" if summary["failed_units"] else "")
+    )
     console.print(
         f"Static diagnostics: {summary['static_diags']} | Model calls: {summary['calls']}"
     )

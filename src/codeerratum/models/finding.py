@@ -15,6 +15,19 @@ Agreement = Literal["unanimous", "majority", "unique", "conflict", "unverified"]
 Verification = Literal["unverified", "suspected", "reproduced", "accepted"]
 FindingStatus = Literal["open", "accepted", "rejected", "promoted_to_rule"]
 
+# collection.rejected mixes two failure shapes that must never be counted
+# together: a finding the machine removed from the report, and a unit whose
+# model call failed. For unit failures nothing was dropped — with
+# ``verify_error`` the finding even survives unverified — so every "machine
+# dropped N" metric must exclude these. The kind is a function of the reason,
+# which lets old artifacts and the run_rejections table stay unchanged.
+UNIT_FAILURE_REASONS: frozenset[str] = frozenset({"provider_error", "verify_error"})
+
+
+def is_unit_failure(reason: str) -> bool:
+    """True when a rejected entry is a failed unit call, not a dropped finding."""
+    return reason in UNIT_FAILURE_REASONS
+
 
 class Lens(StrEnum):
     CORRECTNESS = "correctness"
@@ -232,7 +245,13 @@ class FindingCollection(BaseModel):
         default_factory=list, description="Surviving-worthy claims the falsifier refuted"
     )
     rejected: list[dict] = Field(
-        default_factory=list, description="Findings dropped by anchor check"
+        default_factory=list,
+        description=(
+            "Machine-side removals and failures: per-finding drops "
+            "(anchor_mismatch, duplicate, invalid_finding, refuted) and "
+            "unit-level call failures (provider_error, verify_error). "
+            "See is_unit_failure() before counting these as dropped findings."
+        ),
     )
     notes: list[str] = Field(
         default_factory=list,

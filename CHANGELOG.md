@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.6.6] — 2026-11-23
+
+按 `REVIEW_0.6.5.md` 复核修复：机器丢弃与单元失败的口径彻底分离（0.6.5 让
+`verify_error` 可见的同时，暴露了它与"丢弃发现"混算的矛盾）。
+
+### Fixed
+
+- **单元失败与发现丢弃分开统计**（P2-1）：`provider_error` / `verify_error`
+  是单元级调用失败，从未删除任何 finding（verify_error 甚至保留发现，只是
+  未验证），不再计入 `dropped_total` / `n_dropped` / notes「机器丢弃 N 条」。
+  kind 由 reason 推导（`models.finding.is_unit_failure`），旧数据与
+  `run_rejections` 表无需迁移。
+- **`review.md` 丢弃区重写**（P2-2）：新增「失败的单元」小节，
+  provider_error / verify_error 条目以 `unit_id` + `error_hint` 渲染，
+  不再输出空 bullet；发现丢弃与单元失败分属两个小节。
+- **notes 三分**（P2-3）：`provider_error` →「相关文件未被审查」；
+  `verify_error` →「验证器调用失败，发现保留为未验证」；机器丢弃汇总只计
+  finding 级丢弃。
+- **CLI summary 标签**（P3-1）：`Rejected: M` → `Machine-dropped: M`，
+  有单元失败时追加 `Failed units: N`；`summary()` 新增 `dropped` /
+  `failed_units` 字段，`rejected` 保留为 dropped 的兼容别名。
+- **旧库回退**（P3-2）：`list_runs` 在运行没有 `run_rejections` 明细行时
+  回退到旧 `n_rejected` 列，避免 0.6.3 前的历史运行显示"0 丢弃"。
+- **报告截断提示**（P3-3）：丢弃/失败条目超过 10 条时明确标注
+  「共 N 条，仅显示前 10 条」。
+- **`verified_units` 口径**（P3-4）：新增 `verify_failed_units`，
+  交叉审查统计不再把失败的验证调用算成成功。
+
+### Tests
+
+- 单元失败不进丢弃统计（stats / list_runs / summary / notes 四处口径）。
+- 旧库无 `run_rejections` 明细时 `n_dropped` 回退。
+- markdown 渲染：单元失败带 unit_id 与 error_hint、非空 bullet、两小节分离、
+  截断提示。
+- tiered verifier 失败时 `verify_failed_units` 计数。
+
+测试 494 passed / 5 项既有基线失败不变，ruff 全绿；app 重打包替换
+/Applications/CodeErratum.app（selftest OK，旧备份 .old_065）。
+
 ## [0.6.5] — 2026-11-23
 
 ### Fixed

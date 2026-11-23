@@ -135,7 +135,12 @@ def test_negative_budget_raises_instead_of_reviewing_everything():
 
 
 def test_machine_drops_are_summarized_in_the_notes(tmp_path, monkeypatch):
-    """Every rejected entry is a machine drop; the report must say why counts shrank."""
+    """Finding drops get a drop summary; unit failures get their own sentence.
+
+    verify_error keeps the finding, so it must never be counted as a drop nor
+    claimed as "files were not reviewed" — one run used to read "1 finding"
+    and "1 dropped" for the same finding.
+    """
     repo = _dirty_repo(tmp_path / "repo")
     monkeypatch.setenv("CODEERRATUM_BASE_URL", "http://stub.invalid/v1")
     monkeypatch.setenv("CODEERRATUM_MODEL", "gpt-stub")
@@ -164,4 +169,12 @@ def test_machine_drops_are_summarized_in_the_notes(tmp_path, monkeypatch):
 
     notes = outcome.collection.notes
     assert any("refuted×2" in n for n in notes), notes
-    assert any("verify_error×1" in n for n in notes), notes
+    assert not any("verify_error×" in n for n in notes), (
+        "verify_error keeps the finding; it must not count as a drop"
+    )
+    assert any("验证器调用失败" in n for n in notes), notes
+    assert not any("未被审查" in n for n in notes if "验证器" in n), notes
+    summary = outcome.summary()
+    assert summary["dropped"] == 2
+    assert summary["failed_units"] == 1
+    assert summary["rejected"] == 2  # legacy alias of dropped

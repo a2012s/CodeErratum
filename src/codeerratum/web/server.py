@@ -38,6 +38,7 @@ from ..i18n import set_lang, t
 from ..ingest import DiffError, normalize_pathspec
 from ..model_check import probe_model
 from ..models import ModelRegistry
+from ..models.finding import is_unit_failure
 from ..pipeline import (
     AUTO_UNIT_BUDGET,
     HOUSE_RULES_FILE,
@@ -540,6 +541,19 @@ class WebApp:
         zones = {"all": findings} if mode == "quick" else _split_zones(findings, mode)
         runs = {r["run_id"]: r for r in self.store.list_runs(limit=200)}
         row = runs.get(run_id, {})
+        # Same split as summary()/list_runs: "dropped" removed a finding,
+        # unit failures did not (verify_error keeps the finding unverified).
+        # totals.rejected keeps the legacy key/value the chip already labels
+        # as 机器丢弃.
+        rejected_entries = collection.get("rejected", [])
+        dropped_entries = [
+            r
+            for r in rejected_entries
+            if not is_unit_failure(str(r.get("reason") or ""))
+        ]
+        failed_unit_entries = [
+            r for r in rejected_entries if is_unit_failure(str(r.get("reason") or ""))
+        ]
         return {
             "run_id": run_id,
             "repo": collection.get("repo", str(self.repo_root)),
@@ -559,10 +573,13 @@ class WebApp:
             },
             "totals": {
                 "findings": len(findings),
-                "rejected": len(collection.get("rejected", [])),
+                "rejected": len(dropped_entries),
+                "dropped": len(dropped_entries),
+                "failed_units": len(failed_unit_entries),
             },
             "zones": zones,
-            "rejected": collection.get("rejected", []),
+            "rejected": dropped_entries,
+            "failed_units": failed_unit_entries,
             "has_markdown": (run_dir / "review.md").exists(),
         }
 

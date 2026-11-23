@@ -274,11 +274,17 @@ def test_machine_drops_are_grouped_by_reason(store):
         "2026-01-01T00:00:00Z",
     )
     stats = store.stats()
-    assert stats["dropped_total"] == 4
+    # provider_error removed no finding — it is a unit failure, not a drop.
+    # Mixing the two once made a run read "1 finding + 1 dropped" while the
+    # finding was still in the report.
+    assert stats["dropped_total"] == 3
     assert {row["reason"]: row["n"] for row in stats["dropped_by_reason"]} == {
         "anchor_mismatch": 2,
-        "provider_error": 1,
         "refuted": 1,
+    }
+    assert stats["failed_units_total"] == 1
+    assert {row["reason"]: row["n"] for row in stats["failed_units_by_reason"]} == {
+        "provider_error": 1,
     }
     # Human rejections remain a separate column and are not inflated by drops.
     assert stats["rejected"] == 0

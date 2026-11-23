@@ -701,7 +701,8 @@ const STR = {
   "证伪者 {model}": "falsifier {model}",
   "项目规范会改变审查侧重点，两次结果不同先看这里": "Project rules shift what reviewers look for; check here first when two runs disagree",
   "规范 {chars} 字 · {sha}": "rules {chars} chars · {sha}",
-  "机器丢弃 {n} 条（定位校验、证伪、模型失败等）": "{n} machine-dropped (anchor mismatch, refuted, provider error...)",
+  "机器丢弃 {n} 条（定位校验、证伪等）": "{n} machine-dropped (anchor mismatch, refuted...)",
+  "{n} 个单元失败": "{n} failed units",
   "这个分区没有发现": "No findings in this zone",
   // finding cards
   "证据 {value}": "evidence {value}",
@@ -1155,6 +1156,9 @@ function renderRun() {
     `<span class="chip">${esc(run.mode)}</span>`,
     `<span class="chip">${esc(count(run.totals.findings, "条发现", "finding", "findings"))}</span>`,
     `<span class="chip">${esc(count(run.totals.rejected, "条机器丢弃", "machine-dropped", "machine-dropped"))}</span>`,
+    run.totals.failed_units
+      ? `<span class="chip">${esc(count(run.totals.failed_units, "个单元失败", "failed unit", "failed units"))}</span>`
+      : "",
     run.spec_level ? `<span class="chip">${esc(T("规格 {level}", { level: run.spec_level }))}</span>` : "",
     run.falsifier ? `<span class="chip">${esc(T("证伪者 {model}", { model: run.falsifier }))}</span>` : "",
     run.house_rules && run.house_rules.applied
@@ -1174,8 +1178,8 @@ function renderRun() {
   $("rejectedBox").innerHTML = rejected.length ? `
     <details class="rejected-details">
       <summary>${esc(LANG === "en"
-        ? `${count(rejected.length, "", "machine-dropped unit", "machine-dropped units")} (anchor mismatch, refuted, provider error...)`
-        : T("机器丢弃 {n} 条（定位校验、证伪、模型失败等）", { n: rejected.length }))}</summary>
+        ? `${count(rejected.length, "", "machine-dropped finding", "machine-dropped findings")} (anchor mismatch, refuted...)`
+        : T("机器丢弃 {n} 条（定位校验、证伪等）", { n: rejected.length }))}</summary>
       <div class="rejected-list">${rejected.map((r) => `
         <div class="rejected-item">
           <span class="mono">${esc(r.reason || "unknown")}</span>
