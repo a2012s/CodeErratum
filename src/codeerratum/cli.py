@@ -652,6 +652,12 @@ def reconcile(
         console.print(f"[dim]{t('cli.reconcile_dry')}[/dim]")
     elif counts["updated"]:
         console.print(f"[green]{t('cli.reconcile_done', path=store.db_path)}[/green]")
+    elif counts["unmatched"]:
+        # Parsing succeeded, but none of the rows belongs to a finding in this
+        # feedback store. Exiting 0 here makes a stale or mistyped work order
+        # look like a successful feedback-loop closure.
+        console.print(f"[red]{t('cli.reconcile_no_writes')}[/red]")
+        raise typer.Exit(1)
 
 
 @app.command()

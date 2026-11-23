@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.2] — 2026-11-23
+
+### Fixed
+
+- **后置限定词不再被记为采纳**（P2）：`fixed without full verification`、
+  `部分修复但仍有问题` 含正向词但明确未完全验证，过去直接命中 `fixed` / `修复`
+  计为 accepted，抬高采纳率。现在 `_UNRESOLVED_TRAILING` 与未决词表同阶段优先判定。
+- **英文否定组合改为整格规则**（P3）：`nothing to fix`、`no changes needed`、
+  `no longer an issue`、`none of these are issues` 归入驳回，`no test failed` /
+  `all tests passed` 归入采纳；整格匹配保证 `no test failed but not fixed` 仍为 open。
+- **判定职责厘清**（P3）：固定词表只放不可推导搭配，前置/后置否定各由规则负责，
+  模块文档写明三阶段优先级；`not a bug` 的驳回判定由整格规则与固定词表双路径承担，
+  各加一条元测试，避免删词后静默退化为 open。
+- **执行结果分类补齐后置失败与跨词否定**：`已修复但测试不通过`、`修复中`、
+  `not yet fixed`、`none of the tests passed` 等状态不再因包含 `修复` / `fixed` /
+  `passed` 被误记为采纳；`不是误报` / `not a false positive` 不再误记为驳回，
+  而 `not a bug` / `no issue` / `无法重现` 仍明确归入驳回。
+- **待验证与“无需修复”变体不再污染采纳率**：`已修复，待验证`、`待测试`、
+  `fixed, pending verification` 等未验证结论保持 open；`无须修复`、`毋须修复`、
+  `无需处理` 与 `false alarm` / `duplicate` 归入驳回；`已合并` / `PR merged`
+  与 `改完了` 归入采纳。
+- **reconcile 零写入不再静默成功**：正式执行时若所有编号都未匹配、实际回填为 0，
+  命令返回失败并提示检查报告编号；`--dry-run` 与“全部待处理/未修复”仍正常返回成功。
+
+### Tests
+
+- `test_outcomes.py` 补 11 个后置限定/否定组合词例，以及 `not a bug` 双路径元测试。
+
 ## [0.6.1] — 2026-11-23
 
 ### Fixed

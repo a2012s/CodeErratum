@@ -421,6 +421,11 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "cli.reconcile_dry": ("[预演] 未写入数据库", "[dry run] nothing written"),
     "cli.reconcile_done": ("已写入反馈库：{path}", "Written to feedback store: {path}"),
+    "cli.reconcile_no_writes": (
+        "没有任何结果写入反馈库：请检查报告编号是否对应当前审查记录",
+        "No outcomes were written: check that the report's finding ids belong to "
+        "the current review history",
+    ),
     "desk.missing": (
         "缺少图形组件 pywebview：先执行 uv pip install -e '.[desktop]'，或改用 codeerratum ui",
         "The pywebview GUI extra is missing: run uv pip install -e '.[desktop]', "

@@ -13,6 +13,7 @@ import re
 import pytest
 from typer.testing import CliRunner
 
+import codeerratum.report.outcomes as outcomes
 from codeerratum.cli import app
 from codeerratum.models import Anchor, Finding, FindingCollection, Suggestion
 from codeerratum.models.finding import DefectCategory, Lens, snippet_hash
@@ -113,6 +114,16 @@ def test_legacy_report_without_hidden_marker_still_maps_by_prose_id():
         ("false positive", "rejected"),
         ("未修复", None),
         ("not fixed", None),
+        ("已修复但未通过测试", None),
+        ("已修复，测试失败", None),
+        ("已修复但测试不通过", None),
+        ("修复中", None),
+        ("修复进行中", None),
+        ("修复未通过", None),
+        ("not yet fixed", None),
+        ("fixed but tests did not pass", None),
+        ("cannot be fixed", None),
+        ("non-fixed", None),
         ("待处理", None),
         ("看起来改了", None),
         # Negated accepted words must never be counted as accepted: the accepted
@@ -130,10 +141,75 @@ def test_legacy_report_without_hidden_marker_still_maps_by_prose_id():
         # "no fix needed" is a false-positive verdict, not an acceptance.
         ("无需修复", "rejected"),
         ("不需要修复", "rejected"),
+        ("不是误报", None),
+        ("并非误报", None),
+        ("not a false positive", None),
+        ("not an issue", "rejected"),
+        ("not a bug", "rejected"),
+        ("no issue", "rejected"),
+        ("cannot reproduce", "rejected"),
+        ("none fixed", None),
+        ("nothing done", None),
+        ("none of the tests passed", None),
+        ("不是误报，已修复", "accepted"),
+        ("已修复，不需要再改", "accepted"),
+        # A fix that has not been verified yet is still open. Counting it as
+        # accepted would let unverified claims inflate the acceptance rate.
+        ("已修复，待验证", None),
+        ("已修复，待测试", None),
+        ("已修复，待回归", None),
+        ("已修复，待确认", None),
+        ("fixed, pending verification", None),
+        ("fixed but needs verification", None),
+        ("已合并", "accepted"),
+        ("PR merged", "accepted"),
+        ("改完了", "accepted"),
+        ("not merged", None),
+        ("未合并", None),
+        # Variants of "no fix needed" used to fall through to accepted because
+        # only "无需修复" was listed and "无须修复" slipped past the negation.
+        ("无须修复", "rejected"),
+        ("不须修复", "rejected"),
+        ("毋须修复", "rejected"),
+        ("无需处理", "rejected"),
+        ("false alarm", "rejected"),
+        ("duplicate", "rejected"),
+        ("not a false alarm, fixed", "accepted"),
+        # A positive verdict with a trailing qualifier withholds acceptance.
+        # These used to be counted as accepted just because they contain the
+        # bare words "fixed" / "修复", inflating the acceptance rate.
+        ("fixed without full verification", None),
+        ("without full verification", None),
+        ("部分修复但仍有问题", None),
+        ("已修复但仍有问题", None),
+        # Compositional English verdicts are matched against the whole cell,
+        # so "no test failed" is positive despite containing "failed", while a
+        # later unresolved clause still wins.
+        ("nothing to fix", "rejected"),
+        ("no changes needed", "rejected"),
+        ("no longer an issue", "rejected"),
+        ("none of these are issues", "rejected"),
+        ("no test failed", "accepted"),
+        ("all tests passed", "accepted"),
+        ("no test failed but not fixed", None),
     ],
 )
 def test_status_vocabulary(raw, expected):
     assert classify_status(raw) == expected
+
+
+def test_negated_rejection_survives_removing_the_flat_entry(monkeypatch):
+    """The whole-cell rule must own `not a bug`, not just the word list."""
+    monkeypatch.setattr(
+        outcomes, "_REJECTED", tuple(w for w in outcomes._REJECTED if w != "not a bug")
+    )
+    assert outcomes.classify_status("not a bug") == "rejected"
+
+
+def test_flat_rejection_entry_survives_removing_the_whole_cell_rule(monkeypatch):
+    """The fixed vocabulary must still work if the compositional rule changes."""
+    monkeypatch.setattr(outcomes, "_REJECTED_NEGATIONS", ())
+    assert outcomes.classify_status("not a bug") == "rejected"
 
 
 def test_column_order_and_escaped_pipe_are_tolerated():
@@ -230,6 +306,50 @@ def test_apply_outcomes_counts_failed_writes_as_unmatched():
     assert counts["updated"] == 0
     assert counts["accepted"] == 0
     assert counts["unmatched"] >= 1
+
+
+def test_reconcile_fails_when_no_row_can_be_written(tmp_path, monkeypatch):
+    """A non-dry reconcile that writes nothing must not look successful."""
+    (tmp_path / ".git").mkdir()
+    store = ReviewStore(tmp_path / ".codeerratum" / "feedback.db")
+    store.save_run(_collection(), "2026-11-23T00:00:00Z")
+    report = render_markdown(_collection(), "ts").replace(
+        "| F-001 | 待处理 | — |", "| F-999 | 已修复 | x |"
+    )
+    (tmp_path / "erratumReview.md").write_text(report, encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = CliRunner().invoke(app, ["reconcile", "--repo", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "已回填 0" in result.stdout
+    assert "没有任何结果写入" in result.stdout
+
+
+def test_reconcile_dry_run_and_pending_rows_do_not_report_failure(tmp_path, monkeypatch):
+    """Previewing a stale report and leaving a valid report pending are both legal."""
+    (tmp_path / ".git").mkdir()
+    store = ReviewStore(tmp_path / ".codeerratum" / "feedback.db")
+    store.save_run(_collection(), "2026-11-23T00:00:00Z")
+    report = tmp_path / "erratumReview.md"
+    report.write_text(
+        render_markdown(_collection(), "ts").replace(
+            "| F-001 | 待处理 | — |", "| F-999 | 已修复 | x |"
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    preview = runner.invoke(app, ["reconcile", "--repo", str(tmp_path), "--dry-run"])
+    assert preview.exit_code == 0
+    assert "已回填 0" in preview.stdout
+    assert "预演" in preview.stdout or "[dry run]" in preview.stdout
+
+    report.write_text(render_markdown(_collection(), "ts"), encoding="utf-8")
+    pending = runner.invoke(app, ["reconcile", "--repo", str(tmp_path)])
+    assert pending.exit_code == 0
+    assert "跳过 3" in pending.stdout
+    assert "没有任何结果写入" not in pending.stdout
 
 
 class _FakeStore:

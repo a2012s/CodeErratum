@@ -11,6 +11,23 @@ the renderer, with the visible ``问题编号`` line as a fallback for reports
 generated before the marker existed. Unknown statuses are reported, never
 guessed: silently accepting "看起来改了" would poison the one number the
 product claims to improve.
+
+Classification is deliberately three-stage, in this order:
+
+1. Whole-cell negated verdicts (``_REJECTED_NEGATIONS`` / ``_ACCEPTED_NEGATIONS``)
+   cover compositional English such as ``nothing to fix``. They match the
+   entire cell so a later unresolved clause cannot be overridden.
+2. Unresolved markers win over any positive word: the fixed phrase lists
+   (``_UNRESOLVED`` / ``_UNRESOLVED_TRAILING``) hold only non-derivable
+   vocabulary, while ``_NEG_PREFIXES`` / ``_EN_NEGATION_RE`` handle combinable
+   *preceding* negation and ``_UNRESOLVED_TRAILING`` handles *following*
+   qualifiers ("fixed without full verification").
+3. Only then are accepted/rejected words matched, with the same negation
+   checks applied at each match position.
+
+Keeping fixed phrases and combinable rules separate matters: dumping every
+negation variant into a flat list is how ``未通过`` used to be read as a
+pass, and how a new qualifier silently inflates the acceptance rate.
 """
 
 from __future__ import annotations
@@ -29,18 +46,72 @@ _RESULT_HEADING_RE = re.compile(r"(?m)^##\s*(?:执行结果|Execution results?)[
 _NEXT_HEADING_RE = re.compile(r"(?m)^##\s+")
 _HEX_RE = re.compile(r"^[0-9a-f]{6,}$", re.IGNORECASE)
 
+# Fixed, non-derivable unresolved phrases only. Combinable negation belongs to
+# the rules below; adding "not <positive>" variants here would duplicate them
+# and hide future gaps in the rule path.
 # Unresolved markers are checked first. "未修复" contains "修复" and "not fixed"
 # contains "fixed"; without this pass they would be read as accepted.
 _UNRESOLVED = (
     "未修复",
     "修复失败",
     "未完成",
+    "修复中",
+    "修复进行中",
+    "正在修复",
+    "未通过",
+    "没通过",
+    "不通过",
+    "未测试",
+    "未验证",
+    "没验证",
+    "待验证",
+    "待测试",
+    "待复测",
+    "待回归",
+    "待确认",
+    "待合并",
+    "测试失败",
+    "回归失败",
     "失败",
     "阻塞",
     "无法修复",
     "无法解决",
     "not fixed",
+    "not yet fixed",
+    "not done",
+    "not resolved",
+    "not accepted",
+    "not confirmed",
+    "cannot be fixed",
+    "can't be fixed",
+    "cant be fixed",
+    "non-fixed",
     "unfixed",
+    "not passing",
+    "did not pass",
+    "didn't pass",
+    "does not pass",
+    "doesn't pass",
+    "not tested",
+    "tests fail",
+    "test failure",
+    "tests failure",
+    "regression failure",
+    "none of the tests",
+    "not verified",
+    "pending verification",
+    "awaiting verification",
+    "needs verification",
+    "need verification",
+    "requires verification",
+    "to be verified",
+    "pending review",
+    "awaiting review",
+    "needs review",
+    "needs testing",
+    "requires testing",
+    "still broken",
+    "still failing",
     "failed",
     "blocked",
     "incomplete",
@@ -55,6 +126,12 @@ _REJECTED = (
     "无法复现",
     "不存在",
     "非问题",
+    "不是问题",
+    "不是缺陷",
+    "非缺陷",
+    "不算问题",
+    "不构成问题",
+    "没有问题",
     # "no fix needed" is a false-positive verdict, not an acceptance. Without
     # these, "无需修复" matched the accepted word "修复" and inflated the rate.
     "无需修复",
@@ -63,12 +140,34 @@ _REJECTED = (
     "不用修复",
     "不必修复",
     "没必要修复",
+    "无须修复",
+    "不须修复",
+    "毋须修复",
+    "勿需修复",
     "无需修改",
     "不需要修改",
+    "无须修改",
+    "不须修改",
+    "无需改动",
+    "不需要改动",
+    "不用改",
+    "无需改",
+    "不必改",
+    "不需要改",
+    "没必要改",
+    "无需处理",
+    "无须处理",
+    "不用处理",
+    "不需要处理",
+    "不必处理",
+    "已忽略",
     "已驳回",
     "驳回",
     "falsepositive",
     "false positive",
+    "falsealarm",
+    "false alarm",
+    "duplicate",
     "notapplicable",
     "not applicable",
     "n/a",
@@ -76,6 +175,24 @@ _REJECTED = (
     "skip",
     "notreproducible",
     "not reproducible",
+    "cannot reproduce",
+    "can't reproduce",
+    "cant reproduce",
+    "could not reproduce",
+    "couldn't reproduce",
+    "unable to reproduce",
+    "无法重现",
+    "未重现",
+    "not a bug",
+    "no bug",
+    "not a problem",
+    "no problem",
+    "not a vulnerability",
+    "no issue",
+    "not an issue",
+    "not a real issue",
+    "isn't an issue",
+    "is not an issue",
     "invalid",
     "wontfix",
     "won't fix",
@@ -103,6 +220,9 @@ _ACCEPTED = (
     "partially fixed",
     "partial",
     "fixed",
+    "merged",
+    "已合并",
+    "改完",
     "done",
     "resolved",
     "passed",
@@ -118,6 +238,8 @@ _ACCEPTED = (
 # "未通过", "done" in "not done". Checking these prefixes at the match position
 # is what keeps a negated verdict from being counted as an acceptance.
 _NEG_PREFIXES = (
+    "不是",
+    "并非",
     "无法",
     "未能",
     "尚未",
@@ -142,6 +264,83 @@ _NEG_PREFIXES = (
     "un",
     "pending ",
 )
+
+# Qualifiers that follow a positive verdict. "已修复"/"fixed" alone is evidence
+# of acceptance, but "部分修复但仍有问题" and "fixed without full verification"
+# explicitly withhold it. Checked alongside _UNRESOLVED before any positive word.
+_UNRESOLVED_TRAILING = (
+    "without full verification",
+    "without verification",
+    "without testing",
+    "without regression test",
+    "without a regression test",
+    "not fully verified",
+    "not fully tested",
+    "but not verified",
+    "but not tested",
+    "but still",
+    "但仍",
+    "但尚",
+    "但问题仍在",
+    "仍有待",
+    "仍待",
+    "尚待",
+)
+
+_CLAUSE_BREAK_RE = re.compile(r"[，,。.;；:：!?！？\n]")
+# Preceding negation inside one clause: "not a false positive", "not yet fixed".
+_EN_NEGATION_RE = re.compile(
+    r"(?:\b(?:not|no|none|nothing|neither|nor|never|cannot|can't|cant|isn't|"
+    r"wasn't|weren't|hasn't|haven't|hadn't|won't|wouldn't|doesn't|didn't|don't)\b"
+    r"[\s-]*(?:\w+[\s-]+){0,2})$",
+    re.IGNORECASE,
+)
+
+# Compositional whole-cell verdicts. These are matched against the *entire*
+# cell: "no test failed" is positive even though it contains "failed", while
+# "no test failed but not fixed" must still fall through to the unresolved
+# pass. Keeping them here also means "not a bug" no longer depends on a single
+# flat-list entry (see the meta-test in test_outcomes.py).
+_REJECTED_NEGATIONS = (
+    re.compile(r"nothing\s+to\s+(?:fix|change|modify|do)\b", re.IGNORECASE),
+    re.compile(
+        r"no\s+(?:changes?|fix(?:es)?|modifications?|adjustments?)\s+"
+        r"(?:needed|required|necessary)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"nothing\s+(?:needs?|requires?)\s+(?:fixing|changing)\b", re.IGNORECASE),
+    re.compile(
+        r"no\s+longer\s+(?:an?\s+)?(?:issue|bug|problem|vulnerability|concern)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"none\s+of\s+these\s+(?:are\s+|is\s+)?(?:issues|problems|bugs|defects)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:not|isn't|is\s+not|wasn't|was\s+not|isnt|wasnt)\s+"
+        r"(?:really\s+|actually\s+|real\s+)?(?:a\s+|an\s+)?"
+        # "not a false positive" is deliberately absent: that is a *denial of
+        # rejection*, which the clause-level negation below leaves open rather
+        # than turning into a rejection of the finding itself.
+        r"(?:bug|issue|problem|vulnerability)\b",
+        re.IGNORECASE,
+    ),
+)
+_ACCEPTED_NEGATIONS = (
+    re.compile(r"no\s+tests?\s+(?:failed|fail|failing)\b", re.IGNORECASE),
+    re.compile(r"no\s+(?:test|regression)\s+failures?\b", re.IGNORECASE),
+    re.compile(r"no\s+failures?\b", re.IGNORECASE),
+    re.compile(r"all\s+tests?\s+passed\b", re.IGNORECASE),
+    re.compile(r"all\s+checks?\s+passed\b", re.IGNORECASE),
+)
+
+
+def _matches_whole_cell(patterns: tuple[re.Pattern[str], ...], text: str) -> bool:
+    """True when a negation pattern describes the whole status cell."""
+    cell = text.strip(" \t\"'`()[]{}.,;:!?。！，；：、")
+    return any(pattern.fullmatch(cell) for pattern in patterns)
+
 
 _PENDING = ("", "待处理", "待定", "处理中", "排队中", "pending", "todo", "in progress", "open")
 _EMPTY_CELLS = {"", "-", "--", "—", "–", "n/a", "na", "none", "无"}
@@ -276,9 +475,28 @@ def _column_index(header: list[str]) -> dict[str, int]:
 
 
 def _negated_at(text: str, pos: int) -> bool:
-    """Whether the match starting at ``pos`` is immediately preceded by a negation."""
+    """Whether the match starting at ``pos`` is negated in its own clause.
+
+    English can put a short phrase between the negator and the verdict ("not
+    yet fixed", "cannot be fixed"), while a comma usually starts a new verdict
+    ("not a false positive, fixed"). Stop at clause punctuation so the earlier
+    negation cannot cancel the later positive evidence.
+    """
     before = text[:pos]
-    return any(before.endswith(prefix) for prefix in _NEG_PREFIXES)
+    breaks = list(_CLAUSE_BREAK_RE.finditer(before))
+    clause = before[breaks[-1].end() :] if breaks else before
+    if any(clause.endswith(prefix) for prefix in _NEG_PREFIXES):
+        return True
+    return bool(_EN_NEGATION_RE.search(clause))
+
+
+def _has_rejected_word(text: str) -> bool:
+    """True when a rejection phrase is present without its own negation."""
+    for word in _REJECTED:
+        for match in re.finditer(re.escape(word), text):
+            if not _negated_at(text, match.start()):
+                return True
+    return False
 
 
 def _has_accepted_word(text: str) -> bool:
@@ -305,9 +523,18 @@ def classify_status(raw: str) -> str | None:
     if not text:
         return None
     compact = re.sub(r"\s+", " ", text)
+    # Whole-cell compositional verdicts first: "no test failed" is positive
+    # despite containing the unresolved word "failed". Matching the full cell
+    # prevents a later qualifier ("... but not fixed") from being overruled.
+    if _matches_whole_cell(_ACCEPTED_NEGATIONS, compact):
+        return "accepted"
+    if _matches_whole_cell(_REJECTED_NEGATIONS, compact):
+        return "rejected"
     if any(marker in compact for marker in _UNRESOLVED):
         return None
-    if any(word in compact for word in _REJECTED):
+    if any(marker in compact for marker in _UNRESOLVED_TRAILING):
+        return None
+    if _has_rejected_word(compact):
         return "rejected"
     if _has_accepted_word(compact):
         return "accepted"
