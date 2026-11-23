@@ -297,7 +297,7 @@ function renderCards() {
     const card = document.createElement("div");
     card.className = "card " + statusClass(p);
     const tokens = p.tokens
-      ? ` · ${p.tokens.total ?? 0} tokens` : "";
+      ? ` · ${esc(Number(p.tokens.total) || 0)} tokens` : "";
     card.innerHTML = `
       <div class="card-head">
         <div class="card-name">${esc(p.name)}</div>

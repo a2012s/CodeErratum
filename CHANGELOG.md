@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.7.0] — 2026-11-23
+
+### Fixed
+
+- 按 `erratumReview.md`（0.6.9 自审工单）逐条核实并修复 9 条成立发现：
+  - **拖拽定位仓库静默失效**（F-001/F-002，P0）：`showDropMatches` 用 innerHTML
+    覆盖 `#repoBody` 后 `#repoSwitch` 已不存在，`doSwitchRepo` 对 null 设
+    `disabled` 抛 TypeError，单匹配拖拽这一最常见路径既不切换也不报错。
+    按钮忙碌态改为存在才操作。
+  - **非法 mode 的异常契约**（F-003，P0）：`ModelRegistry.route` 由字典下标
+    （KeyError）改为显式成员检查抛 `ValueError`，与调用方的 `except ValueError`
+    对齐；pipeline/resume 入口本有 `resolve_mode` 先行拦截，此修复保护直接
+    调用 registry 的路径。
+  - **get_run 并发切库拼数据**（F-005）：入口快照 `repo_root` 并只取一次
+    `store_for`，产物文件与状态库保证来自同一项目；`plan_resume` 也用快照。
+  - **review.md 链接漏 BASE**（F-006）：多项目 `/p/<slug>/` 下不再指向根项目；
+    run_id 经 `encodeURIComponent` + `esc`，并补 `rel="noopener"`。
+  - **CI 摘要失败丢 marker**（F-007）：行内评论已落地而摘要 POST 失败时，
+    补发仅含 marker 的占位评论再抛原错，重跑不再重复行内评论；无行内落地
+    则不留 marker，避免误跳过后续成功运行。占位评论附一行可读说明——marker
+    本身是 HTML 注释，单发会在 PR 上渲染成一个空白气泡。
+  - **非 loopback --host 无告警**（F-008）：`ui`/`desktop` 对非
+    {127.0.0.1, localhost, ::1} 的绑定打印醒目告警（UI 无鉴权；Host/Origin
+    校验只防浏览器 DNS rebinding，不防伪造头部的同网段直连客户端）。
+  - **总览页 tokens 未转义**（F-009）：`tokens.total` 规范成数字并经 `esc()`
+    写入 innerHTML，与相邻字段一致。
+- F-004（主 excerpt 固定围栏可被源码闭合）判为**误报**：`render_excerpt`
+  对每行无条件加行号前缀，行首不可能是反引号，围栏闭不掉；证伪轮的反驳成立。
+  但仍按同文件 `render_callers` 的既有做法给主 excerpt 换上自适应围栏
+  （`_fence(excerpt)`）——结论不依赖「行号前缀永远存在」这个格式细节。
+
+### Added
+
+- 恢复 `erratumReview.md`（0.6.9 自审工单）到仓库根目录，CHANGELOG 与工单
+  互为引用；并用 `codeerratum reconcile erratumReview.md` 把工单《执行结果》
+  表回填进 `feedback.db`（10 行，采纳 9 / 驳回 1），闭环在自审工单上跑通。
+- `packaging/install.sh`：安全的桌面应用安装脚本。PyInstaller bundle 就是它
+  自己的归档，`ditto` 原地覆盖会让运行中的实例读到撕裂的归档（见 AGENTS.md
+  「桌面应用安装」一节）。脚本按「结束旧实例 → 改名移走旧 bundle → 拷进新
+  bundle → `--selftest` 验证 → 旧件入回收站」执行，杜绝 `zlib.error: Error -3
+  while decompressing data: incorrect header check`。
+
+### Fixed
+
+- 桌面应用启动失败的根因定位（非代码缺陷，属安装流程）：在应用运行时用
+  `ditto` 覆盖 `/Applications/CodeErratum.app`，运行中实例的 PYZ 归档被撕裂，
+  打印中文时 Rich 懒加载 `rich._unicode_data` 报 zlib 错误，弹「启动失败」，
+  且实例不再响应 SIGTERM。已用 `packaging/install.sh` 重新安装 0.7.0 并清理
+  `/Applications` 下 4 个历史遗留的 `.old_*` bundle。
+
+### Tests
+
+- tiered quick 的轻模型调用断言由 `>= 1` 收紧为 `== len(units)`（F-010），
+  钉住「每单元恰扫一次」，杜绝第二次全量扫描的成本回归。
+- 新增 9 条回归：未知 mode、CI marker 补发（有/无行内两例）、拖拽按钮判空、
+  BASE 链接、tokens 转义、get_run 并发切库快照、非 loopback 告警、
+  主 excerpt 自适应围栏。
+
+测试 516 passed / 5 项既有基线失败不变，ruff 全绿。桌面应用已重新打包并
+替换 `/Applications/CodeErratum.app`（0.7.0）。
+
 ## [0.6.9] — 2026-11-23
 
 ### Added

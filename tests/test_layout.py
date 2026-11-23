@@ -243,3 +243,33 @@ def test_empty_diff_offers_whole_tree_review_in_both_paths():
     # Bilingual strings ship with the dialog.
     assert 'data-en="No changes found"' in html
     assert 'data-en="Review whole tree"' in html
+
+
+def test_drop_switch_survives_the_missing_drawer_button():
+    """showDropMatches() replaces #repoBody, removing #repoSwitch; the drag path
+    then calls doSwitchRepo with no button in the DOM. An unguarded
+    btn.disabled threw a TypeError and the switch silently never happened."""
+    html = read("index.html")
+    body = html.split("async function doSwitchRepo", 1)[1].split(
+        "\nasync function openRepoFolder", 1
+    )[0]
+    assert "if (btn) btn.disabled = true;" in body
+    assert "if (btn) btn.disabled = false;" in body
+    assert "\n  btn.disabled" not in body
+
+
+def test_review_md_link_stays_inside_the_project_base():
+    """Under /p/<slug>/ a root-relative /api/runs/... href opens the root
+    project's report (or 404) instead of the tab's own run."""
+    html = read("index.html")
+    assert 'href="/api/runs/' not in html
+    assert "${BASE}/api/runs/${encodeURIComponent(run.run_id)}/review.md" in html
+    assert 'href="${esc(mdUrl)}"' in html
+    assert 'rel="noopener"' in html
+
+
+def test_overview_token_counts_are_escaped():
+    """tokens.total goes into card.innerHTML like every sibling field; a
+    non-numeric value from a polluted store must render as text, not markup."""
+    html = read("projects.html")
+    assert "esc(Number(p.tokens.total) || 0)" in html

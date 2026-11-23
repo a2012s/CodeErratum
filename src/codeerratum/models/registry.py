@@ -126,7 +126,12 @@ class ModelRegistry(BaseModel):
         scorer is only a default, never an override.
         """
         lenses = lenses or []
-        n = {"quick": 1, "dual": 2, "committee": 3}[mode]
+        seats = {"quick": 1, "dual": 2, "committee": 3}
+        # Callers catch ValueError to turn a bad seat request into a readable
+        # config error; a bare dict subscript would leak a KeyError past them.
+        if mode not in seats:
+            raise ValueError(f"unknown review mode: {mode}")
+        n = seats[mode]
         self._check_author(author_model)
         if pinned:
             by_id = {m.model_id: m for m in self.models}

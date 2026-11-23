@@ -253,10 +253,15 @@ def build_messages(
     """
     ranges = excerpt_ranges(unit, len(source_lines), enclosing_span)
     excerpt = render_excerpt(source_lines, ranges)
+    # Adaptive fence, same as render_callers. Today render_excerpt numbers every
+    # line, so no line can start with ``` and the fixed fence cannot be closed
+    # from inside — but the guard costs nothing and keeps a future change to the
+    # excerpt format from silently reopening the prompt-injection hole.
+    fence = _fence(excerpt)
     parts = [
         f"# File: {unit.primary_file}\n# Symbol: {unit.symbol}\n"
         "# Line numbers below are absolute line numbers of this file.\n\n"
-        f"```{unit.language or 'text'}\n{excerpt}\n```"
+        f"{fence}{unit.language or 'text'}\n{excerpt}\n{fence}"
     ]
     if callers or caller_details:
         parts.append(render_callers(callers or [], caller_details))

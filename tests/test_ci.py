@@ -293,3 +293,53 @@ def test_single_comment_failure_is_collected_not_raised(pr, monkeypatch):
     result = post_review(pr, "t", _collection([]), [_finding("甲")], [])
     assert result["inline_posted"] == 0
     assert result["inline_failed"]
+
+
+def test_summary_failure_leaves_a_marker_when_inline_landed(pr, monkeypatch):
+    """The marker rides in the summary; if the summary dies after the inline
+    review landed, a rerun must still skip this commit instead of duplicating
+    every inline comment."""
+    marker = marker_for(pr.head_sha)
+    posted: list[str] = []
+
+    def fake(method, url, token, payload=None, timeout=30):
+        if method == "GET":
+            return [{"body": b} for b in posted]
+        if url.endswith("/reviews"):
+            return {}
+        body = payload["body"]
+        # Only the marker fallback succeeds; the summary itself must fail.
+        if body == f"{marker}\n\n{github.FALLBACK_NOTE}":
+            posted.append(body)
+            return {"html_url": "u-marker"}
+        raise CIError("HTTP 403 rate limited")
+
+    monkeypatch.setattr(github, "_request", fake)
+    inline = [_finding("甲")]
+    with pytest.raises(CIError, match="403"):
+        post_review(pr, "t", _collection(inline), inline, [])
+    assert len(posted) == 1  # marker-only fallback, original error still raised
+    assert marker in posted[0]
+    # The marker alone is an HTML comment and renders as an empty bubble on the
+    # PR; the fallback needs a line a reviewer can actually read.
+    assert github.FALLBACK_NOTE in posted[0]
+
+    rerun = post_review(pr, "t", _collection(inline), inline, [])
+    assert rerun["skipped"]
+
+
+def test_summary_failure_without_inline_posts_no_marker(pr, monkeypatch):
+    """Nothing landed, nothing to dedupe: the failure must not leave a marker
+    that would make a later successful run skip the commit."""
+    attempts: list[str] = []
+
+    def fake(method, url, token, payload=None, timeout=30):
+        if method == "GET":
+            return []
+        attempts.append(payload["body"])
+        raise CIError("HTTP 422 body too long")
+
+    monkeypatch.setattr(github, "_request", fake)
+    with pytest.raises(CIError, match="422"):
+        post_review(pr, "t", _collection([]), [], [])
+    assert len(attempts) == 1  # the summary attempt only, no placeholder

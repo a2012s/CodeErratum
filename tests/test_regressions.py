@@ -400,6 +400,19 @@ def test_caller_fence_adapts_to_backticks_in_snippet():
     assert "still source" in rendered  # snippet body stays inside the block
 
 
+def test_main_excerpt_fence_adapts_to_backticks_in_source(tmp_path):
+    """The reviewed source goes into the prompt inside a fence too. Today every
+    excerpt line is numbered, so no line can start with ``` — but the fence must
+    not depend on that formatting detail staying true."""
+    unit = _unit(primary_file="app.py", symbol="fn_0", language="python")
+    source = ["def fn_0():", '    """doc', "    ```", "    still source"]
+    messages = build_messages(unit, source, enclosing_span=(1, 4))
+    user = messages[1]["content"]
+    assert "````python\n" in user  # opening fence is four ticks, not three
+    assert "````" in user.split("\n\n", 1)[1]  # and it closes with four
+    assert "still source" in user
+
+
 def test_caller_backslash_paths_are_not_listed_twice():
     """callers use Path.relative_to() (backslash on Windows) while details use
     "/"; unnormalised comparison defeats the "max 5 callers" limit."""

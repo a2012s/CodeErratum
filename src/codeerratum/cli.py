@@ -468,6 +468,17 @@ def _bind_or_exit(repo_root, host: str, port: int, max_parallel: int):
         raise typer.Exit(1) from exc
 
 
+def _warn_non_loopback(host: str) -> None:
+    """The UI has no auth; a non-loopback bind hands it to the whole network.
+
+    The Host/Origin checks stop DNS rebinding through a browser, not a direct
+    client that forges both headers. An explicit --host is still the user's
+    choice, so warn loudly instead of refusing.
+    """
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        console.print(f"[yellow]{t('cli.host_exposed', host=host)}[/yellow]")
+
+
 def _url_for(httpd, host: str, print_port: bool) -> str:
     """Actual bound URL, plus the machine-readable line a shell waits for.
 
@@ -548,6 +559,7 @@ def ui(
     ),
 ) -> None:
     """Open the local web UI (multi-project tabs, run history, report, accept/reject)."""
+    _warn_non_loopback(host)
     repo_root = None if no_repo else _resolve_repo_or_exit(repo)
     _hub, httpd, app_ui = _bind_or_exit(repo_root, host, port, max_parallel)
 
@@ -597,6 +609,7 @@ def desktop(
     from .web.desktop import close_window, launch
     from .web.lifecycle import defer_signals, stop_server
 
+    _warn_non_loopback(host)
     repo_root = None if no_repo else _resolve_repo_or_exit(repo)
     _hub, httpd, app_ui = _bind_or_exit(repo_root, host, port, max_parallel)
     url = _url_for(httpd, host, False)

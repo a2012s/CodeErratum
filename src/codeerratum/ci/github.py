@@ -32,6 +32,14 @@ INLINE_SEVERITIES = ("P0", "P1")
 SUMMARY_MAX_ROWS = 20
 TIMEOUT = 30
 
+# Shown next to the marker when the summary could not be posted but the inline
+# comments already landed. The marker alone is an HTML comment and renders as an
+# empty bubble on the PR — a reviewer would see a mystery blank comment.
+FALLBACK_NOTE = (
+    "CodeErratum：行内评论已发布，但摘要发送失败。已记下本次提交的审查标记，"
+    "重跑不会重复发布行内评论。"
+)
+
 
 class CIError(Exception):
     """Anything the caller should surface as a one-line failure, not a traceback."""
@@ -285,11 +293,23 @@ def post_review(
                     result.setdefault("inline_failed", []).append(str(exc))
 
     body = summary_body(collection, inline, rest, marker)
-    comment = _request(
-        "POST",
-        f"{api}/repos/{pr.slug}/issues/{pr.number}/comments",
-        token,
-        {"body": body},
-    )
+    comments_url = f"{api}/repos/{pr.slug}/issues/{pr.number}/comments"
+    try:
+        comment = _request("POST", comments_url, token, {"body": body})
+    except CIError:
+        # The idempotency marker lives only in the summary. If inline comments
+        # already landed and the summary fails, a rerun would post them all
+        # again — leave a marker-only comment so the next run skips this commit.
+        if result["inline_posted"]:
+            try:
+                _request(
+                    "POST",
+                    comments_url,
+                    token,
+                    {"body": f"{marker}\n\n{FALLBACK_NOTE}"},
+                )
+            except CIError:
+                pass  # best effort; the original failure is the one to report
+        raise
     result["summary_url"] = comment.get("html_url", "")
     return result

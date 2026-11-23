@@ -147,3 +147,10 @@ def test_unknown_author_model_is_rejected_not_silently_ignored():
 def test_route_never_seats_the_same_model_twice():
     with pytest.raises(ValueError, match="takes 2 model"):
         _registry().route("dual", pinned=["qwen-a", "qwen-a"])
+
+
+def test_route_rejects_an_unknown_mode_as_value_error():
+    """Callers catch ValueError to render a config error; KeyError would escape
+    as a 500 even though the mode is a runtime string from config or CLI."""
+    with pytest.raises(ValueError, match="unknown review mode"):
+        _registry().route("turbo")

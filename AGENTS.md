@@ -21,8 +21,28 @@
 ## 硬约定
 
 1. **版本号末位 +0.1**（0.6.2 → 0.6.3），同时改 `__init__.py` 与 `CHANGELOG.md` 顶部小节标题。
-2. **改完必须打包并替换桌面应用**：先把旧 `dist/` 移走，再 `.venv/bin/python packaging/build.py`；构建脚本内含 `--selftest`（必须过，包括 webview 后端导入）；然后 `ditto dist/CodeErratum.app /Applications/CodeErratum.app`。用户按桌面应用使用，只改源码不算交付。
+2. **改完必须打包并替换桌面应用**：先把旧 `dist/` 移走，再 `.venv/bin/python packaging/build.py`；构建脚本内含 `--selftest`（必须过，包括 webview 后端导入）；然后跑 `packaging/install.sh`（**不要直接 `ditto` 到 `/Applications`**，见下）。用户按桌面应用使用，只改源码不算交付。
 3. **提交前跑全量测试 + ruff**。有 5 项既有基线失败，不算新回归：`test_desktop::test_seeding_a_repo_keeps_the_projects_already_saved`、`test_hub::test_add_dedupes_and_validates`、`test_hub::test_add_and_remove_project_over_http`、`test_snapshot::test_commit_relative_specs_mean_everything_only_without_history`、`test_web::test_pipeline_refuses_an_unknown_revision_in_a_plain_folder`。
+
+## 桌面应用安装（0.7.0 踩过的坑，务必按脚本走）
+
+PyInstaller 的 bundle **就是它的归档**：冻结程序在 import 时才从自己的可执行文件里懒加载 PYZ 模块。`ditto src dst` 对已存在的目标文件是**原地覆盖**（同一个 inode，截断重写），所以在应用运行时直接 `ditto` 覆盖 `/Applications/CodeErratum.app`，运行中的实例就会读到**撕裂的归档**——目录表来自旧字节、模块载荷来自新字节，下一次懒加载报：
+
+```
+zlib.error: Error -3 while decompressing data: incorrect header check
+```
+
+迷惑之处在于磁盘上的 bundle 是好的（`--selftest` 过）、新开一个实例也正常，只有**已经在跑的那个实例**在打印中文时炸——Rich 只在遇到需要查字符宽度的字符（中文/emoji）时才懒加载 `rich._unicode_data`。它还会**不再响应 SIGTERM**：信号处理跑在独立线程里，拆解过程同样要打印中文，线程一死进程就活着不走。
+
+正确顺序（`packaging/install.sh` 已实现并自检）：
+1. 结束运行中的实例（SIGTERM → 等待 → 必要时 SIGKILL）；
+2. `mv` 旧 bundle 到一边（**改名，不是覆盖**，运行中的进程继续握着旧 inode）；
+3. `ditto` 新 bundle 到一个**尚不存在**的路径；
+4. 跑 `--selftest` 验证；
+5. 旧 bundle 再移进回收站。
+
+排查这类问题的手法：`.venv/bin/python` 里用 `PyInstaller.archive.readers` 直接抽 PYZ 里每个模块，抽不出来的就是坏的那一个；再和 `dist/` 里的同名文件比。
+
 
 ## 禁区与刻意权衡（改前先读原因）
 

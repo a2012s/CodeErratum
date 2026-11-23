@@ -246,6 +246,70 @@ def test_status_lookup_survives_rerun(repo, monkeypatch):
     }
 
 
+def test_get_run_snapshots_repo_and_store_before_a_concurrent_switch(
+    repo, tmp_path, monkeypatch
+):
+    """switch_repo only holds the review lock; a read in flight must not graft
+    another project's run rows/statuses onto this project's artifacts."""
+    from codeerratum.web import server as web_server
+
+    run_id = "aabbccddeeff"
+    run_dir = repo / ".codeerratum" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "findings.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "repo": str(repo),
+                "commit": "c1",
+                "mode": "quick",
+                "findings": [{"id": "abc123abc123abcd"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    collection = FindingCollection(
+        run_id=run_id,
+        repo=str(repo),
+        commit="c1",
+        model_id="gpt-stub",
+        spec_level="L1",
+        findings=[],
+    )
+    store = ReviewStore(repo / ".codeerratum" / "feedback.db")
+    store.save_run(collection, "2026-01-01T00:00:00Z")
+    with store._conn() as conn:  # noqa: SLF001 - test seam by design
+        conn.execute(
+            "INSERT INTO findings (id, run_id, commit_sha, severity, claim, file, category, "
+            "status, created_at) VALUES ('abc123abc123abcd',?,'c1','P1','x','m.py',"
+            "'boundary','rejected','2026-01-02T00:00:00Z')",
+            (run_id,),
+        )
+
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+
+    app = WebApp(repo)
+    real_store_for = web_server.store_for
+    switched: list[bool] = []
+
+    def racing_store_for(root):
+        result = real_store_for(root)
+        if not switched:
+            switched.append(True)
+            # A concurrent POST /api/repo lands right after the first store
+            # access; every later read must still use the original project.
+            app.repo_root = other
+        return result
+
+    monkeypatch.setattr(web_server, "store_for", racing_store_for)
+    detail = app.get_run(run_id)
+    assert detail["created_at"] == "2026-01-01T00:00:00Z"
+    assert detail["zones"]["all"][0]["status"] == "rejected"
+    assert detail["repo"] == str(repo)
+
+
 def test_zone_split_maps_agreement_to_sections():
     from codeerratum.web.server import _split_zones
 

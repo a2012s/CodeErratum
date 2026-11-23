@@ -465,6 +465,13 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "cli.stop_hint": ("Ctrl+C 停止", "Ctrl+C to stop"),
     "cli.stopped": ("已停止", "Stopped"),
+    "cli.host_exposed": (
+        "警告：--host {host} 会把无鉴权的 UI 暴露给网络——同网段设备可触发付费审查、"
+        "读取代码内容并改写人工裁决。建议保持 127.0.0.1。",
+        "Warning: --host {host} exposes the unauthenticated UI to the network — "
+        "anyone on the LAN can start paid reviews, read code and rewrite verdicts. "
+        "Keep it on 127.0.0.1.",
+    ),
     "cli.reconcile_missing": ("找不到工单文件：{path}", "Work order not found: {path}"),
     "cli.reconcile_no_table": (
         "工单里没有《执行结果》表，无法回填",

@@ -525,14 +525,19 @@ class WebApp:
     def get_run(self, run_id: str) -> dict:
         if not RUN_ID_RE.match(run_id):
             raise LookupError("invalid run id")
-        run_dir = self.repo_root / STATE_DIR / "runs" / run_id
+        # Snapshot the pair once: switch_repo may repoint self.repo_root while
+        # this read is in flight, and the artifacts and the status database must
+        # come from one project — never half of each.
+        repo_root = self.repo_root
+        store = store_for(repo_root)
+        run_dir = repo_root / STATE_DIR / "runs" / run_id
         findings_path = run_dir / "findings.json"
         if not findings_path.exists():
             raise LookupError(f"run {run_id} has no findings.json (artifacts pruned?)")
         collection = json.loads(findings_path.read_text(encoding="utf-8"))
         findings = collection.get("findings", [])
         ids = [f["id"] for f in findings]
-        statuses = self.store.statuses_for(ids)
+        statuses = store.statuses_for(ids)
         for f in findings:
             state = statuses.get(f["id"], {})
             f["status"] = state.get("status", f.get("status", "open"))
@@ -540,7 +545,7 @@ class WebApp:
 
         mode = collection.get("mode", "quick")
         zones = {"all": findings} if mode == "quick" else _split_zones(findings, mode)
-        runs = {r["run_id"]: r for r in self.store.list_runs(limit=200)}
+        runs = {r["run_id"]: r for r in store.list_runs(limit=200)}
         row = runs.get(run_id, {})
         # Same split as summary()/list_runs: "dropped" removed a finding,
         # unit failures did not (verify_error keeps the finding unverified).
@@ -557,7 +562,7 @@ class WebApp:
         ]
         detail = {
             "run_id": run_id,
-            "repo": collection.get("repo", str(self.repo_root)),
+            "repo": collection.get("repo", str(repo_root)),
             "commit": collection.get("commit", ""),
             "mode": mode,
             "created_at": row.get("created_at", ""),
@@ -589,7 +594,7 @@ class WebApp:
         try:
             from ..resume import plan_resume
 
-            plan = plan_resume(self.repo_root, run_id)
+            plan = plan_resume(repo_root, run_id)
             detail["resumable"] = {
                 "units_done": plan["units_done"],
                 "units_total": plan["units_total"],

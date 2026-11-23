@@ -227,7 +227,9 @@ async def test_quick_tier_reviews_hit_units_only_once_each(tier_repo, monkeypatc
     assert collection.comparison["mode"] == "tiered"
     assert collection.comparison["verified_units"] == 1
     assert sum(1 for c in calls if c.get("role") == "verify") == 1
-    assert stubs["qwen3-flash"].calls >= 1
+    # Exactly one scan per unit: >= 1 would also pass a regression that sweeps
+    # the whole queue twice and doubles the token bill.
+    assert stubs["qwen3-flash"].calls == len(units)
     assert stubs["qwen-max-preview"].calls == 1
 
 

@@ -1171,7 +1171,10 @@ function renderRun() {
   ];
   run.models.forEach((m) => chips.push(`<span class="chip model">${esc(m)}</span>`));
   if (run.has_markdown) {
-    chips.push(`<a class="chip" style="text-decoration:none" href="/api/runs/${run.run_id}/review.md" target="_blank">review.md ↗</a>`);
+    // BASE keeps the link inside /p/<slug>/; a root-relative href would open
+    // the root project's report (or 404) from a project tab.
+    const mdUrl = `${BASE}/api/runs/${encodeURIComponent(run.run_id)}/review.md`;
+    chips.push(`<a class="chip" style="text-decoration:none" href="${esc(mdUrl)}" target="_blank" rel="noopener">review.md ↗</a>`);
   }
   $("runChips").innerHTML = chips.filter(Boolean).join("");
 
@@ -2201,7 +2204,9 @@ function renderRepoDrawer() {
 async function doSwitchRepo(path) {
   if (!path) { showError(T("请填写本地仓库文件夹的绝对路径，或用「浏览本地…」选择"), T("没有选择仓库")); return; }
   const btn = $("repoSwitch");
-  btn.disabled = true;
+  // #repoSwitch only exists in the drawer form; showDropMatches() replaces
+  // #repoBody, so the drag-and-drop path calls us with no button in the DOM.
+  if (btn) btn.disabled = true;
   try {
     const meta = await api("/api/repo", { method: "POST", body: JSON.stringify({ path }) });
     rememberRepo(meta.repo);
@@ -2217,7 +2222,7 @@ async function doSwitchRepo(path) {
     if (err) { err.textContent = e.message; err.hidden = false; }
     showError(T("目标路径：{path}", { path }) + "\n\n" + e.message, T("切换仓库失败"));
   } finally {
-    btn.disabled = false;
+    if (btn) btn.disabled = false;
   }
 }
 

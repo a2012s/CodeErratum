@@ -166,6 +166,17 @@ def test_print_port_emits_one_machine_readable_line(tmp_path, capsys):
     assert capsys.readouterr().out.strip() == f"PORT={port}"
 
 
+def test_non_loopback_host_is_warned_not_silent(capsys):
+    """The UI has no auth; --host 0.0.0.0 hands it to the LAN. The Host/Origin
+    checks only stop browser rebinding, so an explicit bind deserves a warning."""
+    cli._warn_non_loopback("0.0.0.0")
+    out = capsys.readouterr().out
+    assert "--host 0.0.0.0" in out
+    for loopback in ("127.0.0.1", "localhost", "::1"):
+        cli._warn_non_loopback(loopback)
+    assert capsys.readouterr().out == ""
+
+
 def test_launcher_flags_are_exposed():
     runner = CliRunner()
     ui_help = " ".join(runner.invoke(cli.app, ["ui", "--help"]).output.split())
