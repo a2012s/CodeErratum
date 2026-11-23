@@ -172,3 +172,54 @@ def test_an_explicit_empty_range_stays_empty(tmp_path, monkeypatch):
 
     with pytest.raises(pipeline.NoChanges):
         pipeline.execute_review(repo, diff_spec=f"{sha}..{sha}")
+
+
+def test_snapshot_survives_gitignore_that_lists_the_state_dir(tmp_path: Path):
+    """A repo whose own .gitignore lists .codeerratum used to fail the snapshot.
+
+    Naming the state dir as an explicit ``:!`` pathspec makes git treat it as
+    an explicitly requested ignored path: the add exits 1 with the
+    "paths are ignored" hint, and WORKTREE review died before producing a
+    diff — on every repo that (correctly) ignores the state dir.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / ".gitignore").write_text(".codeerratum/\n", encoding="utf-8")
+    (tmp_path / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".codeerratum").mkdir()
+    (tmp_path / ".codeerratum" / "config.json").write_text('{"api_key": "sk-x"}', encoding="utf-8")
+
+    diff = snapshot_diff(tmp_path)
+
+    assert "a/mod.py" in diff
+    assert "a/.codeerratum/" not in diff, "the config file holds API keys"
+    assert "api_key" not in diff
+
+
+def test_snapshot_honours_local_exclude_without_gitignore(tmp_path: Path):
+    """Rules living only in .git/info/exclude must hold in the throwaway GIT_DIR.
+
+    The temp repo reads no local exclude, so .codeerratum has to be carried
+    over explicitly — otherwise its config.json reaches the model.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    exclude = tmp_path / ".git" / "info" / "exclude"
+    exclude.write_text("secret.local\n", encoding="utf-8")
+    (tmp_path / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "secret.local").write_text("token\n", encoding="utf-8")
+
+    diff = snapshot_diff(tmp_path)
+
+    assert "a/mod.py" in diff
+    assert "a/secret.local" not in diff, "user's local-only ignores still decide"
+
+
+def test_unversioned_tree_still_hides_the_state_dir(tmp_path: Path):
+    """No git at all: the API keys must still never reach the diff."""
+    (tmp_path / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".codeerratum").mkdir()
+    (tmp_path / ".codeerratum" / "config.json").write_text('{"api_key": "sk-x"}', encoding="utf-8")
+
+    diff = snapshot_diff(tmp_path)
+
+    assert "a/mod.py" in diff
+    assert ".codeerratum" not in diff

@@ -176,14 +176,36 @@ def snapshot_diff(repo_root: Path, paths: str = "") -> str:
     — dumping ``.venv`` and ``node_modules`` into a review would be worse than
     refusing.
 
-    ``.codeerratum/`` is excluded by pathspec on top of that: it holds
-    ``config.json`` with API keys, and on a repo whose ignore rule lives in
-    ``.git/info/exclude`` (not read here, because GIT_DIR is a temp dir) it would
-    otherwise be reviewed and echoed back through a model.
+    ``.codeerratum/`` is excluded via ``core.excludesFile`` on top of the
+    tree's own ``.gitignore``: it holds ``config.json`` with API keys, and a
+    repo whose rule lives only in ``.git/info/exclude`` would otherwise have
+    it staged (the throwaway GIT_DIR reads no local exclude) and echoed back
+    through a model. Naming it as an explicit ``:!`` pathspec does not work:
+    git then treats it as an explicitly requested ignored path and *fails*
+    the add with exit 1 whenever the tree's ``.gitignore`` also lists it.
     """
     pathspec = normalize_pathspec(paths)
-    exclude = ":!" + STATE_DIR_NAME
     with tempfile.TemporaryDirectory(prefix="codeerratum-snapshot-") as tmp:
+        # Merge the state-dir rule with the user's local exclude file into one
+        # excludesFile for the throwaway repo. .gitignore (in-tree) keeps
+        # applying on its own; core.excludesFile is additive, not a replacement.
+        merged_excludes = Path(tmp) / "excludes"
+        merged_excludes.write_text(
+            f"# CodeErratum state, incl. API keys — never review or commit\n"
+            f"{STATE_DIR_NAME.rstrip('/')}/\n",
+            encoding="utf-8",
+        )
+        local_exclude = repo_root / ".git" / "info" / "exclude"
+        if local_exclude.is_file():
+            try:
+                merged_excludes.write_text(
+                    merged_excludes.read_text(encoding="utf-8")
+                    + "\n"
+                    + local_exclude.read_text(encoding="utf-8", errors="replace"),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass  # local rules are best-effort; the state-dir rule is already in
         env = {
             **os.environ,
             "GIT_DIR": str(Path(tmp) / "git"),
@@ -191,6 +213,9 @@ def snapshot_diff(repo_root: Path, paths: str = "") -> str:
             # A leaked GIT_INDEX_FILE would point the throwaway repo at the
             # user's real index and stage their files for real.
             "GIT_INDEX_FILE": str(Path(tmp) / "index"),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "core.excludesFile",
+            "GIT_CONFIG_VALUE_0": str(merged_excludes),
         }
 
         def git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -212,7 +237,7 @@ def snapshot_diff(repo_root: Path, paths: str = "") -> str:
         if init.returncode != 0:
             raise DiffError(init.stderr.strip() or "git init failed for the snapshot")
 
-        targets = [*pathspec.split(), exclude] if pathspec else [".", exclude]
+        targets = pathspec.split() if pathspec else ["."]
         added = git("add", "-A", "--", *targets)
         if added.returncode != 0:
             raise DiffError(added.stderr.strip() or "git add failed for the snapshot")

@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.6.7] — 2026-11-23
+
+### Fixed
+
+- **WORKTREE 快照在 .gitignore 列了 `.codeerratum/` 的仓库直接失败**
+  （用户实测报告）：快照曾把 `.codeerratum` 作为显式 `:!` pathspec 传给
+  `git add`，git 把它当成"明确要求添加的忽略路径"，打印
+  "The following paths are ignored..." 提示并以退出码 1 失败——凡是自己的
+  .gitignore 写了 `.codeerratum/` 的仓库（包括本仓库）都无法做 WORKTREE 审查。
+  改为 `core.excludesFile` 方案：临时 GIT_DIR 指向合并了
+  `.codeerratum/` 与用户 `.git/info/exclude` 的排除文件，路径里不再点名忽略项，
+  `git add` 恢复退出码 0。
+- 排除规则顺带补齐一个安全缺口：临时 GIT_DIR 原本读不到用户的
+  `.git/info/exclude`，仅用本地排除文件的仓库会让 `.codeerratum/config.json`
+  （明文 API key）进入 diff 并发给模型；现在该文件的内容被并入
+  excludesFile，与 `.gitignore` 叠加生效。
+
+### Tests
+
+- .gitignore 列 `.codeerratum/` 的仓库快照成功且不泄露 config.json。
+- 仅 `.git/info/exclude` 有规则的仓库，本地排除在快照中仍然生效。
+- 无 git 的目录快照继续隐藏 `.codeerratum/`。
+
+测试 497 passed / 5 项既有基线失败不变，ruff 全绿；app 重打包替换
+/Applications/CodeErratum.app（selftest OK，旧备份 .old_066）。
+
 ## [0.6.6] — 2026-11-23
 
 按 `REVIEW_0.6.5.md` 复核修复：机器丢弃与单元失败的口径彻底分离（0.6.5 让
