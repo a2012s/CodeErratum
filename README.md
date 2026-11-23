@@ -6,7 +6,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](pyproject.toml)
 
+**The review layer that measures itself.**
+
+Every AI review tool can find bugs. Almost none can answer: *how good is the reviewing?* CodeErratum runs heterogeneous models against each other — an author-blind falsifier tries to tear every finding down, every human verdict is recorded, and the acceptance-rate dashboard feeds back into which model sits where. You don't just get a review; you get evidence of whether the review deserves your trust.
+
 **An errata sheet for code written by AI.**
+
+<p align="center"><img src="docs/seeded-bug-demo.gif" alt="Seeded-bug experiment: 2 planted bugs, falsifier kills 5 false positives, acceptance-rate dashboard" width="640"></p>
+
+*The GIF above is a real run: 2 bugs planted (a hallucinated API + silent data loss), both caught; the falsifier tore down 5 false positives with counter-examples; human verdicts recorded at 50% acceptance. Reproduce it yourself: [`demo/seeded-bugs/`](demo/seeded-bugs/).*
 
 CodeErratum reads a git diff and writes a `erratumReview.md` — not a list of comments for humans to skim, but a **work order another coding agent can execute directly**: exact location, expected behavior, a concrete fix, and an acceptance command.
 

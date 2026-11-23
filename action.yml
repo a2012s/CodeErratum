@@ -14,11 +14,22 @@ inputs:
     description: quick | dual | committee
     default: dual
   max-units:
-    description: Cost guard — maximum review units per run
-    default: "10"
+    description: >-
+      Units to review. Empty = auto (all units on small diffs, else the 60-unit
+      risk-ranked budget). "0" reviews every unit — on a big PR that is a real
+      bill, you asked for it.
+    default: ""
   max-inline:
     description: Inline comment cap. Past five, nobody reads any of them.
     default: "5"
+  paths:
+    description: >-
+      Optional git pathspec(s) to narrow the diff, e.g. "src/api". Multiple
+      paths separated by spaces.
+    default: ""
+  rules:
+    description: Optional path to a project-rules markdown file.
+    default: ""
   github-token:
     description: Token used to post comments. Needs pull-requests:write.
     default: ${{ github.token }}
@@ -46,6 +57,16 @@ runs:
         CODEERRATUM_MODE: ${{ inputs.mode }}
         GITHUB_TOKEN: ${{ inputs.github-token }}
       run: |
-        codeerratum pr --post \
-          --max-units "${{ inputs.max-units }}" \
-          --max-inline "${{ inputs.max-inline }}"
+        args=(--post --max-inline "${{ inputs.max-inline }}")
+        # Empty means auto (CLI default); an explicit value is passed as-is,
+        # where 0 keeps its "review everything" meaning.
+        if [ -n "${{ inputs.max-units }}" ]; then
+          args+=(--max-units "${{ inputs.max-units }}")
+        fi
+        if [ -n "${{ inputs.paths }}" ]; then
+          args+=(--path "${{ inputs.paths }}")
+        fi
+        if [ -n "${{ inputs.rules }}" ]; then
+          args+=(--rules "${{ inputs.rules }}")
+        fi
+        codeerratum pr "${args[@]}"

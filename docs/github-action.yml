@@ -29,8 +29,10 @@ jobs:
         with:
           models: ${{ secrets.CODEERRATUM_MODELS }}
           mode: dual
-          max-units: "10"
+          # 不填 = 自动（小 diff 全审，大 diff 按风险取前 60 个单元）；
+          # "0" 才是全量。大 PR 上写 0 前先想好账单。
           max-inline: "5"
+          paths: "src/"  # 收窄范围能把单元数从上千压到几十，强烈建议
 
       # 产物留着：失败时能直接看发给模型的内容与判据
       - uses: actions/upload-artifact@v4

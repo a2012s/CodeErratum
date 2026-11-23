@@ -1,0 +1,28 @@
+CodeErratum 使用统计
+
+审查运行数：1
+发现总数：4
+已采纳：2 | 已驳回：2
+采纳率：50.0%
+
+按分类（total / rejected）
+  error_code_inconsistent    2 /   1
+  resource_leak              1 /   1
+  semantic_drift             1 /   0
+
+按模型（断言数）
+  qwen4-max-preview                  7 asserts
+  qwen3.8-flash                      4 asserts
+
+按模型/角色
+  qwen3.8-flash                assert      4
+  qwen3.8-flash                confirm     2
+  qwen3.8-flash                refute      2
+  qwen3.8-flash                unique      1
+  qwen4-max-preview            assert      7
+  qwen4-max-preview            confirm     1
+  qwen4-max-preview            refute      5
+  qwen4-max-preview            unique      1
+
+机器丢弃原因（非人工驳回）
+  refuted                            5
