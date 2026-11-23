@@ -11,12 +11,24 @@
   - **Format check 失败**（此前被 Lint 提前失败掩盖）：17 个 Python 文件的
     排版与 `ruff format` 不一致——这些文件是逐轮手工编辑的，只跑了
     `ruff check` 没跑 `ruff format`。现已全部格式化。
-  - **Test 失败**（run #12 ~ #37）：本地复现的「5 项既有基线失败」并非产品
-    缺陷，而是 pytest 临时目录被固定在仓库内（`.pytest_tmp/local`）导致
-    `tmp_path` 落进 git 工作树，`resolve_git_root` / `is_git_repo` 向上遍历
-    找到项目根，普通文件夹被误判成仓库子目录。改用仓库外的 basetemp 后
-    三项恢复通过；`pyproject.toml` 早年的注释已警告过不要把 basetemp 钉在
-    仓库里。
+  - **Test 失败**（run #12 ~ #37）：Linux 上 4 个 Web 测试失败，根因是**测试
+    依赖运行机器的平台**——`test_pick_repo_*` 与 `test_open_repo_folder_*` 没有
+    指定平台，macOS 上直接走 `osascript`/`open` 分支就通过，Linux 上则先卡在
+    「找不到 zenity / xdg-open」。实现本身早已支持三平台（zenity、xdg-open /
+    gio、explorer），是测试把平台假设写死了。现已把平台显式参数化
+    （darwin / win32 / linux），并补一条「Linux 缺 zenity 时要指名道姓地报错」
+    的用例。顺带钉住 Windows 特例：explorer 打开窗口后返回非零状态不算失败。
+
+- 用 `ghcr.io/astral-sh/uv` 容器（Ubuntu + Python 3.11 + git）本地复现 CI，
+  确认这 4 条就是红灯的全部来源；容器内 530 passed / 0 failed。
+
+- **本地「5 项既有基线失败」是假的**：那 5 项（hub 两条、snapshot、desktop、
+  web 各一）不是产品缺陷，而是 pytest 临时目录被固定在仓库内
+  （`.pytest_tmp/local`），`tmp_path` 因此落进 git 工作树，
+  `resolve_git_root` / `is_git_repo` 向上遍历找到项目根，普通文件夹被误判成
+  仓库子目录。改用仓库外的 basetemp 后三项恢复通过；`pyproject.toml` 早年的
+  注释已警告过不要把 basetemp 钉在仓库里。以后本地跑测试一律用仓库外的
+  `--basetemp`。
 
 ### Changed
 
@@ -25,10 +37,14 @@
   摘出来的单行，ruff 无法在不改变语义的前提下重排（`x = f(a)` 会被改成
   `x = (f(a),)`）。格式化器不应改写历史审查记录，故排除 Markdown。
 
+- CI 的 Test 步骤把失败摘要以 `::error::` annotation 输出：一个打不开原始
+  日志的红任务什么都说明不了，而 annotation 会直接出现在提交页上。
+
 ### Tests
 
-Python 3.11 / 3.12 / 3.13 三版本各 **521 passed / 0 failed**，
-`ruff check .` 与 `ruff format --check .` 全绿。
+Python 3.11 / 3.12 / 3.13 三版本各 **530 passed / 0 failed**，
+Ubuntu 容器内 530 passed / 0 failed，`ruff check .` 与 `ruff format --check .`
+全绿。
 
 ## [0.7.0] — 2026-11-23
 

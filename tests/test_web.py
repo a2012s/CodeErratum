@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -482,6 +484,19 @@ def _git_repo(path, name: str) -> Path:
     return path
 
 
+# The folder picker and the file-manager opener each branch per platform. The
+# tests below pin that branch explicitly instead of inheriting the machine's
+# platform: a suite that only passes on macOS says nothing about the Linux
+# path, and CI runs on ubuntu. `shutil.which` is faked as well — the Linux
+# branch looks for zenity / xdg-open, and a headless CI box has neither.
+PLATFORMS = ["darwin", "win32", "linux"]
+
+
+def _pretend_platform(monkeypatch, platform: str) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+
+
 def test_switch_repo_http_changes_target(client, tmp_path):
     """The folder a user pastes becomes the review target for subsequent calls."""
     other = _git_repo(tmp_path / "other", "m.py")
@@ -591,10 +606,12 @@ def test_find_repo_by_name_ignores_plain_folders(client, tmp_path):
     assert found["matches"] == []
 
 
-def test_pick_repo_returns_git_root(client, monkeypatch):
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_pick_repo_returns_git_root(client, monkeypatch, platform):
     """The native dialog's chosen path is snapped to its git root."""
     import subprocess as sp
 
+    _pretend_platform(monkeypatch, platform)
     repo_alt = _git_repo(
         Path(tempfile.mkdtemp(prefix="ce-pick-")) / "proj",
         "m.py",
@@ -612,8 +629,11 @@ def test_pick_repo_returns_git_root(client, monkeypatch):
     assert result["path"] == str(repo_alt.resolve())
 
 
-def test_pick_repo_cancel_is_clean(client, monkeypatch):
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_pick_repo_cancel_is_clean(client, monkeypatch, platform):
     import subprocess as sp
+
+    _pretend_platform(monkeypatch, platform)
 
     class Canceled:
         returncode = 1
@@ -626,16 +646,31 @@ def test_pick_repo_cancel_is_clean(client, monkeypatch):
         app.pick_repo()
 
 
+def test_pick_repo_without_zenity_names_the_missing_tool(monkeypatch):
+    """A Linux box with no zenity must say which tool is missing."""
+    import codeerratum.web.server as web_server
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    with pytest.raises(Exception, match="zenity"):
+        web_server.pick_folder("t")
+
+
 def test_pick_and_find_require_same_origin(client):
     for path in ("/api/pick-repo", "/api/find-repo"):
         resp = client.post(path, json={}, headers={"Origin": "http://evil.example"})
         assert resp.status_code == 403
 
 
-def test_open_repo_folder_uses_server_side_repo_root(client, repo, monkeypatch):
+@pytest.mark.parametrize(
+    "platform,opener",
+    [("darwin", "open"), ("win32", "explorer"), ("linux", "/usr/bin/xdg-open")],
+)
+def test_open_repo_folder_uses_server_side_repo_root(client, repo, monkeypatch, platform, opener):
     """The button reveals the current repo, never a path supplied by the page."""
     import codeerratum.web.server as web_server
 
+    _pretend_platform(monkeypatch, platform)
     calls = []
 
     class Done:
@@ -647,11 +682,20 @@ def test_open_repo_folder_uses_server_side_repo_root(client, repo, monkeypatch):
     resp = client.post("/api/repo/open", json={"path": "/etc"})
     assert resp.status_code == 200
     assert resp.json() == {"path": str(repo.resolve()), "opened": True}
-    assert calls and calls[0][-1] == str(repo.resolve())
+    assert calls and calls[0][0] == opener
+    assert calls[0][-1] == str(repo.resolve())
 
 
-def test_open_repo_folder_reports_failure_in_chinese(client, monkeypatch):
+@pytest.mark.parametrize(
+    "platform,reports_failure",
+    [("darwin", True), ("win32", False), ("linux", True)],
+)
+def test_open_repo_folder_reports_failure_in_chinese(
+    client, monkeypatch, platform, reports_failure
+):
     import codeerratum.web.server as web_server
+
+    _pretend_platform(monkeypatch, platform)
 
     class Failed:
         returncode = 1
@@ -660,6 +704,12 @@ def test_open_repo_folder_reports_failure_in_chinese(client, monkeypatch):
 
     monkeypatch.setattr(web_server.subprocess, "run", lambda *a, **k: Failed())
     resp = client.post("/api/repo/open", json={})
+    if not reports_failure:
+        # Explorer reports a non-zero status after it has opened the window.
+        # There is nothing the user can act on, so it is not treated as a
+        # failure — only the other two platforms surface the error.
+        assert resp.status_code == 200
+        return
     assert resp.status_code == 400
     assert "无法打开当前仓库文件夹" in resp.json()["error"]
 
