@@ -32,4 +32,16 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Test
-        run: uv run pytest -q
+        # The failure summary is echoed as GitHub error annotations on purpose:
+        # a red job whose log you cannot open tells you nothing. The annotations
+        # show up on the commit page and in `gh run view`, so the names of the
+        # failing tests are readable without opening the raw log.
+        run: |
+          set +e
+          uv run pytest -q > /tmp/pytest.log 2>&1
+          code=$?
+          cat /tmp/pytest.log
+          grep -E '^(FAILED|ERROR) ' /tmp/pytest.log | head -60 | while IFS= read -r line; do
+            echo "::error::$line"
+          done
+          exit $code
