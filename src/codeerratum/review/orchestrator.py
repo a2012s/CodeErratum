@@ -36,6 +36,41 @@ def _one_line(text: str) -> str:
     return " ".join(text.split())
 
 
+def _parse_snapshot(providers: list) -> tuple[dict[str, int | float | None], list[dict]]:
+    """Roll every provider's parse counters into one run-level snapshot.
+
+    Parse health is a hard gate for every mode, not only dual/committee. Quick
+    returns early after its own merge, so the rollup cannot live further down
+    the multi-model path or the default mode would silently lose it.
+
+    The failure sample is bounded: ``failure_log`` entries already carry at most
+    4000 characters of model output, but a run-sized list would still bloat
+    ``findings.json``. Aggregates stay exact; samples are the first 50.
+    """
+    parse_stats: dict[str, int | float | None] = {}
+    parse_failures: list[dict] = []
+    for provider in providers:
+        for key, value in getattr(provider, "parse_stats", {}).items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                parse_stats[key] = parse_stats.get(key, 0) + value
+        for failure in getattr(provider, "failure_log", []):
+            parse_failures.append(
+                failure.model_dump(mode="json")
+                if hasattr(failure, "model_dump")
+                else dict(failure)
+            )
+    parse_calls = parse_stats.get("calls", 0)
+    parse_stats["success_rate"] = (
+        round(
+            (parse_stats.get("first_try", 0) + parse_stats.get("repaired", 0)) / parse_calls,
+            3,
+        )
+        if parse_calls
+        else None
+    )
+    return parse_stats, parse_failures[:50]
+
+
 def _failure_text(exc: Exception, provider: Provider) -> str:
     """Turn a transport exception into something a log line can explain.
 
@@ -475,6 +510,10 @@ async def run_review(
                         "verify_only_findings": extra,
                     }
             merged = rank_findings(merged, rejected_category_counts)
+            # Quick returns before the multi-model comparison block below, so
+            # roll parse health up here too. Otherwise the default mode writes
+            # an empty parse_stats.json even when the parser lost findings.
+            comparison["parse"], comparison["parse_failures"] = _parse_snapshot(all_providers)
             return (
                 FindingCollection(
                     run_id=run_id,
@@ -634,29 +673,7 @@ async def run_review(
         # Parse health is a hard gate, so it must outlive the process. Without
         # these artifacts a run that quietly lost findings is indistinguishable
         # from one where the model genuinely found nothing.
-        parse_stats: dict[str, int | float | None] = {}
-        parse_failures: list[dict] = []
-        for provider in all_providers:
-            for key, value in getattr(provider, "parse_stats", {}).items():
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    parse_stats[key] = parse_stats.get(key, 0) + value
-            for failure in getattr(provider, "failure_log", []):
-                parse_failures.append(
-                    failure.model_dump(mode="json")
-                    if hasattr(failure, "model_dump")
-                    else dict(failure)
-                )
-        parse_calls = parse_stats.get("calls", 0)
-        parse_stats["success_rate"] = (
-            round(
-                (parse_stats.get("first_try", 0) + parse_stats.get("repaired", 0)) / parse_calls,
-                3,
-            )
-            if parse_calls
-            else None
-        )
-        comparison["parse"] = parse_stats
-        comparison["parse_failures"] = parse_failures[:50]
+        comparison["parse"], comparison["parse_failures"] = _parse_snapshot(all_providers)
 
         collection = FindingCollection(
             run_id=run_id,

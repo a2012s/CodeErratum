@@ -55,6 +55,30 @@ TOOLS: list[dict] = [
                     "enum": ["quick", "dual", "committee"],
                     "description": "quick = one model; dual = two vendors plus falsification.",
                 },
+                "author_model": {
+                    "type": "string",
+                    "description": (
+                        "Model id that wrote the diff. It is excluded from every review "
+                        "seat (scanner, verifier and falsifier)."
+                    ),
+                },
+                "paths": {
+                    "type": "string",
+                    "description": "Git pathspec narrowing the diff, e.g. src/api.",
+                },
+                "tiered": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": (
+                        "quick only: scan every unit with the lightest model, then "
+                        "re-review hit units with the strong verifier."
+                    ),
+                },
+                "include_non_code": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Include docs/config/i18n units in the review.",
+                },
                 "max_units": {
                     "type": "integer",
                     "minimum": 0,
@@ -107,6 +131,78 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "accept_finding",
+        "description": (
+            "Mark a finding accepted after its fix and acceptance command were verified. "
+            "Idempotent: accepting an already accepted finding succeeds."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string", "description": "Finding id or unique prefix."},
+                "repo": {"type": "string", "description": "Absolute path to the repository."},
+            },
+            "required": ["finding_id"],
+        },
+    },
+    {
+        "name": "reject_finding",
+        "description": (
+            "Mark a finding rejected with a reason (false positive, duplicate, invalid). "
+            "Idempotent: rejecting an already rejected finding succeeds."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string", "description": "Finding id or unique prefix."},
+                "reason": {
+                    "type": "string",
+                    "description": "Why it is not a real defect. Required for stats.",
+                },
+                "repo": {"type": "string", "description": "Absolute path to the repository."},
+            },
+            "required": ["finding_id", "reason"],
+        },
+    },
+    {
+        "name": "reconcile_report",
+        "description": (
+            "Read a report's 执行结果 table and write its accepted/rejected verdicts back "
+            "into the feedback store. Re-resolved by finding id; the last row wins."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "report": {
+                    "type": "string",
+                    "description": (
+                        "Report path. Relative paths resolve against the repository. "
+                        "Default erratumReview.md."
+                    ),
+                },
+                "repo": {"type": "string", "description": "Absolute path to the repository."},
+                "dry_run": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Report what would change without writing statuses.",
+                },
+            },
+        },
+    },
+    {
+        "name": "get_stats",
+        "description": (
+            "Read acceptance rate, per-category counts, per-model assertions and "
+            "machine-drop reasons for this repository."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string", "description": "Absolute path to the repository."}
+            },
+        },
+    },
+    {
         "name": "check_docs_drift",
         "description": (
             "Compare the saved signature baseline against the current code and report "
@@ -147,6 +243,10 @@ def _tool_review_diff(args: dict) -> dict:
             # silently reviewed a sixth of the diff through MCP only.
             max_units=(int(args["max_units"]) if args.get("max_units") is not None else None),
             house_rules=str(args.get("house_rules") or ""),
+            author_model=str(args.get("author_model") or "") or None,
+            paths=str(args.get("paths") or ""),
+            tiered=bool(args["tiered"]) if "tiered" in args else True,
+            include_non_code=bool(args.get("include_non_code", False)),
         )
     except NoChanges as exc:
         return _text(f"没有可审查的变更：{exc}")
@@ -166,14 +266,100 @@ def _tool_list_runs(args: dict) -> dict:
     return _text(json.dumps(rows, ensure_ascii=False, indent=2))
 
 
+def _resolve_finding(store, raw_id: str) -> tuple[dict | None, str | None]:
+    """Resolve an exact id or a unique prefix without guessing between matches."""
+    finding_id = raw_id.strip().lower()
+    if not finding_id:
+        return None, "finding_id is required"
+    rows = store.find_finding(finding_id)
+    exact = [row for row in rows if row["id"] == finding_id]
+    if exact:
+        return exact[0], None
+    if len(rows) == 1:
+        return rows[0], None
+    if not rows:
+        return None, f"没有以 {raw_id} 开头的发现"
+    ids = ", ".join(row["id"] for row in rows)
+    return None, f"前缀 {raw_id} 匹配到多条发现，请给出更长的 id：{ids}"
+
+
 def _tool_get_finding(args: dict) -> dict:
     finding_id = str(args.get("finding_id") or "")
     if not finding_id:
         return _error("finding_id is required")
-    rows = store_for(_root(args)).find_finding(finding_id)
-    if not rows:
-        return _error(f"没有以 {finding_id} 开头的发现")
-    return _text(json.dumps(rows[0], ensure_ascii=False, indent=2))
+    row, problem = _resolve_finding(store_for(_root(args)), finding_id)
+    if problem:
+        return _error(problem)
+    return _text(json.dumps(row, ensure_ascii=False, indent=2))
+
+
+def _set_finding_status(args: dict, status: str, reason: str = "") -> dict:
+    finding_id = str(args.get("finding_id") or "")
+    if not finding_id:
+        return _error("finding_id is required")
+    store = store_for(_root(args))
+    row, problem = _resolve_finding(store, finding_id)
+    if problem:
+        return _error(problem)
+    previous = row["status"]
+    if not store.set_status(row["id"], status, reason):
+        return _error(f"finding {row['id']} disappeared before the status update")
+    payload = {
+        "id": row["id"],
+        "status": status,
+        "previous_status": previous,
+        "reason": reason,
+    }
+    return _text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _tool_accept_finding(args: dict) -> dict:
+    return _set_finding_status(args, "accepted")
+
+
+def _tool_reject_finding(args: dict) -> dict:
+    reason = str(args.get("reason") or "").strip()
+    if not reason:
+        return _error("reason is required: a rejection without a reason pollutes the stats")
+    return _set_finding_status(args, "rejected", reason)
+
+
+def _tool_reconcile_report(args: dict) -> dict:
+    from ..report.outcomes import apply_outcomes, parse_outcomes
+
+    root = _root(args)
+    raw_path = str(args.get("report") or "erratumReview.md")
+    report = Path(raw_path)
+    if not report.is_absolute():
+        report = root / report
+    if not report.is_file():
+        return _error(f"报告不存在：{report}")
+    parsed = parse_outcomes(report.read_text(encoding="utf-8", errors="replace"))
+    if not parsed.found_table:
+        return _error("报告里没有 `## 执行结果` 表")
+    dry_run = bool(args.get("dry_run", False))
+    counts = apply_outcomes(store_for(root), parsed.rows, dry_run=dry_run)
+    payload = {
+        "report": str(report),
+        "dry_run": dry_run,
+        "counts": counts,
+        "problems": parsed.problems,
+    }
+    if counts["rows"] == 0:
+        return _error(json.dumps(payload | {"error": "执行结果表里没有数据行"}, ensure_ascii=False))
+    if not dry_run and counts["updated"] == 0 and counts["unmatched"]:
+        # A stale or mistyped work order must not look like a closed loop.
+        return _error(
+            json.dumps(
+                payload | {"error": "没有任何编号匹配到本仓库的 finding，请检查报告编号"},
+                ensure_ascii=False,
+            )
+        )
+    return _text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _tool_get_stats(args: dict) -> dict:
+    return _text(json.dumps(store_for(_root(args)).stats(), ensure_ascii=False, indent=2))
 
 
 def _tool_check_docs_drift(args: dict) -> dict:
@@ -208,6 +394,10 @@ _HANDLERS = {
     "review_diff": _tool_review_diff,
     "list_runs": _tool_list_runs,
     "get_finding": _tool_get_finding,
+    "accept_finding": _tool_accept_finding,
+    "reject_finding": _tool_reject_finding,
+    "reconcile_report": _tool_reconcile_report,
+    "get_stats": _tool_get_stats,
     "check_docs_drift": _tool_check_docs_drift,
 }
 

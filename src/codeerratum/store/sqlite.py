@@ -165,9 +165,14 @@ class ReviewStore:
         crediting a falsifier's ``confirm`` to the falsifier — the exact model that
         must never look accurate. ``model_profile`` has one writer now.
         """
-        if not collection.comparison:
-            return
         cmp = collection.comparison
+        # A plain quick run only carries parse health. Writing that as a
+        # comparison row made `codeerratum compare` show raw={} and 聚类后=0 for
+        # every quick run, which reads like a failed cross-model diff. Parse
+        # health still lands in parse_stats.json; the table stays for runs that
+        # actually compared models.
+        if not cmp or set(cmp) <= {"parse", "parse_failures"}:
+            return
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO comparisons VALUES (?,?,?,?,?,?,?)",

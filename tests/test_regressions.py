@@ -619,6 +619,33 @@ def test_profile_counts_once_and_credits_only_asserting_models(tmp_path):
     assert "claude-y" not in profiles, "a falsifier must not gain a reviewer profile"
 
 
+def test_quick_parse_only_comparison_is_not_written_as_a_cross_model_row(tmp_path):
+    """Reverting: `codeerratum compare` listed every quick run with raw={} and
+    after_clustering=0, because its parse snapshot was stored as comparison data."""
+    store = ReviewStore(tmp_path / "f.db")
+    quick = FindingCollection(
+        run_id="quick1",
+        repo=".",
+        commit="c",
+        model_id="m",
+        spec_level="L1",
+        comparison={"parse": {"calls": 2}, "parse_failures": []},
+    )
+    store.save_comparison(quick, "t1")
+    assert store.comparison_history() == []
+
+    tiered = FindingCollection(
+        run_id="tiered1",
+        repo=".",
+        commit="c",
+        model_id="m",
+        spec_level="L1",
+        comparison={"mode": "tiered", "parse": {"calls": 2}, "parse_failures": []},
+    )
+    store.save_comparison(tiered, "t2")
+    assert [row["run_id"] for row in store.comparison_history()] == ["tiered1"]
+
+
 def test_pipeline_reads_the_diff_revisions_blobs(tmp_path, monkeypatch):
     """Reverting: execute_review passed no sources to split_diff / run_review, so a
     committed range was reviewed against whatever happened to be checked out."""

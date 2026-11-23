@@ -15,6 +15,8 @@ import pytest
 
 import codeerratum.review.orchestrator as orchestrator
 from codeerratum.mcp import PROTOCOL_VERSION, TOOLS, handle, serve
+from codeerratum.models import Anchor, Finding, FindingCollection, Suggestion
+from codeerratum.pipeline import store_for
 from codeerratum.providers.base import Completion, Usage
 from codeerratum.review.schema import LLMAnchor, LLMFinding, LLMReview, LLMSuggestion
 
@@ -45,6 +47,10 @@ def test_tools_list_exposes_every_tool_with_a_schema():
         "review_diff",
         "list_runs",
         "get_finding",
+        "accept_finding",
+        "reject_finding",
+        "reconcile_report",
+        "get_stats",
         "check_docs_drift",
     ]
     for tool in TOOLS:
@@ -185,6 +191,203 @@ def test_omitted_max_units_uses_the_same_auto_budget_as_cli(repo, monkeypatch):
     monkeypatch.setattr(mcp_server, "execute_review", fake_execute)
     call("tools/call", {"name": "review_diff", "arguments": {"repo": str(repo)}})
     assert seen["max_units"] is None
+    assert seen["author_model"] is None
+    assert seen["paths"] == ""
+    assert seen["tiered"] is True
+    assert seen["include_non_code"] is False
+
+
+def test_review_diff_forwards_the_exposed_cli_parameters(repo, monkeypatch):
+    import codeerratum.mcp.server as mcp_server
+    from codeerratum.pipeline import ConfigError
+
+    seen: dict = {}
+
+    def fake_execute(root, **kwargs):
+        seen.update(kwargs)
+        raise ConfigError("captured")
+
+    monkeypatch.setattr(mcp_server, "execute_review", fake_execute)
+    call(
+        "tools/call",
+        {
+            "name": "review_diff",
+            "arguments": {
+                "repo": str(repo),
+                "author_model": "gpt-author",
+                "paths": "src/api",
+                "tiered": False,
+                "include_non_code": True,
+            },
+        },
+    )
+    assert seen["author_model"] == "gpt-author"
+    assert seen["paths"] == "src/api"
+    assert seen["tiered"] is False
+    assert seen["include_non_code"] is True
+
+
+def _finding_for(repo, claim="空列表取首元素崩溃", finding_id=""):
+    source_lines = (repo / "m.py").read_text(encoding="utf-8").splitlines(keepends=True)
+    line = next(i for i, text in enumerate(source_lines, 1) if "return x[0]" in text)
+    return Finding(
+        id=finding_id or Finding.content_id("u1", claim, [f"m.py:{line}"]),
+        unit_id="u1",
+        lens="correctness",
+        category="boundary",
+        severity="P1",
+        claim=claim,
+        detail="当 x 为空时抛 IndexError。",
+        anchors=[Anchor.from_source("m.py", line, line, source_lines)],
+        suggestion=Suggestion(explanation="判空", acceptance="pytest -q"),
+    )
+
+
+def _seed_finding(repo):
+    """Persist one real anchored finding so the feedback tools have something to act on."""
+    finding = _finding_for(repo)
+    collection = FindingCollection(
+        run_id=f"run-{finding.id}",
+        repo=str(repo),
+        commit="c0",
+        model_id="stub",
+        spec_level="L1",
+        findings=[finding],
+    )
+    store = store_for(repo)
+    store.save_run(collection, "2026-11-23T00:00:00+00:00")
+    return store, finding.id
+
+
+def test_accept_finding_is_idempotent(repo):
+    store, finding_id = _seed_finding(repo)
+    args = {"repo": str(repo), "finding_id": finding_id}
+
+    first = call("tools/call", {"name": "accept_finding", "arguments": args})["result"]
+    second = call("tools/call", {"name": "accept_finding", "arguments": args})["result"]
+
+    assert first["isError"] is False
+    assert second["isError"] is False
+    assert store.statuses_for([finding_id])[finding_id]["status"] == "accepted"
+    assert json.loads(second["content"][0]["text"])["previous_status"] == "accepted"
+
+
+def test_get_finding_rejects_an_ambiguous_prefix(repo):
+    first = _finding_for(repo, claim="空列表取首元素崩溃", finding_id="abcd0001")
+    second = _finding_for(repo, claim="空列表取末元素崩溃", finding_id="abcd0002")
+    collection = FindingCollection(
+        run_id="run-ambiguous",
+        repo=str(repo),
+        commit="c0",
+        model_id="stub",
+        spec_level="L1",
+        findings=[first, second],
+    )
+    store_for(repo).save_run(collection, "2026-11-23T00:00:00+00:00")
+
+    result = call(
+        "tools/call",
+        {
+            "name": "get_finding",
+            "arguments": {"repo": str(repo), "finding_id": "abcd"},
+        },
+    )["result"]
+
+    assert result["isError"] is True
+    assert "匹配到多条" in result["content"][0]["text"]
+
+
+def test_reject_finding_requires_a_reason_and_is_idempotent(repo):
+    store, finding_id = _seed_finding(repo)
+
+    missing = call(
+        "tools/call",
+        {
+            "name": "reject_finding",
+            "arguments": {"repo": str(repo), "finding_id": finding_id},
+        },
+    )["result"]
+    assert missing["isError"] is True
+
+    args = {"repo": str(repo), "finding_id": finding_id, "reason": "误报：上游已经判空"}
+    first = call("tools/call", {"name": "reject_finding", "arguments": args})["result"]
+    second = call("tools/call", {"name": "reject_finding", "arguments": args})["result"]
+
+    assert first["isError"] is False
+    assert second["isError"] is False
+    status = store.statuses_for([finding_id])[finding_id]
+    assert status["status"] == "rejected"
+    assert status["reason"] == "误报：上游已经判空"
+
+
+def test_reconcile_report_dry_run_then_applies(repo):
+    store, finding_id = _seed_finding(repo)
+    report = repo / "erratumReview.md"
+    report.write_text(
+        "# Review\n\n## 执行结果\n\n"
+        "| 编号 | 状态 | 验证结果 |\n"
+        "|---|---|---|\n"
+        f"| {finding_id} | 误报 | 已确认 |\n",
+        encoding="utf-8",
+    )
+    args = {"repo": str(repo), "report": "erratumReview.md"}
+
+    dry = call(
+        "tools/call",
+        {"name": "reconcile_report", "arguments": args | {"dry_run": True}},
+    )["result"]
+    dry_payload = json.loads(dry["content"][0]["text"])
+    assert dry["isError"] is False
+    assert dry_payload["dry_run"] is True
+    assert dry_payload["counts"]["rejected"] == 1
+    assert store.statuses_for([finding_id])[finding_id]["status"] == "open"
+
+    applied = call("tools/call", {"name": "reconcile_report", "arguments": args})["result"]
+    payload = json.loads(applied["content"][0]["text"])
+    assert applied["isError"] is False
+    assert payload["counts"]["updated"] == 1
+    assert payload["counts"]["rejected"] == 1
+    assert store.statuses_for([finding_id])[finding_id]["status"] == "rejected"
+
+
+def test_reconcile_report_without_an_execution_table_is_an_error(repo):
+    (repo / "erratumReview.md").write_text("# Review\n\nno table here\n", encoding="utf-8")
+    result = call(
+        "tools/call",
+        {
+            "name": "reconcile_report",
+            "arguments": {"repo": str(repo), "report": "erratumReview.md"},
+        },
+    )["result"]
+    assert result["isError"] is True
+    assert "执行结果" in result["content"][0]["text"]
+
+
+def test_reconcile_report_with_only_unknown_ids_is_an_error(repo):
+    (repo / "erratumReview.md").write_text(
+        "## 执行结果\n\n| 编号 | 状态 | 验证结果 |\n|---|---|---|\n"
+        "| deadbeefdeadbeef | 误报 | 已确认 |\n",
+        encoding="utf-8",
+    )
+    result = call(
+        "tools/call",
+        {
+            "name": "reconcile_report",
+            "arguments": {"repo": str(repo), "report": "erratumReview.md"},
+        },
+    )["result"]
+    assert result["isError"] is True
+    assert "没有任何编号匹配" in result["content"][0]["text"]
+
+
+def test_get_stats_returns_the_feedback_summary(repo):
+    _seed_finding(repo)
+    result = call("tools/call", {"name": "get_stats", "arguments": {"repo": str(repo)}})
+    payload = json.loads(result["result"]["content"][0]["text"])
+    assert result["result"]["isError"] is False
+    assert payload["findings_total"] == 1
+    assert "acceptance_rate" in payload
+    assert "dropped_by_reason" in payload
 
 
 def test_review_diff_returns_the_work_order(model_env):

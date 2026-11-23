@@ -290,9 +290,12 @@ codeerratum docs --check --strict  # CI 闸门：公开签名变了就 exit 1
 codeerratum mcp --repo /path/to/repo
 ```
 
-stdio 上的 JSON-RPC，暴露四个工具：`review_diff` / `list_runs` / `get_finding` /
+stdio 上的 JSON-RPC，暴露八个工具：`review_diff` / `list_runs` / `get_finding` /
+`accept_finding` / `reject_finding` / `reconcile_report` / `get_stats` /
 `check_docs_drift`。注册成 stdio server，agent 就能在交活之前先审一遍自己的输出，
-不用切终端、不用复制粘贴：
+修完后回填 accepted/rejected，再读取采纳率与模型画像，不用切终端、不用复制粘贴。
+`accept_finding` / `reject_finding` 幂等；`reject_finding` 必须带原因；
+`reconcile_report` 默认读取仓库根的 `erratumReview.md`，并支持 `dry_run`。
 
 ```json
 {

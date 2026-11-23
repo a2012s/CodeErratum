@@ -176,6 +176,82 @@ async def test_parse_health_is_rolled_up_for_the_run(repo, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_quick_parse_health_is_rolled_up_before_the_early_return(repo, monkeypatch):
+    """Plain quick returns before the multi-model block; its parser health still counts."""
+    from codeerratum.ingest import get_diff, split_diff
+
+    units = split_diff(get_diff("HEAD", repo), repo)
+    source_lines = (repo / "m.py").read_text().splitlines(keepends=True)
+    real_line = next(i for i, line in enumerate(source_lines, 1) if "return x[0]" in line)
+    snippet = source_lines[real_line - 1]
+    registry = ModelRegistry(models=[ModelSpec(model_id="mini-scanner", base_url="http://a")])
+    stub = ReviewStub("mini-scanner", "stub", real_line, snippet, "空列表取首元素崩溃")
+    stub.parse_stats = {"calls": 4, "first_try": 3, "repaired": 1, "failed": 0}
+    stub.failure_log = []
+    monkeypatch.setattr(orch, "_make_provider", lambda spec: stub)
+
+    collection, _, _ = await run_review(registry, "quick", units, repo, "run-quick-parse")
+
+    parse = collection.comparison["parse"]
+    assert collection.mode == "quick"
+    assert parse["calls"] == 4
+    assert parse["first_try"] == 3
+    assert parse["repaired"] == 1
+    assert parse["success_rate"] == 1.0
+    assert collection.comparison["parse_failures"] == []
+
+
+@pytest.mark.asyncio
+async def test_tiered_parse_health_combines_scanner_and_verifier(repo, monkeypatch):
+    """Both calls in a tiered run belong to one run-level parse snapshot."""
+    from codeerratum.ingest import get_diff, split_diff
+
+    units = split_diff(get_diff("HEAD", repo), repo)
+    source_lines = (repo / "m.py").read_text().splitlines(keepends=True)
+    real_line = next(i for i, line in enumerate(source_lines, 1) if "return x[0]" in line)
+    snippet = source_lines[real_line - 1]
+    registry = ModelRegistry(
+        models=[
+            ModelSpec(model_id="mini-scanner", base_url="http://a"),
+            ModelSpec(model_id="strong-verifier", base_url="http://b"),
+        ]
+    )
+    scanner = ReviewStub("mini-scanner", "stub", real_line, snippet, "空列表取首元素崩溃")
+    scanner.parse_stats = {"calls": 5, "first_try": 4, "repaired": 1, "failed": 0}
+    scanner.failure_log = []
+    verifier = ReviewStub("strong-verifier", "stub", real_line, snippet, "空列表取首元素崩溃")
+    verifier.parse_stats = {"calls": 2, "first_try": 1, "repaired": 0, "failed": 1}
+    verifier.failure_log = [{"model": "strong-verifier", "stage": "review", "error": "bad json"}]
+    stubs = {"mini-scanner": scanner, "strong-verifier": verifier}
+    monkeypatch.setattr(orch, "_make_provider", lambda spec: stubs[spec.model_id])
+
+    collection, calls, _ = await run_review(
+        registry,
+        "quick",
+        units,
+        repo,
+        "run-tiered-parse",
+        pinned=["strong-verifier"],
+        tiered=True,
+    )
+
+    comparison = collection.comparison
+    assert comparison["mode"] == "tiered"
+    assert comparison["scanner"] == "mini-scanner"
+    assert comparison["verifier"] == "strong-verifier"
+    assert any(c.get("role") == "verify" for c in calls)
+    parse = comparison["parse"]
+    assert parse["calls"] == 7
+    assert parse["first_try"] == 5
+    assert parse["repaired"] == 1
+    assert parse["failed"] == 1
+    assert parse["success_rate"] == 0.857
+    assert comparison["parse_failures"] == [
+        {"model": "strong-verifier", "stage": "review", "error": "bad json"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_live_findings_callback_fires_per_unit_before_the_run_ends(repo, monkeypatch):
     """Findings must be observable while reviewing, not only in the final report.
 

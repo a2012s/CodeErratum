@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.4] — 2026-11-23
+
+### Fixed
+
+- **quick/tiered 解析健康度不再丢失**（P1）：parse 汇总提成 `_parse_snapshot()`，
+  在 quick 的早返回和多模型返回前都调用。此前只有 dual/committee 写入
+  `parse_stats.json`，默认 quick 模式即使丢 finding 也显示解析全绿。
+- **quick 不再污染跨模型对照**：只有 parse 数据的 quick comparison 不再写入
+  `comparisons` 表，`codeerratum compare` 不会再把每次 quick 运行显示成
+  `raw={} / 聚类后=0`；tiered 仍保留 scanner/verifier 对照。
+
+### Added
+
+- **MCP 闭环工具**（P2-4）：新增 `accept_finding`、`reject_finding`、
+  `reconcile_report`、`get_stats`。accept/reject 幂等，reject 必须带原因；
+  前缀匹配到多条 finding 时直接报歧义，不猜第一条。
+- **`review_diff` 暴露关键参数**：新增 `author_model`、`paths`、`tiered`、
+  `include_non_code`，与 CLI/pipeline 保持一致。
+- **reconcile 零写入防护**：执行结果表为空、或所有编号都匹配不到本仓库
+  finding 时返回工具错误，避免陈旧工单被当成闭环成功。
+- README 的 MCP 工具清单同步为八个工具及闭环语义。
+
+### Tests
+
+- 新增 quick、tiered 两条 parse 汇总测试，以及 quick 不写对照表的回归测试。
+- 新增 MCP 参数转发、accept/reject 幂等、前缀歧义、reconcile dry-run/落库/
+  零匹配、stats 读取共 8 项测试。
+
 ## [0.6.3] — 2026-11-23
 
 按 `OPTIMIZATION_REVIEW.md` 的实证结论修复 5 个 P1 + 5 个 P2（P2-1/2/3/8/11）。
