@@ -43,6 +43,7 @@ from ..pipeline import (
     AUTO_UNIT_BUDGET,
     HOUSE_RULES_FILE,
     STATE_DIR,
+    ConfigError,
     NoChanges,
     PipelineError,
     ReviewCancelled,
@@ -554,7 +555,7 @@ class WebApp:
         failed_unit_entries = [
             r for r in rejected_entries if is_unit_failure(str(r.get("reason") or ""))
         ]
-        return {
+        detail = {
             "run_id": run_id,
             "repo": collection.get("repo", str(self.repo_root)),
             "commit": collection.get("commit", ""),
@@ -582,6 +583,22 @@ class WebApp:
             "failed_units": failed_unit_entries,
             "has_markdown": (run_dir / "review.md").exists(),
         }
+        # Resumability: how much of the original queue the artifacts do not
+        # cover yet. Cheap to compute (no model calls); shown as a continue
+        # button when non-zero. A broken plan hides the button, never the run.
+        try:
+            from ..resume import plan_resume
+
+            plan = plan_resume(self.repo_root, run_id)
+            detail["resumable"] = {
+                "units_done": plan["units_done"],
+                "units_total": plan["units_total"],
+                "units_remaining": plan["units_remaining_all"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            print(f"[web] get_run resume plan: {type(exc).__name__}: {exc}", file=sys.stderr)
+            detail["resumable"] = None
+        return detail
 
     def read_markdown(self, run_id: str) -> str:
         if not RUN_ID_RE.match(run_id):
@@ -1068,6 +1085,98 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                     error=final_error,
                 )
 
+        def _stream_resume(self, app: WebApp, body: dict) -> None:
+            """Resume a run over SSE: same frame contract as _stream_review.
+
+            ``body`` carries run_id plus optional more (batch cap) and paths
+            (file-prefix filter). Lock and stop wiring are identical to a fresh
+            review — a resumed sitting is a first-class sitting that the stop
+            button must reach too.
+            """
+            self._client_gone = False
+            run_id = str(body.get("run_id") or "").strip()
+            raw_more = body.get("more")
+            more: int | None = None
+            if raw_more is not None and str(raw_more).strip().lower() not in ("", "auto"):
+                try:
+                    more = max(0, int(raw_more))
+                except (TypeError, ValueError):
+                    self._error(HTTPStatus.BAD_REQUEST, "more must be an integer")
+                    return
+            paths = str(body.get("paths") or "").strip()
+            if not RUN_ID_RE.match(run_id):
+                self._error(HTTPStatus.BAD_REQUEST, "invalid run id")
+                return
+            from ..resume import plan_resume, resume_review
+
+            try:
+                plan = plan_resume(app.repo_root, run_id, paths=paths)
+            except LookupError as exc:
+                self._error(HTTPStatus.NOT_FOUND, str(exc))
+                return
+            except ConfigError as exc:
+                self._error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            if not plan["batch_size"]:
+                self._error(HTTPStatus.CONFLICT, t("resume.nothing_left", run_id=run_id))
+                return
+            try:
+                app.acquire_review_lock(None)
+            except RuntimeError as exc:  # another sitting is already running
+                self._error(HTTPStatus.CONFLICT, str(exc))
+                return
+            final_status, final_tokens, final_error = "done", None, ""
+            try:
+                try:
+                    self._sse_headers()
+                except OSError:  # tab closed before the stream opened
+                    self._client_gone = True
+                self._sse_event("log", {"message": t("server.stream_connected")})
+                app._wait_for_slot()
+                outcome = resume_review(
+                    app.repo_root,
+                    run_id,
+                    more=more,
+                    paths=paths,
+                    registry=app.registry,
+                    progress=lambda msg: self._sse_event("log", {"message": msg}),
+                    should_stop=app._stop_event.is_set,
+                    on_findings=lambda unit, found, model: self._stream_findings(
+                        app, unit, found, model
+                    ),
+                )
+                summary = outcome.summary()
+                final_tokens = summary.get("tokens")
+                if summary.get("stopped"):
+                    final_status = "stopped"
+                    self._sse_event("stopped", summary)
+                else:
+                    self._sse_event("done", summary)
+            except ReviewCancelled as exc:
+                final_status = "cancelled"
+                self._sse_event("cancelled", {"message": str(exc) or t("server.stopped_by_user")})
+            except (PipelineError, ValueError, LookupError) as exc:
+                final_status = "error"
+                final_error = _safe_error(exc, app.repo_root)
+                self._sse_event("error", {"error": final_error})
+            except Exception as exc:  # noqa: BLE001 - keep the stream alive, hide local paths
+                final_status = "error"
+                final_error = _safe_error(exc, app.repo_root)
+                print(
+                    f"[web] stream resume: {type(exc).__name__}: {exc}\n{traceback.format_exc()}",
+                    file=sys.stderr,
+                )
+                self._sse_event("error", {"error": final_error})
+            finally:
+                if app._gate is not None:
+                    app._gate.release()
+                app.release_review_lock(
+                    status=final_status,
+                    run_id=run_id,
+                    tokens=final_tokens,
+                    error=final_error,
+                )
+
         def _host_ok(self) -> bool:
             """Stop DNS rebinding: evil.com pointing at 127.0.0.1 is not a local user."""
             return bool(LOOPBACK_HOST_RE.match(self.headers.get("Host") or ""))
@@ -1228,6 +1337,8 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                 app, path, _slug = self._resolve_project(path)
                 if path == "/api/review/stream":
                     self._stream_review(app, body)
+                elif path == "/api/review/resume/stream":
+                    self._stream_resume(app, body)
                 elif path == "/api/review/stop":
                     self._json(HTTPStatus.OK, app.stop_review())
                 elif path == "/api/review":

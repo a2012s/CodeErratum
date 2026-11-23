@@ -16,6 +16,8 @@
 
 `pipeline.execute_review` → `review/orchestrator.run_review`（多模型并行 → 聚类 → 证伪）→ 锚点校验 → `report/markdown` → `store/sqlite` → `report/outcomes.reconcile` 回填人工裁决 → `apply_measured_profiles` 回灌路由分数。
 
+续跑是同一主链路的第二入口：`resume.resume_review` 读取运行产物账本（units.json / calls.json / findings.json），跳过已完成单元后再次调用 `run_review`，原席位（子集 registry）跑剩余队列并合并——run_id 与产物路径不变。口径约定见 0.6.6：dropped / failed_units / 人工裁决三者互不混淆。
+
 ## 硬约定
 
 1. **版本号末位 +0.1**（0.6.2 → 0.6.3），同时改 `__init__.py` 与 `CHANGELOG.md` 顶部小节标题。

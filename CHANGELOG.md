@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.9] — 2026-11-23
+
+### Added
+
+- **断点续跑（分段 × 续跑结合）**：一次运行可分多次坐席完成，专配 token plan
+  的连续用量窗口。产物本身就是账本——`units.json`（完整队列）、`calls.json`
+  （成功评审记录，失败单元天然不在其中）、`findings.json`（席位与全部结论），
+  无需额外 checkpoint 文件。
+- 新命令 `codeerratum resume <run_id>`：跳过已完成单元（不重跑、不重复计费），
+  以原席位（子集 registry 固定 reviewer 与证伪者，防止画像更新后重路由换座）
+  跑剩余队列，合并两批结论后原地重写 `review.md` / `findings.json` / `calls.json`
+  （run_id 不变）。`--more N` 限制本批单元数，`--path` 按文件前缀收窄。
+- Web 运行详情新增「继续审查（N 个单元）」按钮与 `POST /api/review/resume/stream`
+  （SSE，帧协议与首轮审查一致）；`GET /api/runs/<id>` 返回 `resumable` 覆盖信息。
+- 首轮运行新增 `run_meta.json`（diff_spec / models / tiered / paths），续跑据此
+  重建 reviewer 上下文；旧运行缺该文件时降级为空 sources（锚点不受影响）。
+- 合并语义：重跑单元的机器侧记录（provider_error、旧结论、旧证伪）整体被新批
+  替换；未重跑单元的原有结论与人工裁决不受影响（`save_run` upsert + findings
+  INSERT OR IGNORE）。
+
+### Tests
+
+- 新增 `tests/test_resume.py` 五例：按模型交集计覆盖（非并集）、合并与陈旧失败
+  替换、store upsert 保留人工裁决、缺模型硬报错、空队列干净拒绝。
+
+测试 507 passed / 5 项既有基线失败不变，ruff 全绿。未重打包：0.6.7 桌面应用
+仍在执行审查，替换安装推迟到其空闲时。
+
 ## [0.6.8] — 2026-11-23
 
 ### Added

@@ -358,6 +358,38 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Model calls failed for {n} units; those files were not reviewed",
     ),
     "pipeline.units_failed_reason": ("失败原因：{reasons}", "Reason: {reasons}"),
+    "resume.no_such_run": (
+        "找不到运行 {run_id}（{dir} 下没有这个目录）",
+        "No such run {run_id} (no directory under {dir})",
+    ),
+    "resume.no_report": (
+        "运行 {run_id} 没有 findings.json，无法续跑",
+        "Run {run_id} has no findings.json to resume from",
+    ),
+    "resume.no_seats": (
+        "运行记录里没有审查席位（reviewer_models 为空）",
+        "Run record has no reviewer seats (reviewer_models empty)",
+    ),
+    "resume.nothing_left": (
+        "运行 {run_id} 的队列已全部完成，无需续跑",
+        "Run {run_id} queue is fully covered — nothing to resume",
+    ),
+    "resume.models_missing": (
+        "当前配置里找不到原运行使用的模型：{models}，无法保证席位一致，已取消续跑",
+        "Models from the original run are missing from the config: {models} — resume aborted",
+    ),
+    "resume.start": (
+        "续跑：已完成 {done}/{total} 个单元，本批再审 {batch} 个（同席位，不重跑已完成单元）",
+        "Resume: {done}/{total} covered; this batch reviews {batch} more (same seats)",
+    ),
+    "resume.note": (
+        "续跑完成：本批 {batch} 个单元，累计覆盖 {done}/{total}（已完成单元未重跑、未重复计费）",
+        "Resumed: batch of {batch}; cumulative coverage {done}/{total} (no re-runs, no re-billing)",
+    ),
+    "cli.resume_remaining": (
+        "剩余 {n} 个单元未审（{done}/{total} 已完成）。继续：codeerratum resume {run_id}",
+        "{n} units remain ({done}/{total} done). Continue: codeerratum resume {run_id}",
+    ),
     "pipeline.verify_failed": (
         "{n} 个单元的验证器调用失败，对应发现保留为未验证",
         "Verifier calls failed for {n} units; their findings were kept as unverified",

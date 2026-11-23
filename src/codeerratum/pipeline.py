@@ -494,6 +494,27 @@ def execute_review(
     run_dir = repo_root / STATE_DIR / "runs" / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "input.diff").write_text(diff_text, encoding="utf-8")
+    # The resume path re-derives reviewer context from this record: a run's
+    # sources depend on the diff spec and pathscope of the sitting that
+    # produced it, and neither is recoverable from units.json alone.
+    (run_dir / "run_meta.json").write_text(
+        json.dumps(
+            {
+                "diff_spec": run_spec,
+                "snapshot": snapshot,
+                "mode": run_mode,
+                "models": list(models or []),
+                "author_model": author_model or None,
+                "tiered": tiered,
+                "paths": paths,
+                "include_non_code": include_non_code,
+                "max_units": max_units,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     notices: list[str] = []
     announced: set[str] = set()

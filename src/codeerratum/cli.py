@@ -154,6 +154,70 @@ def review(
 
 
 @app.command()
+def resume(
+    run_id: str = typer.Argument(..., help="Run id to continue (see .codeerratum/runs/)"),
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository root"),
+    more: int | None = typer.Option(
+        None,
+        "--more",
+        help="Review at most N more units this sitting (default: everything left)",
+    ),
+    path: str = typer.Option("", "--path", help="Narrow the batch to a file prefix, e.g. src/api"),
+    out: Path | None = typer.Option(
+        None, "--out", "-o", help="Also write the merged work order here"
+    ),
+) -> None:
+    """Continue an interrupted or budget-truncated run without re-paying.
+
+    Finished units are skipped (their calls stay on record), the remaining
+    queue runs with the original seats, and the merged report overwrites the
+    run's review.md. Made for token plans with a rolling usage window: review
+    60 units now, resume the rest after the window resets.
+    """
+    from .resume import plan_resume, resume_review
+
+    repo_root = find_repo_root(repo)
+    try:
+        plan = plan_resume(repo_root, run_id, paths=path)
+        if plan["batch_size"] == 0:
+            console.print(f"[yellow]{t('resume.nothing_left', run_id=run_id)}[/yellow]")
+            raise typer.Exit(0)
+        console.print(
+            t(
+                "resume.start",
+                done=plan["units_done"],
+                total=plan["units_total"],
+                batch=plan["batch_size"],
+            )
+        )
+        outcome = resume_review(
+            repo_root,
+            run_id,
+            more=more,
+            paths=path,
+            out=out,
+            progress=lambda msg: console.print(msg),
+        )
+    except LookupError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    except ConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    except NoChanges as exc:  # a resumed batch can hit an empty queue too
+        console.print(f"[yellow]{exc}[/yellow]")
+        raise typer.Exit(0) from exc
+
+    summary = outcome.summary()
+    console.print(f"\n[green]Wrote {outcome.out_path or outcome.run_dir / 'review.md'}[/green]")
+    console.print(
+        f"Findings: {summary['findings']} | Machine-dropped: {summary['dropped']}"
+        + (f" | Failed units: {summary['failed_units']}" if summary["failed_units"] else "")
+    )
+    console.print(f"Artifacts: {outcome.run_dir}")
+
+
+@app.command()
 def pr(
     post: bool = typer.Option(
         False, "--post", help="Actually post to GitHub; without it this is a dry run"

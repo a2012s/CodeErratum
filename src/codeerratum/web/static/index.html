@@ -553,6 +553,7 @@
         <span class="small" id="runWhen"></span>
       </div>
       <div class="chips" id="runChips"></div>
+      <div id="resumeBox"></div>
       <div class="notes" id="notes"></div>
       <div class="notes" id="rejectedBox"></div>
       <div class="tabs" id="tabs"></div>
@@ -1173,6 +1174,17 @@ function renderRun() {
     chips.push(`<a class="chip" style="text-decoration:none" href="/api/runs/${run.run_id}/review.md" target="_blank">review.md ↗</a>`);
   }
   $("runChips").innerHTML = chips.filter(Boolean).join("");
+
+  // Resumable banner: the queue outlived the last sitting (stop, budget, or a
+  // dead token window). One button; the server enforces the single-run lock.
+  const res = run.resumable;
+  $("resumeBox").innerHTML = res && res.units_remaining > 0 ? `
+    <div class="note" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <span>${esc(T("队列还有 {n} 个单元未审（已完成 {done}/{total}），可续跑且不重复计费", {
+        n: res.units_remaining, done: res.units_done, total: res.units_total,
+      }))}</span>
+      <button class="btn" id="resumeBtn" onclick="resumeRun('${run.run_id}')">${esc(T("继续审查（{n} 个单元）", { n: res.units_remaining }))}</button>
+    </div>` : "";
 
   $("notes").innerHTML = (run.notes || [])
     .map((n) => `<div class="note">${esc(n)}</div>`).join("");
@@ -1800,6 +1812,93 @@ async function startReview(overrides = {}, allowEmptyPrompt = true) {
     // If we got a terminal frame, the server has already released the lock:
     // restore the button now. Otherwise (connection dropped mid-stream) the
     // poller keeps tracking whatever the server is still doing.
+    if (streamCompleted) setRunBusy(false);
+    else { reviewTracking = true; await pollReviewStatus(); }
+  }
+}
+async function resumeRun(runId) {
+  // Continue an interrupted run over the same SSE contract as startReview.
+  // Deliberately a small copy of the frame loop instead of a shared extractor:
+  // the review loop is welded to its form state (diff/mode/models), and the
+  // resume needs none of it — only run_id travels.
+  setRunBusy(true);
+  reviewStreaming = true;
+  progressReset();
+  progressSetRunning(T("续跑中…"));
+  let runStopped = false;
+  let streamCompleted = false;
+  try {
+    const res = await fetch(BASE + "/api/review/resume/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Lang": LANG },
+      body: JSON.stringify({ run_id: runId }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        reviewTracking = true;
+        progressAddLine(d.error || T("已有审查正在进行中"), "done");
+        await pollReviewStatus();
+        return;
+      }
+      throw new Error(d.error || res.statusText);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const handle = (frame) => {
+      const dataLine = frame.split("\n").find((l) => l.startsWith("data:"));
+      if (!dataLine) return;
+      let ev;
+      try { ev = JSON.parse(dataLine.slice(5).trim()); } catch { return; }
+      if (ev.type === "log") {
+        progressAddLine(ev.message || "");
+      } else if (ev.type === "finding") {
+        liveAddFinding(ev.finding || {});
+      } else if (ev.type === "cancelled") {
+        streamCompleted = true;
+        progressAddLine(ev.message || T("审查已停止"), "done");
+        progressFinishHead(T("审查已停止"));
+      } else if (ev.type === "stopped") {
+        streamCompleted = true;
+        runStopped = true;
+        progressAddLine(T("已停止：本批 {n} 条发现 · {calls} 次调用", {
+          n: ev.findings, calls: ev.calls,
+        }), "done");
+        progressFinishHead(T("已保存部分报告，可再次续跑"));
+      } else if (ev.type === "error") {
+        streamCompleted = true;
+        progressAddLine(T("错误：{msg}", { msg: ev.error || T("未知错误") }), "err");
+        progressFinishHead(T("续跑失败：{msg}", { msg: ev.error || T("未知错误") }));
+      } else if (ev.type === "done") {
+        streamCompleted = true;
+        progressAddLine(T("完成：{n} 条发现 · {calls} 次调用 · 均 {ms}ms", {
+          n: ev.findings, calls: ev.calls, ms: ev.latency_ms_avg,
+        }), "done");
+        tokenSummary(ev.tokens).forEach((l) => progressAddLine(l, "done"));
+        progressFinishHead(T("续跑完成"));
+      }
+    };
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let cut;
+      while ((cut = buffer.indexOf("\n\n")) >= 0) {
+        handle(buffer.slice(0, cut));
+        buffer = buffer.slice(cut + 2);
+      }
+    }
+    if (buffer.trim()) handle(buffer);
+    toast(runStopped ? T("已保存部分报告，可再次续跑") : T("续跑完成"));
+    await loadRuns(false);
+    await openRun(runId);
+  } catch (e) {
+    progressAddLine(T("错误：{msg}", { msg: e.message }), "err");
+    progressFinishHead(T("续跑失败"));
+    showError(T("续跑 {id} 失败：{msg}", { id: runId, msg: e.message }), T("续跑失败"));
+  } finally {
+    reviewStreaming = false;
     if (streamCompleted) setRunBusy(false);
     else { reviewTracking = true; await pollReviewStatus(); }
   }
