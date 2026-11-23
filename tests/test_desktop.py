@@ -178,18 +178,35 @@ def test_non_loopback_host_is_warned_not_silent(capsys):
 
 
 def test_launcher_flags_are_exposed():
-    # The console width is pinned by the `pinned_console_width` fixture in
-    # conftest.py: typer draws --help through rich, and rich folds an option
-    # name that does not fit the line ("--no-repo" becomes "--no-" plus "repo"
-    # at 20 columns). Whether the flag exists is the point, not how it wraps.
+    """The launcher must expose these flags.
+
+    Asked of the command object first: typer draws --help through rich, and
+    rich folds a word that does not fit the terminal width, so the rendered
+    text depends on the machine ("--no-repo" comes out as "--no-" plus "repo"
+    at 20 columns). The options themselves do not depend on anything.
+    """
+    from typer.main import get_command
+
+    root = get_command(cli.app)
+
+    def options(name):
+        return {opt for param in root.commands[name].params for opt in param.opts}
+
+    ui_opts = options("ui")
+    assert "--no-repo" in ui_opts
+    assert "--print-port" in ui_opts
+    assert "--parent-pid" in ui_opts
+    desk_opts = options("desktop")
+    assert "--parent-pid" in desk_opts
+    assert "--width" in desk_opts
+
+    # And the flags do reach the rendered help. Compared with every space and
+    # newline removed, so a line break inside an option name does not hide it.
     runner = CliRunner()
-    ui_help = " ".join(runner.invoke(cli.app, ["ui", "--help"]).output.split())
+    ui_help = "".join(runner.invoke(cli.app, ["ui", "--help"]).output.split())
     assert "--no-repo" in ui_help
-    assert "--print-port" in ui_help
-    assert "--parent-pid" in ui_help
-    desk_help = " ".join(runner.invoke(cli.app, ["desktop", "--help"]).output.split())
+    desk_help = "".join(runner.invoke(cli.app, ["desktop", "--help"]).output.split())
     assert "--parent-pid" in desk_help
-    assert "--width" in desk_help
 
 
 # ---- frozen entry point ---------------------------------------------------

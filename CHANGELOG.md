@@ -19,13 +19,15 @@
       现已把平台显式参数化（darwin / win32 / linux），并补一条「Linux 缺 zenity
       时要指名道姓地报错」的用例；顺带钉住 Windows 特例——explorer 打开窗口后
       返回非零状态不算失败。
-    - **`--help` 断言受终端宽度影响**（run #43）：typer 用 rich 渲染 help，rich
-      在窄终端下会折断放不下的词——20 列时 `--no-repo` 变成 `--no-` 加 `repo`，
-      中文短语会被逐字拆开。而 rich 在 `Console()` 构造时就把宽度**固化**了，
-      `cli.py` 的模块级 `console = Console()` 于是在 import 时刻就把宽度定死，
-      测试里再改环境变量已经太晚。现由 `tests/conftest.py` 在**导入期**
-      （conftest 先于测试模块导入）把 `COLUMNS` 钉成 120，CI 的 Test 步骤也
-      显式设同样的值。
+    - **`--help` 断言受终端宽度影响**（run #43 ~ #45）：typer 用 rich 渲染
+      help，rich 在窄终端下会折断放不下的词——20 列时 `--no-repo` 变成 `--no-`
+      加 `repo`，中文短语会被逐字拆开。而 rich 在 `Console()` 构造时就把宽度
+      **固化**了，`cli.py` 的模块级 `console = Console()` 于是在 import 时刻
+      就把宽度定死，测试里再改环境变量已经太晚。现由 `tests/conftest.py` 在
+      **导入期**（conftest 先于测试模块导入）把 `COLUMNS` 钉成 120，CI 的 Test
+      步骤也显式设同样的值；断言本身也改为**先问命令对象**
+      （`get_command(app).commands["ui"].params`）再对渲染结果做去空白的宽松
+      匹配，不再把「选项存不存在」押在排版上。
 
 - 用 `ghcr.io/astral-sh/uv` 容器（Ubuntu + Python 3.11 + git）本地复现 CI，
   确认红灯来源；容器内 530 passed / 0 failed。
