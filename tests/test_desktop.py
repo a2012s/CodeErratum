@@ -16,7 +16,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from typer.testing import CliRunner
 
 from codeerratum import cli
 from codeerratum.i18n import language
@@ -180,10 +179,11 @@ def test_non_loopback_host_is_warned_not_silent(capsys):
 def test_launcher_flags_are_exposed():
     """The launcher must expose these flags.
 
-    Asked of the command object first: typer draws --help through rich, and
-    rich folds a word that does not fit the terminal width, so the rendered
-    text depends on the machine ("--no-repo" comes out as "--no-" plus "repo"
-    at 20 columns). The options themselves do not depend on anything.
+    Read off the command object and off click's own option formatter, not off
+    the rendered --help: typer draws --help through rich, and rich folds a
+    word that does not fit the terminal width ("--no-repo" comes out as
+    "--no-" plus "repo" at 20 columns), so the rendered text depends on the
+    machine. The options themselves do not depend on anything.
     """
     from typer.main import get_command
 
@@ -191,6 +191,14 @@ def test_launcher_flags_are_exposed():
 
     def options(name):
         return {opt for param in root.commands[name].params for opt in param.opts}
+
+    def rendered_options(name):
+        """The option list click would print, in plain text."""
+        cmd = root.commands[name]
+        ctx = cmd.make_context(name, [], resilient_parsing=True)
+        formatter = ctx.make_formatter()
+        cmd.format_options(ctx, formatter)
+        return formatter.getvalue()
 
     ui_opts = options("ui")
     assert "--no-repo" in ui_opts
@@ -200,13 +208,12 @@ def test_launcher_flags_are_exposed():
     assert "--parent-pid" in desk_opts
     assert "--width" in desk_opts
 
-    # And the flags do reach the rendered help. Compared with every space and
-    # newline removed, so a line break inside an option name does not hide it.
-    runner = CliRunner()
-    ui_help = "".join(runner.invoke(cli.app, ["ui", "--help"]).output.split())
-    assert "--no-repo" in ui_help
-    desk_help = "".join(runner.invoke(cli.app, ["desktop", "--help"]).output.split())
-    assert "--parent-pid" in desk_help
+    ui_text = rendered_options("ui")
+    assert "--no-repo" in ui_text
+    assert "--print-port" in ui_text
+    desk_text = rendered_options("desktop")
+    assert "--parent-pid" in desk_text
+    assert "--width" in desk_text
 
 
 # ---- frozen entry point ---------------------------------------------------

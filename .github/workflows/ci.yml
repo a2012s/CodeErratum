@@ -50,9 +50,9 @@ jobs:
           cat /tmp/pytest.log
           echo "::notice::COLUMNS=$COLUMNS TERM=${TERM:-unset}"
           uv run codeerratum ui --help > /tmp/help.txt 2>&1
-          echo "::error::help_head=$(head -c 400 /tmp/help.txt | tr '\n' '|')"
-          uv run python -c "import codeerratum; print(codeerratum.__version__, codeerratum.__file__)" > /tmp/v.txt 2>&1
-          echo "::error::ver=$(head -c 300 /tmp/v.txt | tr '\n' '|')"
+          echo "::error::helpb64=$(base64 -w0 /tmp/help.txt | head -c 1400)"
+          echo "::error::helpb64b=$(base64 -w0 /tmp/help.txt | tail -c +1401 | head -c 1400)"
+          echo "::error::vers=$(uv run python -c 'import rich,typer; print(rich.__version__, typer.__version__)' 2>&1 | tr '\n' ' ')"
           grep -E '^(FAILED|ERROR) ' /tmp/pytest.log | head -60 | while IFS= read -r line; do
             echo "::error::$line"
           done
