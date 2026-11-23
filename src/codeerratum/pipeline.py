@@ -237,10 +237,16 @@ def _unit_budget(max_units: int | None, total: int) -> tuple[int, str]:
 
     ``None`` → auto, ``0`` → everything, positive → literal. The second element
     only picks which notice to print, so the report can explain itself.
+
+    Negative values are rejected instead of falling into the ``<= 0`` branch:
+    ``--max-units -1`` once silently reviewed the whole diff — the opposite of
+    what a cost guard is for, and indistinguishable from intent.
     """
     if max_units is None:
         return min(total, AUTO_UNIT_BUDGET), "auto"
-    if max_units <= 0:
+    if max_units < 0:
+        raise ConfigError(t("pipeline.max_units_negative", n=max_units))
+    if max_units == 0:
         return total, "all"
     return max_units, "fixed"
 
@@ -584,7 +590,11 @@ def execute_review(
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
-    failed = [r for r in collection.rejected if r.get("reason") == "provider_error"]
+    failed = [
+        r
+        for r in collection.rejected
+        if r.get("reason") in ("provider_error", "verify_error")
+    ]
     if failed:
         notices.append(t("pipeline.units_failed", n=len(failed)))
         # A count alone leaves the reader guessing between "my key is wrong" and
@@ -596,6 +606,25 @@ def execute_review(
                 reasons.append(hint)
         if reasons:
             notices.append(t("pipeline.units_failed_reason", reasons=" · ".join(reasons[:3])))
+
+    # Every entry in collection.rejected is a machine drop (anchor mismatch,
+    # provider/verify error, refuted, ...) — human rejections live in the
+    # findings.status column. Without this line the report never says why the
+    # finding count is lower than the unit count, and refuted-by-falsifier
+    # drops are invisible next to the failures above.
+    drop_counts: dict[str, int] = {}
+    for r in collection.rejected:
+        reason = str(r.get("reason") or "unknown")
+        drop_counts[reason] = drop_counts.get(reason, 0) + 1
+    if drop_counts:
+        top = sorted(drop_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
+        notices.append(
+            t(
+                "pipeline.machine_dropped",
+                n=sum(drop_counts.values()),
+                reasons="、".join(f"{reason}×{count}" for reason, count in top),
+            )
+        )
 
     # A high abstain rate is a signal about *our* context, not about the code: the
     # falsifier keeps saying it cannot decide. Surfacing it turns a silent

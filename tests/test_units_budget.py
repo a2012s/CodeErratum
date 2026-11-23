@@ -111,3 +111,57 @@ def test_default_call_reviews_every_unit_of_a_normal_diff(tmp_path, monkeypatch)
     outcome = pipeline.execute_review(repo, diff_spec="HEAD")
     assert seen["units"] == expected
     assert outcome.units_selected == expected
+
+
+def test_negative_budget_raises_instead_of_reviewing_everything():
+    """-1 used to fall into the ``<= 0`` branch and review the whole diff.
+
+    A negative cap looks like a smaller budget but meant "no budget" — the
+    exact opposite of what the flag promises. Now it is a config error, and
+    only 0 keeps the full-sweep meaning.
+    """
+    import pytest
+
+    from codeerratum.pipeline import ConfigError, _unit_budget
+
+    with pytest.raises(ConfigError):
+        _unit_budget(-1, 12)
+    with pytest.raises(ConfigError):
+        _unit_budget(-99, 12)
+    # the other three meanings are untouched
+    assert _unit_budget(0, 12) == (12, "all")
+    assert _unit_budget(None, 12) == (12, "auto")
+    assert _unit_budget(3, 12) == (3, "fixed")
+
+
+def test_machine_drops_are_summarized_in_the_notes(tmp_path, monkeypatch):
+    """Every rejected entry is a machine drop; the report must say why counts shrank."""
+    repo = _dirty_repo(tmp_path / "repo")
+    monkeypatch.setenv("CODEERRATUM_BASE_URL", "http://stub.invalid/v1")
+    monkeypatch.setenv("CODEERRATUM_MODEL", "gpt-stub")
+    monkeypatch.delenv("CODEERRATUM_MODELS", raising=False)
+
+    async def fake_run(registry, mode, units, repo_root, run_id, **kwargs):
+        return (
+            FindingCollection(
+                run_id=run_id,
+                repo=str(repo_root),
+                commit="",
+                model_id="m",
+                spec_level="L1",
+                rejected=[
+                    {"reason": "refuted", "model": "falsifier", "unit_id": "u1"},
+                    {"reason": "refuted", "model": "falsifier", "unit_id": "u2"},
+                    {"reason": "verify_error", "model": "verifier", "unit_id": "u3"},
+                ],
+            ),
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(pipeline, "run_review", fake_run)
+    outcome = pipeline.execute_review(repo, diff_spec="HEAD")
+
+    notes = outcome.collection.notes
+    assert any("refuted×2" in n for n in notes), notes
+    assert any("verify_error×1" in n for n in notes), notes

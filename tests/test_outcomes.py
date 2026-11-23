@@ -363,3 +363,31 @@ class _FakeStore:
     def set_status(self, finding_id: str, status: str, reason: str = "") -> bool:
         self.rows[finding_id] = {"status": status, "reason": reason}
         return True
+
+
+def test_list_runs_exposes_machine_drops_separately_from_human_verdicts(tmp_path):
+    """`n_dropped` comes from run_rejections (per-reason, authoritative).
+
+    The legacy `n_rejected` column only ever held machine drops — human
+    verdicts do not exist when a run is stored — so new callers read
+    `n_dropped` and the UI labels it as machine drops, not rejections.
+    """
+    collection = _collection()
+    collection.rejected = [
+        {"reason": "refuted", "model": "falsifier", "unit_id": "u1"},
+        {"reason": "refuted", "model": "falsifier", "unit_id": "u2"},
+        {"reason": "verify_error", "model": "verifier", "unit_id": "u3"},
+    ]
+    store = ReviewStore(tmp_path / "feedback.db")
+    store.save_run(collection, "2026-11-23T00:00:00Z")
+
+    rows = store.list_runs()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["n_dropped"] == 3
+    assert row["n_rejected"] == 3  # legacy column, same number at save time
+    # after a human rejects one finding, n_dropped must NOT change
+    store.set_status("a" * 16, "rejected", "误报")
+    rows = store.list_runs()
+    assert rows[0]["n_dropped"] == 3, "human verdicts never change machine-drop counts"
+    assert rows[0]["n_rejected"] == 3

@@ -484,6 +484,20 @@ async def run_review(
                                     file=unit.primary_file,
                                 )
                             )
+                            # A verifier that blew up must be visible in
+                            # run_rejections like any other machine drop.
+                            # Previously it only landed in calls.json
+                            # (verdict=error), so `dropped_by_reason` and the
+                            # report notes both under-counted.
+                            all_rejected.append(
+                                {
+                                    "unit_id": unit.unit_id,
+                                    "model": verifier_spec.model_id,
+                                    "reason": "verify_error",
+                                    "error": str(res),
+                                    "error_hint": _failure_text(res, verify_provider),
+                                }
+                            )
                             continue
                         vf, rej, completion, diags = res
                         all_rejected.extend(rej)

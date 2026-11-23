@@ -345,6 +345,14 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Model calls failed for {n} units; those files were not reviewed",
     ),
     "pipeline.units_failed_reason": ("失败原因：{reasons}", "Reason: {reasons}"),
+    "pipeline.machine_dropped": (
+        "机器丢弃 {n} 条（{reasons}），明细见报告末尾与 run_rejections",
+        "{n} machine-dropped ({reasons}); details in the report and run_rejections",
+    ),
+    "pipeline.max_units_negative": (
+        "--max-units 不能为负数（{n}）：负数会被当成全量审查，请改用 0 表示全量",
+        "--max-units cannot be negative ({n}); use 0 for a full sweep",
+    ),
     "pipeline.parse_failures": (
         "{n} 次结构化输出解析失败（成功率 {rate}），样本见 parse_failures.json",
         "{n} structured outputs failed to parse (success {rate}); samples in parse_failures.json",

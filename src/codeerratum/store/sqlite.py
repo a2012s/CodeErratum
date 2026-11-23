@@ -320,11 +320,21 @@ class ReviewStore:
             return [dict(r) for r in rows]
 
     def list_runs(self, limit: int = 50) -> list[dict]:
-        """Newest first, for the UI's run history."""
+        """Newest first, for the UI's run history.
+
+        ``n_rejected`` is a legacy column that actually holds machine drops at
+        save time (human verdicts do not exist yet when a run is stored).
+        ``n_dropped`` is the same number derived from ``run_rejections`` — the
+        authoritative, per-reason source — and is what new callers should show.
+        """
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT run_id, commit_sha, model_id, created_at, n_findings, n_rejected "
-                "FROM runs ORDER BY created_at DESC LIMIT ?",
+                "SELECT r.run_id, r.commit_sha, r.model_id, r.created_at, "
+                "r.n_findings, r.n_rejected, "
+                "COALESCE(("
+                "  SELECT SUM(rr.count) FROM run_rejections rr WHERE rr.run_id = r.run_id"
+                "), 0) AS n_dropped "
+                "FROM runs r ORDER BY r.created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
             return [dict(r) for r in rows]

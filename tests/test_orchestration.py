@@ -372,3 +372,66 @@ def test_timeout_failure_says_what_expired_not_just_the_class_name():
     assert "API key" in _failure_text(
         httpx.HTTPStatusError("401", request=request, response=unauthorized), provider
     )
+
+
+class ExplodingStub(ReviewStub):
+    """A verifier endpoint that fails on every call (timeout, 5xx, ...)."""
+
+    def __init__(self, model_id: str):
+        super().__init__(model_id, "stub", 0, "", "")
+        self.parse_stats = {"calls": 0, "first_try": 0, "repaired": 0, "failed": 0}
+        self.failure_log = []
+
+    async def complete(self, model_id, messages, schema, temperature=0.0, max_tokens=2048):
+        raise RuntimeError("connection reset by peer")
+
+
+@pytest.mark.asyncio
+async def test_tiered_verifier_failure_becomes_a_machine_drop(repo, monkeypatch):
+    """A verifier crash must show up in run_rejections, not only in calls.json.
+
+    Previously the error was recorded solely as calls verdict=error, so
+    dropped_by_reason and the report notes both under-counted — the run looked
+    like the verifier simply agreed with everything.
+    """
+    from codeerratum.ingest import get_diff, split_diff
+
+    units = split_diff(get_diff("HEAD", repo), repo)
+    source_lines = (repo / "m.py").read_text().splitlines(keepends=True)
+    real_line = next(i for i, line in enumerate(source_lines, 1) if "return x[0]" in line)
+    snippet = source_lines[real_line - 1]
+    registry = ModelRegistry(
+        models=[
+            ModelSpec(model_id="mini-scanner", base_url="http://a"),
+            ModelSpec(model_id="strong-verifier", base_url="http://b"),
+        ]
+    )
+    scanner = ReviewStub("mini-scanner", "stub", real_line, snippet, "空列表取首元素崩溃")
+    scanner.parse_stats = {"calls": 1, "first_try": 1, "repaired": 0, "failed": 0}
+    scanner.failure_log = []
+    stubs = {
+        "mini-scanner": scanner,
+        "strong-verifier": ExplodingStub("strong-verifier"),
+    }
+    monkeypatch.setattr(orch, "_make_provider", lambda spec: stubs[spec.model_id])
+
+    collection, calls, _ = await run_review(
+        registry,
+        "quick",
+        units,
+        repo,
+        "run-verify-error",
+        pinned=["strong-verifier"],
+        tiered=True,
+    )
+
+    verify_errors = [r for r in collection.rejected if r.get("reason") == "verify_error"]
+    assert verify_errors, "verifier crash must land in rejected"
+    assert all(r["model"] == "strong-verifier" for r in verify_errors)
+    assert all(r.get("unit_id") for r in verify_errors)
+    # the raw error stays visible in calls.json for whoever debugs the endpoint
+    assert any(
+        c.get("role") == "verify" and c.get("verdict") == "error" for c in calls
+    )
+    # the scanner's work survives: a broken verifier must not erase its findings
+    assert collection.findings, "scanner findings must not be dropped when the verifier fails"

@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.6.5] — 2026-11-23
+
+### Fixed
+
+- **机器丢弃与人工驳回的口径贯通到展示层**（P2-11 收尾）：
+  - tiered 的 verifier 调用失败此前只进 `calls.json`（verdict=error），
+    `run_rejections` 与报告 notes 都统计不到；现在与 `provider_error` 同等
+    记为 `verify_error` 机器丢弃；
+  - 报告 notes 新增机器丢弃汇总：总数 + 前三个原因（如
+    `机器丢弃 5 条（refuted×3、verify_error×2）`）；
+  - Web 运行详情的「{n} 条被拒」改为「{n} 条机器丢弃」，rejectedBox 标题
+    不再把证伪/模型失败误标成"定位校验丢弃"；
+  - `list_runs` 新增 `n_dropped` 字段（取自 `run_rejections`，逐原因的权威
+    来源）；`n_rejected` 列保留兼容，新调用方应使用 `n_dropped`。
+- **`--max-units` 负数不再被当成全量**（P2-6）：`_unit_budget` 对负值抛
+  `ConfigError`（CLI / MCP / Web 三个入口共用），0 才表示全量。
+
+### Tests
+
+- tiered verifier 抛异常 → rejected 含 `verify_error` 记录且 `calls` 有
+  verdict=error（两处都可见）。
+- `_unit_budget(-1, n)` 抛错、`0/None/正数` 语义不变。
+- `list_runs` 返回 `n_dropped` 且与 `run_rejections` 聚合一致。
+- 报告 notes 在有机器丢弃时输出汇总行。
+
 ## [0.6.4] — 2026-11-23
 
 ### Fixed
