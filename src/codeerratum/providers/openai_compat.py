@@ -90,6 +90,10 @@ class OpenAICompatProvider:
         }
         self.failure_log: list[ParseFailure] = []
         self._use_json_schema = True
+        # One client per provider, created on first use and reused across units
+        # and transport retries. Rebuilding it per call threw away the TLS
+        # handshake and connection pool on every one of the ~60 unit reviews.
+        self._client: httpx.AsyncClient | None = None
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -97,15 +101,25 @@ class OpenAICompatProvider:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def aclose(self) -> None:
+        """Release the pooled connections; safe to call twice or before any use."""
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+        self._client = None
+
     async def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers=self._headers(),
-                json=payload,
-            )
-            response.raise_for_status()
-            return response.json()
+        response = await self._get_client().post(
+            f"{self.base_url}/chat/completions",
+            headers=self._headers(),
+            json=payload,
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def _post_with_retry(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Retry transient failures instead of dropping the whole review unit.

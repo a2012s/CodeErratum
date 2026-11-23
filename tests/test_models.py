@@ -119,6 +119,31 @@ def test_route_refuses_a_seat_count_that_does_not_match_the_mode():
         _registry().route("quick", pinned=["qwen-a", "qwen-b"])
 
 
+def test_pinned_never_seats_the_author_model():
+    from codeerratum.models.registry import ModelRegistry
+
+    with pytest.raises(ValueError, match="excluded as the author"):
+        _registry().route("quick", author_model="ds4.1", pinned=["ds4.1"])
+    registry = ModelRegistry.model_validate(
+        {
+            "models": [
+                {"model_id": m, "base_url": "http://x/v1"}
+                for m in ("author", "b", "c", "spare")
+            ]
+        }
+    )
+    reviewers, falsifier = registry.route(
+        "dual", author_model="author", pinned=["author", "b", "c"]
+    )
+    assert [m.model_id for m in reviewers] == ["b", "c"]
+    assert falsifier is not None and falsifier.model_id == "spare"
+
+
+def test_unknown_author_model_is_rejected_not_silently_ignored():
+    with pytest.raises(ValueError, match="unknown author model"):
+        _registry().route("quick", author_model="typo-model", pinned=["qwen-a"])
+
+
 def test_route_never_seats_the_same_model_twice():
     with pytest.raises(ValueError, match="takes 2 model"):
         _registry().route("dual", pinned=["qwen-a", "qwen-a"])

@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import pytest
 
 from codeerratum.providers.base import schema_to_json_schema
@@ -67,6 +68,34 @@ async def test_parse_hard_failure_logged(monkeypatch, tmp_path):
     out = tmp_path / "failures.json"
     provider.dump_failures(out)
     assert len(json.loads(out.read_text())) == 2
+
+
+@pytest.mark.asyncio
+async def test_post_reuses_one_client_until_closed(monkeypatch):
+    """One TLS pool per provider, not one per unit or per transport retry."""
+    provider = OpenAICompatProvider("http://localhost", "key")
+    created: list[httpx.AsyncClient] = []
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        client = real_client(
+            *args,
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, json={"ok": True})),
+            **kwargs,
+        )
+        created.append(client)
+        return client
+
+    monkeypatch.setattr("codeerratum.providers.openai_compat.httpx.AsyncClient", fake_client)
+    await provider._post({"n": 1})
+    await provider._post({"n": 2})
+    assert len(created) == 1
+    await provider.aclose()
+    assert created[0].is_closed
+    # A closed client is rebuilt lazily instead of failing on the next unit.
+    await provider._post({"n": 3})
+    assert len(created) == 2
+    await provider.aclose()
 
 
 def test_read_window_is_sized_for_full_length_answers(monkeypatch):

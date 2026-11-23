@@ -710,6 +710,14 @@ def stats() -> None:
         for row in s["by_category"][:10]:
             console.print(f"  {row['category']:<24} {row['total']:>3} / {row['rejected']:>3}")
     if s["by_model"]:
-        console.print("\n[bold]按模型[/bold]")
+        console.print("\n[bold]按模型（断言数）[/bold]")
         for row in s["by_model"]:
-            console.print(f"  {row['model_id']:<32} {row['n']:>3} runs")
+            console.print(f"  {row['model_id']:<32} {row['n']:>3} asserts")
+    if s.get("by_model_roles"):
+        console.print("\n[bold]按模型/角色[/bold]")
+        for row in s["by_model_roles"]:
+            console.print(f"  {row['model_id']:<28} {row['role']:<9} {row['n']:>3}")
+    if s.get("dropped_by_reason"):
+        console.print("\n[bold]机器丢弃原因（非人工驳回）[/bold]")
+        for row in s["dropped_by_reason"][:10]:
+            console.print(f"  {row['reason']:<32} {row['n']:>3}")

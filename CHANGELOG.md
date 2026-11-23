@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.6.3] — 2026-11-23
+
+按 `OPTIMIZATION_REVIEW.md` 的实证结论修复 5 个 P1 + 5 个 P2（P2-1/2/3/8/11）。
+
+### Fixed
+
+- **被证伪 finding 回流画像**（P1）：单源断言被 falsifier 推翻后原来只留一条 `rejected`，画像里既无 `n_assert` 也无 `n_refuted`，precision 系统性偏高。现在完整对象存入 `collection.refuted_findings`，画像按幂等规则累计，但不写入人工裁决表。
+- **MCP 默认预算对齐**（P1）：省略 `max_units` 由硬编码 10 改为 `None`，与 CLI/schema 承诺的 auto=60 一致；0 仍表示全量。
+- **作者模型不坐任何席位**（P1）：pinned 分支此前绕过 `available(author)`，且 falsifier 从 `self.models` 选——作者模型可当自己的审查者或证伪者。现在 reviewer/verifier/falsifier 全部排除作者，未知作者 id 直接报错。
+- **HTTP 连接复用**（P1）：provider 惰性持有共享 `AsyncClient`，orchestrator 在 `finally` 关闭所有 provider；不再每个单元和每次重试重建 TLS 连接。
+- **解析健康度落盘**（P1）：`parse_stats` 与失败样本汇总进 `comparison["parse"]`，写 `parse_stats.json` / `parse_failures.json`，summary 暴露 `parse` 块，失败率>0 时进报告 notes。
+- **按模型统计口径**（P2）：`stats.by_model` 改从 `verdict_events` 聚合断言数，不再把 dual 模式的逗号拼接串当成模型；新增 `by_model_roles` 明细。
+- **SQLite 并发**（P2）：连接显式关闭、加 `busy_timeout=30000`、启用 WAL；SSE 轮询与写入不再互相锁死或泄漏描述符。
+- **abstain 分母**（P2）：只统计证伪角色（confirm/refute/abstain），reviewer 的 assert 不再稀释“证据不足”警告。
+- **槽位显示**（P2）：Hub `snapshot()` 区分 `executing` 与 `queued`，`slots` 只扣真正占用执行槽的项目；`running` 保持包含排队项，关窗保护不变。
+- **机器丢弃原因聚合**（P2）：新增 `run_rejections` 表按 reason/model 聚合，`stats()` 暴露 `dropped_by_reason` / `dropped_total`，与人工驳回的 `rejected` 明确区分。
+
+### Docs
+
+- 新增 `AGENTS.md`：事实源、版本与打包硬约定、禁区与刻意权衡、沙箱环境坑、文件索引。供接手的 coding agent 阅读。
+
+### Tests
+
+- 新增 11 项：证伪画像回流（含幂等）、作者模型排除、MCP 默认预算、client 复用与关闭、parse 汇总、按模型统计、并发写、abstain 分母、槽位拆分、丢弃原因分组。
+- 全量 475 passed / 5 项既有基线失败，ruff 全绿。
+
 ## [0.6.2] — 2026-11-23
 
 ### Fixed

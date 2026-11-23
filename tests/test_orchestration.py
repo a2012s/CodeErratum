@@ -142,6 +142,40 @@ async def test_dual_orchestration_end_to_end(repo, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_parse_health_is_rolled_up_for_the_run(repo, monkeypatch):
+    """A hard gate that only lives in memory cannot be audited after a run."""
+    from codeerratum.ingest import get_diff, split_diff
+
+    diff = get_diff("HEAD", repo)
+    units = split_diff(diff, repo)
+    source_lines = (repo / "m.py").read_text().splitlines(keepends=True)
+    real_line = next(i for i, line in enumerate(source_lines, 1) if "return x[0]" in line)
+    snippet = source_lines[real_line - 1]
+    registry = ModelRegistry(
+        models=[
+            ModelSpec(model_id="gpt-4o-x", base_url="http://a"),
+            ModelSpec(model_id="claude-3-x", base_url="http://b"),
+            ModelSpec(model_id="deepseek-chat", base_url="http://c"),
+        ]
+    )
+    stubs = {}
+    for mid in ("gpt-4o-x", "claude-3-x", "deepseek-chat"):
+        stub = ReviewStub(mid, "stub", real_line, snippet, "空列表取首元素崩溃")
+        stub.parse_stats = {"calls": 4, "first_try": 3, "repaired": 1, "failed": 0}
+        stub.failure_log = []
+        stubs[mid] = stub
+    monkeypatch.setattr(orch, "_make_provider", lambda spec: stubs[spec.model_id])
+
+    collection, _, _ = await run_review(registry, "dual", units, repo, "run-parse")
+    parse = collection.comparison["parse"]
+    assert parse["calls"] == 12  # 2 reviewers + 1 falsifier
+    assert parse["first_try"] == 9
+    assert parse["repaired"] == 3
+    assert parse["success_rate"] == 1.0
+    assert collection.comparison["parse_failures"] == []
+
+
+@pytest.mark.asyncio
 async def test_live_findings_callback_fires_per_unit_before_the_run_ends(repo, monkeypatch):
     """Findings must be observable while reviewing, not only in the final report.
 

@@ -142,9 +142,10 @@ def _tool_review_diff(args: dict) -> dict:
             _root(args),
             diff_spec=str(args.get("diff") or "HEAD~1"),
             mode=str(args.get("mode") or ""),
-            # `args.get("max_units") or 10` would turn an explicit 0 into 10 —
-            # and 0 is the documented way to say "review everything".
-            max_units=(int(args["max_units"]) if args.get("max_units") is not None else 10),
+            # Omission means auto, the same 60-unit gate the CLI and schema
+            # promise; 0 still means "review everything". A hardcoded 10 here
+            # silently reviewed a sixth of the diff through MCP only.
+            max_units=(int(args["max_units"]) if args.get("max_units") is not None else None),
             house_rules=str(args.get("house_rules") or ""),
         )
     except NoChanges as exc:

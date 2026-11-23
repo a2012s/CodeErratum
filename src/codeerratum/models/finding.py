@@ -223,6 +223,14 @@ class FindingCollection(BaseModel):
         default_factory=dict, description="Phase-3 per-model comparison data (for eval/resume)"
     )
     findings: list[Finding] = Field(default_factory=list)
+    # A single-source claim broken by the falsifier is not a surviving finding,
+    # but it is a precision sample for the model that asserted it. Keeping the
+    # full object here (instead of only a row in `rejected`) lets the profile
+    # writer accumulate n_refuted without ever writing it to `findings`, whose
+    # status column means a human verdict.
+    refuted_findings: list[Finding] = Field(
+        default_factory=list, description="Surviving-worthy claims the falsifier refuted"
+    )
     rejected: list[dict] = Field(
         default_factory=list, description="Findings dropped by anchor check"
     )

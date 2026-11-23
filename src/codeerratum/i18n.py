@@ -345,6 +345,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Model calls failed for {n} units; those files were not reviewed",
     ),
     "pipeline.units_failed_reason": ("失败原因：{reasons}", "Reason: {reasons}"),
+    "pipeline.parse_failures": (
+        "{n} 次结构化输出解析失败（成功率 {rate}），样本见 parse_failures.json",
+        "{n} structured outputs failed to parse (success {rate}); samples in parse_failures.json",
+    ),
     # ---- model probe ----
     "model.timeout": ("连接超时（{seconds:g}s）", "Connection timed out ({seconds:g}s)"),
     "model.unreachable": (

@@ -171,6 +171,22 @@ def model_env(monkeypatch, repo):
     return repo
 
 
+def test_omitted_max_units_uses_the_same_auto_budget_as_cli(repo, monkeypatch):
+    """MCP default must not silently review a sixth of the diff."""
+    import codeerratum.mcp.server as mcp_server
+    from codeerratum.pipeline import ConfigError
+
+    seen: dict = {}
+
+    def fake_execute(root, **kwargs):
+        seen.update(kwargs)
+        raise ConfigError("captured")
+
+    monkeypatch.setattr(mcp_server, "execute_review", fake_execute)
+    call("tools/call", {"name": "review_diff", "arguments": {"repo": str(repo)}})
+    assert seen["max_units"] is None
+
+
 def test_review_diff_returns_the_work_order(model_env):
     result = call(
         "tools/call",

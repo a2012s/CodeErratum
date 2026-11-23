@@ -96,6 +96,16 @@ class ModelRegistry(BaseModel):
         """Models eligible for a review seat — never the code's author model."""
         return [m for m in self.models if m.model_id != exclude_author]
 
+    def _check_author(self, author_model: str | None) -> None:
+        """Reject an author id that is not configured; a typo is not a valid ban.
+
+        ``available(author)`` silently excludes nothing when the id is unknown,
+        which would let the real author model take a reviewer seat. Failing here
+        makes the mistake visible instead of deferring it to the report.
+        """
+        if author_model and author_model not in {m.model_id for m in self.models}:
+            raise ValueError(f"unknown author model id: {author_model}")
+
     def route(
         self,
         mode: Mode,
@@ -117,20 +127,35 @@ class ModelRegistry(BaseModel):
         """
         lenses = lenses or []
         n = {"quick": 1, "dual": 2, "committee": 3}[mode]
+        self._check_author(author_model)
         if pinned:
             by_id = {m.model_id: m for m in self.models}
             unknown = [mid for mid in pinned if mid not in by_id]
             if unknown:
                 raise ValueError(f"unknown model id(s): {', '.join(unknown)}")
+            # Explicit pins bypass the scoring pool, but never the author ban.
+            # Without this filter a user who pins the author model gets it seated
+            # as its own reviewer — the one promise this product cannot break.
+            eligible = [mid for mid in dict.fromkeys(pinned) if mid != author_model]
+            if not eligible:
+                raise ValueError("all pinned model(s) are excluded as the author model")
             # Dedupe while keeping the user's order, and never seat one model twice.
-            reviewers = [by_id[mid] for mid in dict.fromkeys(pinned)]
+            reviewers = [by_id[mid] for mid in eligible]
             if len(reviewers) != n:
                 raise ValueError(
                     f"mode '{mode}' takes {n} model(s) but {len(reviewers)} were selected"
                 )
             taken = {m.model_id for m in reviewers}
+            # The author ban covers every seat, not just reviewers. Selecting
+            # the falsifier from self.models would let the author judge its own
+            # code from the other side of the table.
             falsifier = (
-                next((m for m in self.models if m.model_id not in taken), None) if n >= 2 else None
+                next(
+                    (m for m in self.available(author_model) if m.model_id not in taken),
+                    None,
+                )
+                if n >= 2
+                else None
             )
             return reviewers, falsifier
 
@@ -171,6 +196,7 @@ class ModelRegistry(BaseModel):
         back to an ordinary single-model quick run — never a second call to the
         same model sold as independent confirmation.
         """
+        self._check_author(author_model)
         pool = self.available(author_model)
         if not pool:
             raise ValueError("no eligible review model (all excluded as author?)")

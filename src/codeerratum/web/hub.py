@@ -105,10 +105,17 @@ class ProjectHub:
         with self._lock:
             items = [(slug, self._apps[slug]) for slug in self._order]
         rows: list[dict] = []
-        running = 0
+        running = 0  # all in-flight work, including queued (used by close guard)
+        executing = 0  # work that actually holds an execution slot
+        queued = 0
         for slug, app in items:
             st = app.review_status()
-            running += 1 if st["running"] else 0
+            if st["running"]:
+                running += 1
+                if st["status"] == "queued":
+                    queued += 1
+                else:
+                    executing += 1
             rows.append(
                 {
                     "slug": slug,
@@ -126,8 +133,12 @@ class ProjectHub:
         return {
             "projects": rows,
             "max_parallel": self.max_parallel,
+            # Keep `running` inclusive: the desktop close guard must not let a
+            # queued review be killed silently just because it holds no slot.
             "running": running,
-            "slots": max(0, self.max_parallel - running),
+            "executing": executing,
+            "queued": queued,
+            "slots": max(0, self.max_parallel - executing),
         }
 
     def _entry(self, slug: str) -> dict:

@@ -142,6 +142,7 @@ class ReviewOutcome:
             "tokens": self.token_totals(),
             "zones": {k: len(v) for k, v in self.collection.zoned().items()},
             "comparison": self.collection.comparison,
+            "parse": self.collection.comparison.get("parse", {}),
             "notes": self.collection.notes,
             "house_rules": {
                 "applied": bool(self.collection.house_rules_sha),
@@ -258,7 +259,15 @@ def abstain_warning(findings: list) -> str:
     falsifier keeps saying it cannot decide. Surfacing it turns a silent degradation
     into a number the user can act on.
     """
-    roles = [verdict.role for f in findings for verdict in f.verdicts]
+    # Only the falsification round can abstain. Counting reviewer `assert`
+    # verdicts in the denominator dilutes a total context failure into quiet
+    # noise: two asserts plus one abstain used to read as 1/3 and stay silent.
+    roles = [
+        verdict.role
+        for f in findings
+        for verdict in f.verdicts
+        if verdict.role in ("confirm", "refute", "abstain")
+    ]
     if not roles:
         return ""
     abstained = sum(1 for role in roles if role == "abstain")
@@ -595,6 +604,16 @@ def execute_review(
     if warning:
         notices.append(warning)
 
+    parse_report = collection.comparison.get("parse", {})
+    if parse_report.get("failed", 0):
+        notices.append(
+            t(
+                "pipeline.parse_failures",
+                n=parse_report["failed"],
+                rate=parse_report.get("success_rate") or "n/a",
+            )
+        )
+
     collection.notes = notices
     collection.commit = get_commit(repo_root)
     collection.spec_level = spec_level
@@ -612,6 +631,16 @@ def execute_review(
     )
     (run_dir / "static_diags.json").write_text(
         json.dumps(all_diags, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    # A "parse success rate is a hard gate" claim that only exists in memory
+    # cannot be audited. Persist both the counters and a bounded failure sample.
+    (run_dir / "parse_stats.json").write_text(
+        json.dumps(collection.comparison.get("parse", {}), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    (run_dir / "parse_failures.json").write_text(
+        json.dumps(collection.comparison.get("parse_failures", []), ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
 
     ts = datetime.now(UTC).isoformat(timespec="seconds")

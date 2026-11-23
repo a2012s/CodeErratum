@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..models import FindingCollection
@@ -19,13 +21,32 @@ class ReviewStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init()
 
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    @contextmanager
+    def _conn(self) -> Iterator[sqlite3.Connection]:
+        """One short-lived, explicitly closed connection per operation.
+
+        ``with sqlite3.connect(...)`` only commits; it never closes. With SSE
+        polling and status writes on separate threads those connections piled up
+        until the database reported "locked" or ran out of descriptors. Busy
+        timeout plus WAL lets readers and the occasional writer coexist.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init(self) -> None:
         with self._conn() as conn:
+            # WAL keeps status polling from blocking an accept/reject write.
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -72,6 +93,13 @@ class ReviewStore:
                     role TEXT,
                     PRIMARY KEY (run_id, finding_id, model_id, role)
                 );
+                CREATE TABLE IF NOT EXISTS run_rejections (
+                    run_id TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    count INTEGER NOT NULL,
+                    PRIMARY KEY (run_id, reason, model_id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status);
                 CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
                 """
@@ -112,6 +140,20 @@ class ReviewStore:
                         f.category.value,
                         created_at,
                     ),
+                )
+            # Machine drops (anchor mismatch, provider error, refuted, ...)
+            # are not human rejections. A single n_rejected count hid which
+            # failure mode dominated, which is the first thing to look at when
+            # finding quality regresses.
+            drops: dict[tuple[str, str], int] = {}
+            for row in collection.rejected:
+                key = (str(row.get("reason") or "unknown"), str(row.get("model") or ""))
+                drops[key] = drops.get(key, 0) + 1
+            for (reason, model), count in drops.items():
+                conn.execute(
+                    "INSERT OR REPLACE INTO run_rejections (run_id, reason, model_id, count) "
+                    "VALUES (?,?,?,?)",
+                    (collection.run_id, reason, model, count),
                 )
         self.update_profiles(collection)
 
@@ -184,7 +226,12 @@ class ReviewStore:
         counts that routing depends on.
         """
         with self._conn() as conn:
-            for f in collection.findings:
+            # Refuted findings are profile samples too. A model that claims a
+            # unique bug and gets falsified must pay the n_refuted price — if
+            # only survivors counted, precision would reward reporting volume.
+            # They are never written to `findings`, so no human verdict is
+            # created for a claim the falsifier already broke.
+            for f in [*collection.findings, *collection.refuted_findings]:
                 unique = f.agreement == "unique" and len(f.source_models) == 1
                 # One finding is one precision sample for each asserting model, no
                 # matter how many falsifiers weighed in. Refute wins ties so a
@@ -315,8 +362,20 @@ class ReviewStore:
                 "SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) AS rejected "
                 "FROM findings GROUP BY category ORDER BY total DESC"
             ).fetchall()
+            # `runs.model_id` is a comma-joined string in dual/committee mode,
+            # so grouping it counted *combinations*, not models. Profile events
+            # are already one row per model per role, keyed for idempotency.
             by_model = conn.execute(
-                "SELECT model_id, COUNT(*) AS n FROM runs GROUP BY model_id ORDER BY n DESC"
+                "SELECT model_id, COUNT(*) AS n FROM verdict_events "
+                "WHERE role='assert' GROUP BY model_id ORDER BY n DESC"
+            ).fetchall()
+            by_model_roles = conn.execute(
+                "SELECT model_id, role, COUNT(*) AS n FROM verdict_events "
+                "GROUP BY model_id, role ORDER BY model_id, role"
+            ).fetchall()
+            dropped_by_reason = conn.execute(
+                "SELECT reason, SUM(count) AS n FROM run_rejections "
+                "GROUP BY reason ORDER BY n DESC"
             ).fetchall()
             n_runs = conn.execute("SELECT COUNT(*) FROM runs").fetchone()[0]
             decided = accepted + rejected
@@ -328,4 +387,8 @@ class ReviewStore:
             "acceptance_rate": round(accepted / decided, 3) if decided else None,
             "by_category": [dict(r) for r in by_category],
             "by_model": [dict(r) for r in by_model],
+            "by_model_roles": [dict(r) for r in by_model_roles],
+            # Distinct from `rejected` above, which is the human verdict count.
+            "dropped_by_reason": [dict(r) for r in dropped_by_reason],
+            "dropped_total": sum(int(r["n"]) for r in dropped_by_reason),
         }

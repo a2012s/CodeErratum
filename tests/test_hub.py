@@ -184,6 +184,21 @@ def test_queue_waits_for_a_slot_then_runs(tmp_path):
     assert app.review_status()["status"] == "running"
 
 
+def test_snapshot_counts_queued_projects_separately(tmp_path):
+    """A queued review holds no execution slot but must still block app close."""
+    hub = ProjectHub(state_file=tmp_path / "projects.json", max_parallel=2)
+    alpha = hub.get(hub.add(str(make_repo(tmp_path / "alpha")))["slug"])
+    beta = hub.get(hub.add(str(make_repo(tmp_path / "beta")))["slug"])
+    alpha._review_state.update({"running": True, "status": "running"})
+    beta._review_state.update({"running": True, "status": "queued"})
+
+    snap = hub.snapshot()
+    assert snap["running"] == 2  # close guard still sees both reviews
+    assert snap["executing"] == 1
+    assert snap["queued"] == 1
+    assert snap["slots"] == 1  # not 0: one slot is genuinely free
+
+
 def test_stop_while_queued_cancels_without_running(tmp_path):
     from codeerratum.review.orchestrator import ReviewCancelled
 

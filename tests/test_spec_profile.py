@@ -143,6 +143,13 @@ def test_high_abstain_rate_is_surfaced():
     assert "2/3" in warning
 
 
+def test_asserts_do_not_dilute_the_abstain_signal():
+    """Reviewer asserts are not falsification votes and must not be counted."""
+    warning = abstain_warning(_with_verdicts(["assert", "assert", "abstain"]))
+    assert "证据不足" in warning
+    assert "1/1" in warning
+
+
 # ---- model profile feedback --------------------------------------------
 
 
@@ -181,6 +188,44 @@ def test_verdicts_count_toward_precision_inputs(store):
     assert "judge0" not in store.model_profile_map()
 
 
+def test_refuted_finding_counts_against_its_author_without_a_human_verdict(store):
+    """A broken unique claim must lower precision, not just disappear."""
+    broken = finding(
+        "被证伪的独有断言",
+        ["gpt-a"],
+        agreement="unique",
+        verdicts=[
+            Verdict(model_id="gpt-a", role="assert", reason="r"),
+            Verdict(model_id="judge", role="refute", reason="r", counterexample="c"),
+        ],
+    )
+    store.save_run(
+        collection(
+            findings=[],
+            refuted_findings=[broken],
+            rejected=[
+                {
+                    "reason": "refuted",
+                    "finding_id": broken.id,
+                    "model": "gpt-a",
+                    "claim": broken.claim,
+                }
+            ],
+        ),
+        "2026-01-01T00:00:00Z",
+    )
+    profile = store.model_profile_map()["gpt-a"]
+    assert profile["n_assert"] == 1
+    assert profile["n_refuted"] == 1
+    assert profile["n_confirmed"] == 0
+    # Not written to `findings`: that table is for human adjudication.
+    assert store.find_finding(broken.id[:12]) == []
+
+    # Re-saving the same collection must not double-count the profile sample.
+    store.save_run(collection(findings=[], refuted_findings=[broken]), "2026-01-01T00:00:01Z")
+    assert store.model_profile_map()["gpt-a"]["n_refuted"] == 1
+
+
 def test_accumulates_across_runs(store):
     for i in range(3):
         store.save_run(
@@ -188,6 +233,70 @@ def test_accumulates_across_runs(store):
             "2026-01-01T00:00:00Z",
         )
     assert store.model_profile_map()["gpt-a"]["n_assert"] == 3
+
+
+def test_stats_by_model_counts_models_not_combination_strings(store):
+    store.save_run(
+        collection(
+            model_id="gpt-a,claude-b",
+            findings=[
+                finding(
+                    "甲",
+                    ["gpt-a"],
+                    verdicts=[Verdict(model_id="gpt-a", role="assert", reason="r")],
+                ),
+                finding(
+                    "乙",
+                    ["claude-b"],
+                    verdicts=[Verdict(model_id="claude-b", role="assert", reason="r")],
+                ),
+            ],
+        ),
+        "2026-01-01T00:00:00Z",
+    )
+    stats = store.stats()
+    assert {row["model_id"] for row in stats["by_model"]} == {"gpt-a", "claude-b"}
+    assert all("," not in row["model_id"] for row in stats["by_model"])
+    assert {row["role"] for row in stats["by_model_roles"]} == {"assert"}
+
+
+def test_machine_drops_are_grouped_by_reason(store):
+    store.save_run(
+        collection(
+            findings=[],
+            rejected=[
+                {"reason": "anchor_mismatch", "model": "gpt-a"},
+                {"reason": "anchor_mismatch", "model": "gpt-a"},
+                {"reason": "provider_error", "model": "gpt-a"},
+                {"reason": "refuted", "model": "claude-b"},
+            ],
+        ),
+        "2026-01-01T00:00:00Z",
+    )
+    stats = store.stats()
+    assert stats["dropped_total"] == 4
+    assert {row["reason"]: row["n"] for row in stats["dropped_by_reason"]} == {
+        "anchor_mismatch": 2,
+        "provider_error": 1,
+        "refuted": 1,
+    }
+    # Human rejections remain a separate column and are not inflated by drops.
+    assert stats["rejected"] == 0
+
+
+def test_concurrent_status_writes_do_not_lock(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+
+    store = ReviewStore(tmp_path / "feedback.db")
+    items = [finding(f"问题{i}", ["gpt-a"]) for i in range(8)]
+    store.save_run(collection(findings=items), "2026-01-01T00:00:00Z")
+
+    def accept(item):
+        store.set_status(item.id, "accepted", "")
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(accept, items))
+    assert store.stats()["accepted"] == 8
 
 
 def test_profiles_reach_the_registry(store):

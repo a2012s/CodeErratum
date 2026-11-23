@@ -305,6 +305,9 @@ async def run_review(
     """
     say = progress or (lambda _msg: None)
     active: set[asyncio.Task] = set()
+    # Every provider owns a pooled HTTP client. Track them all here so the
+    # finally block releases sockets even when a unit or the whole run fails.
+    all_providers: list = []
 
     async def watch_stop() -> None:
         """Cancel every in-flight model call the moment stop is requested."""
@@ -341,6 +344,7 @@ async def run_review(
         say(t("orch.start", models=len(reviewers), units=len(units)))
 
         providers = {m.model_id: _make_provider(m) for m in reviewers}
+        all_providers.extend(providers.values())
         review_tasks = [
             asyncio.create_task(
                 _review_with(
@@ -399,6 +403,7 @@ async def run_review(
                         )
                     )
                     verify_provider = _make_provider(verifier_spec)
+                    all_providers.append(verify_provider)
                     verify_gate = asyncio.Semaphore(unit_concurrency())
 
                     async def verify_one(unit: ReviewUnit):
@@ -496,6 +501,7 @@ async def run_review(
         # Falsification: a spare model if available, else cross-falsify between reviewers.
         if falsifier_spec is not None:
             falsifier_provider = _make_provider(falsifier_spec)
+            all_providers.append(falsifier_provider)
         else:
             falsifier_provider = None
 
@@ -584,6 +590,7 @@ async def run_review(
         from .aggregator import agreement as calc_agreement
 
         surviving: list[Finding] = []
+        refuted_findings: list[Finding] = []
         for f in merged:
             f.agreement = calc_agreement(f.verdicts)
             refutes = [v for v in f.verdicts if v.role == "refute"]
@@ -600,8 +607,16 @@ async def run_review(
                         "model": ",".join(f.source_models),
                         "reason": "refuted",
                         "claim": f.claim,
+                        "finding_id": f.id,
+                        "source_models": list(f.source_models),
+                        "verdicts": [v.model_dump(mode="json") for v in f.verdicts],
                     }
                 )
+                # Keep the full finding for the profile writer: a broken unique
+                # claim is exactly the sample that distinguishes a careful model
+                # from one that only reports a lot. It must not enter `findings`,
+                # whose status column is reserved for human adjudication.
+                refuted_findings.append(f)
                 continue
             if not asserts and not refutes:
                 continue
@@ -616,6 +631,33 @@ async def run_review(
             "after_falsification": len(surviving),
             "zones": {k: len(v) for k, v in _zone_split(surviving).items()},
         }
+        # Parse health is a hard gate, so it must outlive the process. Without
+        # these artifacts a run that quietly lost findings is indistinguishable
+        # from one where the model genuinely found nothing.
+        parse_stats: dict[str, int | float | None] = {}
+        parse_failures: list[dict] = []
+        for provider in all_providers:
+            for key, value in getattr(provider, "parse_stats", {}).items():
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    parse_stats[key] = parse_stats.get(key, 0) + value
+            for failure in getattr(provider, "failure_log", []):
+                parse_failures.append(
+                    failure.model_dump(mode="json")
+                    if hasattr(failure, "model_dump")
+                    else dict(failure)
+                )
+        parse_calls = parse_stats.get("calls", 0)
+        parse_stats["success_rate"] = (
+            round(
+                (parse_stats.get("first_try", 0) + parse_stats.get("repaired", 0)) / parse_calls,
+                3,
+            )
+            if parse_calls
+            else None
+        )
+        comparison["parse"] = parse_stats
+        comparison["parse_failures"] = parse_failures[:50]
+
         collection = FindingCollection(
             run_id=run_id,
             repo=str(repo_root),
@@ -627,6 +669,7 @@ async def run_review(
             falsifier_model=falsifier_spec.model_id if falsifier_spec else None,
             comparison=comparison,
             findings=surviving,
+            refuted_findings=refuted_findings,
             rejected=all_rejected,
         )
         return collection, all_calls, all_diags
@@ -637,6 +680,10 @@ async def run_review(
     finally:
         watcher.cancel()
         await asyncio.gather(watcher, return_exceptions=True)
+        for provider in all_providers:
+            close = getattr(provider, "aclose", None)
+            if close is not None:
+                await close()
 
 
 def sources_of(f: Finding) -> list[str]:
