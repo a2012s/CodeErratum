@@ -887,6 +887,29 @@ def test_review_stream_emits_cancelled_frame(client, monkeypatch):
     assert client.get("/api/review/status").json()["status"] == "cancelled"
 
 
+def test_review_stream_emits_stopped_frame_and_keeps_partial_run(client, monkeypatch):
+    summary = {
+        "run_id": "partial-run",
+        "stopped": True,
+        "findings": 1,
+        "calls": 2,
+        "latency_ms_avg": 10,
+        "tokens": {"input": 3, "output": 4, "cached": 0, "total": 7, "by_model": {}},
+        "comparison": {"stopped": {"units_completed": 1, "units_total": 3}},
+    }
+    monkeypatch.setattr(client.app, "execute_prepared", lambda *_a, **_k: summary)
+    with client.stream("POST", "/api/review/stream", json={"diff": "HEAD"}) as resp:
+        assert resp.status_code == 200
+        body = resp.read().decode("utf-8")
+    assert "event: stopped" in body
+    assert "event: done" not in body
+    st = client.get("/api/review/status").json()
+    assert st["status"] == "stopped"
+    assert st["running"] is False
+    assert st["run_id"] == "partial-run"
+    assert st["tokens"]["total"] == 7
+
+
 def test_run_review_cancels_inflight_model_calls(monkeypatch, tmp_path):
     """The stop flag reaches inside asyncio and cancels a call already in flight."""
     import asyncio
@@ -932,6 +955,8 @@ def test_ui_exposes_stop_button_and_token_totals():
     assert 'api("/api/review/stop"' in html
     assert 'ev.type === "cancelled"' in html
     assert 'st.status === "cancelled"' in html
+    assert 'ev.type === "stopped"' in html
+    assert 'st.status === "stopped"' in html
     assert "tokenSummary(ev.tokens)" in html
     assert "token 消耗" in html
 

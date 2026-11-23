@@ -741,6 +741,9 @@ const STR = {
   "审查完成": "Review finished",
   "无改动": "No changes",
   "审查已停止": "Review stopped",
+  "审查已停止，已保存部分报告": "Review stopped; partial report saved",
+  "已停止：{n} 条发现 · {calls} 次调用 · 覆盖 {done}/{total} 个单元":
+    "Stopped: {n} findings · {calls} calls · {done}/{total} units covered",
   "未知错误": "Unknown error",
   "错误：{msg}": "Error: {msg}",
   "审查失败：{msg}": "Review failed: {msg}",
@@ -1486,6 +1489,13 @@ async function pollReviewStatus() {
       // A run tracked from another tab may end empty too. Offer the same
       // whole-tree retry, using whatever the form currently asks for.
       askReviewWholeTree();
+    } else if (st.status === "stopped") {
+      // The stop was honored after at least one unit finished, so the server
+      // wrote a partial report. Show it instead of pretending the run failed.
+      progressAddLine(T("审查已停止，已保存部分报告"), "done");
+      progressFinishHead(T("审查已停止"));
+      loadRuns(false);
+      if (st.run_id) openRun(st.run_id);
     } else if (st.status === "cancelled") {
       progressAddLine(T("审查已停止"), "done");
       progressFinishHead(T("审查已停止"));
@@ -1658,6 +1668,7 @@ async function startReview(overrides = {}, allowEmptyPrompt = true) {
   progressReset();
   progressSetRunning(T("审查中…"));
   let runId = null;
+  let runStopped = false;
   let streamCompleted = false;  // a terminal frame arrived; server work is over
   try {
     // POST body can't go through EventSource, so read the SSE response as a
@@ -1706,6 +1717,23 @@ async function startReview(overrides = {}, allowEmptyPrompt = true) {
           streamCompleted = true;
           progressAddLine(ev.message || T("审查已停止"), "done");
           progressFinishHead(T("审查已停止"));
+        } else if (ev.type === "stopped") {
+          streamCompleted = true;
+          runStopped = true;
+          runId = ev.run_id;
+          const stop = (ev.comparison || {}).stopped || {};
+          progressAddLine(T("已停止：{n} 条发现 · {calls} 次调用 · 覆盖 {done}/{total} 个单元", {
+            n: ev.findings,
+            calls: ev.calls,
+            done: stop.units_completed == null ? "?" : stop.units_completed,
+            total: stop.units_total == null ? "?" : stop.units_total,
+          }), "done");
+          tokenSummary(ev.tokens).forEach((l) => progressAddLine(l, "done"));
+          progressFinishHead(T("审查已停止，已保存部分报告"));
+          if (runId) {
+            loadRuns(false);
+            openRun(runId);
+          }
         } else if (ev.type === "error") {
           streamCompleted = true;
           progressAddLine(T("错误：{msg}", { msg: ev.error || T("未知错误") }), "err");
@@ -1751,7 +1779,7 @@ async function startReview(overrides = {}, allowEmptyPrompt = true) {
     }
     if (buffer.trim()) { frames.push(buffer); await flushFrames(); }
     if (runId) {
-      toast(T("审查完成"));
+      toast(runStopped ? T("审查已停止，已保存部分报告") : T("审查完成"));
       await loadRuns(false);
       await openRun(runId);
     }

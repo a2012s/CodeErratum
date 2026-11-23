@@ -145,6 +145,7 @@ class ReviewOutcome:
             "models": self.collection.reviewer_models,
             "falsifier": self.collection.falsifier_model,
             "findings": len(self.collection.findings),
+            "stopped": bool(self.collection.stopped),
             "dropped": dropped,
             "failed_units": failed_units,
             "rejected": dropped,  # legacy alias; read "dropped" in new code
@@ -392,8 +393,10 @@ def execute_review(
     without touching the working tree. ``paths`` narrows the diff to a git
     pathspec (e.g. ``src/api``), so a review can target one folder without
     staging changes first. ``should_stop`` is polled by the orchestrator; when
-    it turns true, in-flight model calls are cancelled and ReviewCancelled is
-    raised instead of persisting a partial report.
+    it turns true, in-flight model calls are cancelled. Units that already
+    finished are kept and a partial ``review.md`` is written with
+    ``stopped=True``; only a stop before any unit finished raises
+    ReviewCancelled (there is nothing to report).
 
     ``max_units=None`` means "decide for me" (see ``AUTO_UNIT_BUDGET``), ``0``
     means every unit, and a positive number is taken literally. ``models`` pins
@@ -600,9 +603,30 @@ def execute_review(
                 output_lang=get_lang(),
             )
         )
-        say(t("pipeline.report_writing"))
+        # A stop request must not abort persistence: once any unit finished,
+        # the partial result is the only thing the user paid for. The stop flag
+        # still shortens the run inside review, but report writing always
+        # completes.
+        emit(t("pipeline.report_writing"))
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+
+    if collection.stopped:
+        stopped_info = collection.comparison.get("stopped") or {}
+        done = stopped_info.get("units_completed", 0)
+        partial = stopped_info.get("units_partial", 0)
+        total = stopped_info.get("units_total", len(selected))
+        if partial:
+            notices.append(
+                t(
+                    "pipeline.stopped_partial_mixed",
+                    done=done,
+                    partial=partial,
+                    total=total,
+                )
+            )
+        else:
+            notices.append(t("pipeline.stopped_partial", done=done, total=total))
 
     # Two failure shapes must not share one sentence: provider_error means the
     # reviewer never produced anything (unit unreviewed), verify_error means

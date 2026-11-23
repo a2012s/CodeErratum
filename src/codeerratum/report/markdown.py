@@ -78,6 +78,46 @@ def _rules_note(collection: FindingCollection) -> str:
     )
 
 
+def _stop_banner(collection: FindingCollection) -> str:
+    """Make incomplete coverage impossible to miss.
+
+    A stopped run is not a clean run: the reader must not treat "no findings in
+    the units we finished" as "the change is fine". The banner sits above the
+    findings, not in the coverage notes at the bottom, because a downstream AI
+    executes this file top to bottom.
+    """
+    info = collection.comparison.get("stopped") or {}
+    done = info.get("units_completed", 0)
+    partial = info.get("units_partial", 0)
+    total = info.get("units_total", 0)
+    stage = info.get("stage", "")
+    phase = {
+        "verify": "验证阶段",
+        "falsify": "证伪阶段",
+        "cluster": "聚类阶段",
+        "review": "模型审查阶段",
+    }.get(stage, "准备阶段")
+    coverage = f"已完整审查 {done}/{total} 个单元"
+    if partial:
+        coverage += f"，另有 {partial} 个单元只有部分模型完成"
+    if stage == "falsify":
+        consequence = (
+            "已完成审查的发现全部保留；证伪尚未跑完，未证伪的发现按“未裁决”展示。"
+        )
+    elif stage == "verify":
+        consequence = (
+            "扫描结果已保留；验证尚未跑完，未被验证的发现按“未裁决”展示。"
+        )
+    else:
+        consequence = "报告只包含截止停止时的发现；证伪/验证未执行。"
+    return (
+        f"> **审查已停止（{phase}）**\n"
+        f">\n"
+        f"> {coverage}。{consequence}\n"
+        f"> 停止不等于审查通过：未覆盖的单元没有结论，需重新审查。\n\n"
+    )
+
+
 def _severity_counts(findings) -> dict[str, int]:
     counts = {"P0": 0, "P1": 0, "P2": 0, "P3": 0}
     for f in findings:
@@ -218,9 +258,17 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
             rules=_rules_note(collection),
         )
     ]
+    if collection.stopped:
+        parts.append(_stop_banner(collection))
 
     if not display:
-        parts.append("## 结论\n\n本次变更未发现明确问题。\n\n")
+        if collection.stopped:
+            parts.append(
+                "## 结论\n\n"
+                "审查已停止，已完成单元未报出发现；这不代表未覆盖单元没有问题。\n\n"
+            )
+        else:
+            parts.append("## 结论\n\n本次变更未发现明确问题。\n\n")
     elif collection.mode == "quick":
         for i, f in enumerate(display, 1):
             parts.append(_render_finding(f, i))
@@ -261,8 +309,13 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
         parts.append(f"- 各模型原始发现数：{cmp.get('raw_counts')}\n")
         clustered = cmp.get("after_clustering")
         survived = cmp.get("after_falsification")
-        parts.append(f"- 聚类后：{clustered} 条；证伪后：{survived} 条\n")
-        parts.append(f"- 分区：{cmp.get('zones')}\n\n")
+        parts.append(f"- 聚类后：{clustered} 条\n")
+        if survived is None:
+            parts.append("- 证伪：未执行（审查已停止）\n")
+        else:
+            parts.append(f"- 证伪后：{survived} 条\n")
+        zones = cmp.get("zones")
+        parts.append(f"- 分区：{zones if zones is not None else '未计算（审查已停止）'}\n\n")
 
     # Two different failure shapes get two different sections: drops removed a
     # finding from this report; unit failures did not (verify_error even keeps

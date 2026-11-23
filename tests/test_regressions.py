@@ -940,3 +940,169 @@ def test_clustering_keeps_two_distinct_issues_on_the_same_line():
     first.source_models, second.source_models = [], []
     merged, _ = cluster_findings({"m1": [first], "m2": [second]})
     assert len(merged) == 2
+
+
+def test_review_with_records_a_finished_unit_before_stop(monkeypatch):
+    """Reverting the sink means cancellation throws away the only paid work."""
+    import asyncio
+
+    import codeerratum.review.orchestrator as orch
+    from codeerratum.models import ModelSpec
+    from codeerratum.review import ReviewCancelled
+
+    finding = _finding(1)
+
+    async def fake_review_unit(*_args, **_kwargs):
+        return (
+            [finding],
+            [],
+            Completion(
+                text="{}",
+                usage=Usage(input_tokens=1, output_tokens=1),
+                raw_request_hash="stub",
+                latency_ms=1,
+            ),
+            [],
+        )
+
+    monkeypatch.setenv("CODEERRATUM_UNIT_CONCURRENCY", "1")
+    monkeypatch.setattr(orch, "review_unit", fake_review_unit)
+    partial = orch._PartialRun()
+    seen: list[str] = []
+
+    def progress(message: str) -> None:
+        seen.append(message)
+        if len(seen) == 2:  # unit_start + unit_done for the first unit
+            raise ReviewCancelled("stop")
+
+    with pytest.raises(ReviewCancelled):
+        asyncio.run(
+            orch._review_with(
+                object(),
+                ModelSpec(model_id="m", base_url="http://x"),
+                [_unit(), _unit(unit_id="u2", primary_file="b.py")],
+                Path("."),
+                "run",
+                progress=progress,
+                sink=partial,
+            )
+        )
+    assert partial.units_done == {"u1"}
+    assert partial.calls[0]["unit_id"] == "u1"
+    assert [f.id for f in partial.per_unit["m"]["u1"]] == [finding.id]
+
+
+def test_run_review_returns_partial_collection_when_one_unit_finished(monkeypatch, tmp_path):
+    """A stop after a completed unit must keep that unit's findings."""
+    import asyncio
+
+    import codeerratum.review.orchestrator as orch
+    from codeerratum.models import ModelSpec
+
+    class Registry:
+        def route(self, mode, author_model=None, pinned=None):
+            return [ModelSpec(model_id="m", base_url="http://x")], None
+
+    finding = _finding(1)
+
+    async def fake_review_with(
+        provider,
+        spec,
+        units,
+        repo_root,
+        run_id,
+        house_rules="",
+        sources=None,
+        progress=None,
+        on_findings=None,
+        output_lang="",
+        sink=None,
+    ):
+        assert sink is not None
+        sink.per_unit.setdefault(spec.model_id, {}).setdefault(units[0].unit_id, []).append(
+            finding
+        )
+        sink.calls.append({"model": spec.model_id, "unit_id": units[0].unit_id, "usage": {}})
+        sink.units_done.add(units[0].unit_id)
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(orch, "_make_provider", lambda _spec: object())
+    monkeypatch.setattr(orch, "_review_with", fake_review_with)
+    collection, calls, _diags = asyncio.run(
+        orch.run_review(Registry(), "quick", [_unit()], tmp_path, "run")
+    )
+    assert collection.stopped is True
+    assert [f.id for f in collection.findings] == [finding.id]
+    assert collection.comparison["stopped"]["units_completed"] == 1
+    assert collection.comparison["stopped"]["units_total"] == 1
+    assert calls[0]["unit_id"] == "u1"
+
+
+def test_run_review_still_raises_when_stopped_before_any_unit(monkeypatch, tmp_path):
+    """No completed unit means there is no partial report worth writing."""
+    import asyncio
+
+    import codeerratum.review.orchestrator as orch
+    from codeerratum.models import ModelSpec
+    from codeerratum.review import ReviewCancelled
+
+    class Registry:
+        def route(self, mode, author_model=None, pinned=None):
+            return [ModelSpec(model_id="m", base_url="http://x")], None
+
+    async def fake_review_with(*_args, **_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(orch, "_make_provider", lambda _spec: object())
+    monkeypatch.setattr(orch, "_review_with", fake_review_with)
+    with pytest.raises(ReviewCancelled):
+        asyncio.run(orch.run_review(Registry(), "quick", [_unit()], tmp_path, "run"))
+
+
+def test_stopped_pipeline_writes_partial_report_and_skips_profiles(tmp_path, monkeypatch):
+    """Stopping must persist what was found, without teaching routing from it."""
+    repo = _init_repo(tmp_path)
+    (repo / "a.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "one"], cwd=repo, check=True)
+    (repo / "a.py").write_text("def f():\n    return 2\n", encoding="utf-8")
+
+    monkeypatch.setenv("CODEERRATUM_BASE_URL", "http://x")
+    monkeypatch.setenv("CODEERRATUM_MODEL", "m")
+    monkeypatch.delenv("CODEERRATUM_MODELS", raising=False)
+    finding = _finding(1)
+    partial = FindingCollection(
+        run_id="partial",
+        repo=str(repo),
+        commit="",
+        model_id="m",
+        spec_level="L1",
+        mode="quick",
+        reviewer_models=["m"],
+        findings=[finding],
+        stopped=True,
+        comparison={
+            "parse": {},
+            "parse_failures": [],
+            "stopped": {
+                "stage": "review",
+                "units_completed": 1,
+                "units_partial": 0,
+                "units_total": 3,
+                "calls": 1,
+            },
+        },
+    )
+
+    async def fake_run(*_args, **_kwargs):
+        return partial, [], []
+
+    monkeypatch.setattr(pipeline, "run_review", fake_run)
+    outcome = pipeline.execute_review(repo, diff_spec="HEAD")
+    markdown = (outcome.run_dir / "review.md").read_text(encoding="utf-8")
+    assert "审查已停止" in markdown
+    assert "已完整审查 1/3 个单元" in markdown
+    assert "None 条" not in markdown
+    data = json.loads((outcome.run_dir / "findings.json").read_text(encoding="utf-8"))
+    assert data["stopped"] is True
+    assert pipeline.store_for(repo).model_profiles() == []

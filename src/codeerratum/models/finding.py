@@ -257,6 +257,11 @@ class FindingCollection(BaseModel):
         default_factory=list,
         description="Visible degradations for this run (skipped files, failed units, ...)",
     )
+    stopped: bool = Field(
+        default=False,
+        description="True when the user stopped the run; findings cover only completed units "
+        "and were not fully cross-checked.",
+    )
     house_rules_sha: str = Field(
         default="",
         description="sha256 of the appended project rules; empty when none were applied. "

@@ -865,6 +865,8 @@ class WebApp:
             summary = self.execute_prepared(params, progress=progress)
             run_id = summary.get("run_id")
             final_tokens = summary.get("tokens")
+            if summary.get("stopped"):
+                final_status = "stopped"
             return summary
         except NoChanges:
             final_status = "empty"
@@ -1032,7 +1034,14 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                 )
                 final_run_id = summary.get("run_id")
                 final_tokens = summary.get("tokens")
-                self._sse_event("done", summary)
+                if summary.get("stopped"):
+                    # A stopped run did finish writing its partial report, but
+                    # it is not a clean "done": the tab must say coverage is
+                    # incomplete and still open the report that was persisted.
+                    final_status = "stopped"
+                    self._sse_event("stopped", summary)
+                else:
+                    self._sse_event("done", summary)
             except ReviewCancelled as exc:
                 final_status = "cancelled"
                 self._sse_event("cancelled", {"message": str(exc) or t("server.stopped_by_user")})

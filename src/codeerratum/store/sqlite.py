@@ -156,7 +156,12 @@ class ReviewStore:
                     "VALUES (?,?,?,?)",
                     (collection.run_id, reason, model, count),
                 )
-        self.update_profiles(collection)
+        # A stopped run has only the units that finished. Feeding those
+        # assertions into model_profile would teach routing from an unfinished
+        # sample ("no refutations" because the falsifier never ran), so the
+        # per-model record stays untouched.
+        if not collection.stopped:
+            self.update_profiles(collection)
 
     def save_comparison(self, collection: FindingCollection, created_at: str) -> None:
         """Phase-3: persist cross-model comparison data for the eval/resume narrative.
@@ -172,7 +177,7 @@ class ReviewStore:
         # every quick run, which reads like a failed cross-model diff. Parse
         # health still lands in parse_stats.json; the table stays for runs that
         # actually compared models.
-        if not cmp or set(cmp) <= {"parse", "parse_failures"}:
+        if not cmp or set(cmp) <= {"parse", "parse_failures", "stopped"}:
             return
         with self._conn() as conn:
             conn.execute(

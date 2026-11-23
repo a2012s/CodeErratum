@@ -1,6 +1,6 @@
 """CodeErratum — AI code review that outputs an executable work order."""
 
-__version__ = "0.6.7"
+__version__ = "0.6.8"
 
 # One place for "where is this project", because the address is needed in three:
 # the macOS About panel (packaging/CodeErratum.spec), /api/meta, and the in-app
