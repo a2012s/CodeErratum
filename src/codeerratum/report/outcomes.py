@@ -268,7 +268,9 @@ _NEG_PREFIXES = (
 # English negation prefixes need a word boundary: plain endswith("un") read
 # "...tests run" (and "begun", "rerun") as a negation of the verdict that
 # follows, silently dropping real acceptances.
-_EN_PREFIX_RE = re.compile(r"(?:^|[\s\"'\(\[-])(?:not|no|non|un|pending|n't)[\s-]*$", re.IGNORECASE)
+_EN_PREFIX_RE = re.compile(
+    r"(?:^|[\s\"'\(\[_-])(?:not|no|non|un|pending|n't)[\s_-]*$", re.IGNORECASE
+)
 
 # Qualifiers that follow a positive verdict. "已修复"/"fixed" alone is evidence
 # of acceptance, but "部分修复但仍有问题" and "fixed without full verification"
@@ -503,7 +505,9 @@ def _word_pattern(word: str) -> str:
     longer tokens must not match, or "bypassed" counts as a "pass".
     """
     if word.isascii():
-        return r"(?<![A-Za-z])" + re.escape(word) + r"(?![A-Za-z])"
+        # Underscores and digits glue tokens together just as letters do:
+        # "fixed2" / "not_fixed" must not match the bare word "fixed".
+        return r"(?<![A-Za-z0-9_])" + re.escape(word) + r"(?![A-Za-z0-9_])"
     return re.escape(word)
 
 

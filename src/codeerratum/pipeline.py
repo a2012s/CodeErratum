@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -60,9 +61,18 @@ def atomic_write_text(path: Path, text: str) -> None:
     write there poisons the coverage calculation and silently loses findings.
     Windows os.replace is atomic within one volume, same as POSIX rename.
     """
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    # A fixed ".tmp" name is shared by every writer of the same path: two
+    # concurrent runs could replace each other's temp file before either
+    # renamed it. mkstemp gives each writer its own inode.
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 class PipelineError(Exception):
@@ -751,7 +761,6 @@ def execute_review(
     collection.house_rules_chars = rules.chars
     collection.house_rules_source = rules.source
 
-    atomic_write_text(run_dir / "calls.json", json.dumps(calls, ensure_ascii=False, indent=2))
     atomic_write_text(
         run_dir / "findings.json",
         json.dumps(collection.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -778,6 +787,12 @@ def execute_review(
     if out is not None:
         out_path = out if out.is_absolute() else repo_root / out
         atomic_write_text(out_path, markdown)
+
+    # calls.json is the coverage ledger: plan_resume derives "already done"
+    # from it. Write it LAST so a crash between files leaves the ledger behind
+    # the findings — the next resume then re-reviews (costs tokens) instead of
+    # treating units as covered whose findings were never written (loses data).
+    atomic_write_text(run_dir / "calls.json", json.dumps(calls, ensure_ascii=False, indent=2))
 
     store.save_run(collection, ts)
     store.save_comparison(collection, ts)

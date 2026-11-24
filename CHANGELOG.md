@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.7.3] — 2026-11-24
+
+### Fixed — 续跑并发
+
+- **P1 `resume.lock` 只串行了写，没有串行读**：0.7.2 在读取 `findings.json`、
+  `plan_resume()` 选出本批之后才拿锁。两个并发 sitting 会选中同一批单元：
+  前一个写完合并账本后，后一个拿着等待前读到的旧 `old_collection` 再跑一遍，
+  把旧 findings 写回去，而 `calls.json` 却已经记着这些单元已完成——正是声称
+  要消除的 lost update，且账本内部自相矛盾。现在**先拿锁再读账本和规划**，
+  排队者醒来后按已合并的账本重新计算剩余队列，无事可做就干净退出。
+- 新增回归测试 `test_resume_replans_after_waiting_for_the_run_lock`：两个线程
+  抢同一 run，断言第二个 sitting 不重复审同一单元；在 0.7.2 代码上该测试
+  失败（`reviewed == ["u1", "u1"]`），修复后通过。
+- `resume.lock` 不再仅凭 1 小时 mtime 抢锁：先读锁里的 pid 判活，活着的持有者
+  永不被按时间偷锁（长批次会被重复执行），只有已退出的进程才在 2 秒宽限后回收。
+- 补 `test_resume_replays_original_pin_from_run_meta`：tiered quick 下续跑必须
+  回放 `run_meta.models` 的用户原始 pin，而不是把记录里的 scanner 晋升为 verifier。
+
+### Fixed — 复核 0.7.2 的残留窗口
+
+- **P0 原子写的跨文件不一致**：`calls.json` 是续跑判完成所依据的账本，但首跑和
+  续跑都把它写在 `findings.json` 之前。崩溃恰在两次 `os.replace` 之间发生，
+  下一轮就会按新 calls 判已完成、按旧 findings 丢失结果。现在 `calls.json`
+  一律**最后写**：最坏情况退化为重复审查（多花 token），不再静默丢 finding。
+- `atomic_write_text` 改用 `mkstemp` 的唯一临时名；固定 `.tmp` 名会被同一路径的
+  两个并发 writer 互相覆盖。
+- `resume.lock` 已修（见上）：0.7.2 的“pid 与过期回收”实际没读 pid，活进程
+  跑过 1 小时也会被另一个进程偷锁。
+- verify 阶段的 Brother-task 回收与 falsify 对齐：停止时仍在 gate 排队的付费
+  校验调用一并取消，不再后台继续烧 token。
+- verify 已完成判定镜像进 partial sink：tiered 停止时，那些已经付费拿到的
+  verifier 判定会参与部分报告的合并，不再被打回 scanner-only 状态。
+- 英文状态词边界扩到 `[A-Za-z0-9_]`：`not_fixed` / `fixed2` 不再被当成 `fixed`。
+- `new_side_sources` 改用 `git diff --raw --abbrev=40`（`--full-index` 只管
+  patch 的 index 行，对 raw 无效）：缩略 sha 互为前缀时不再把别的 blob 当成
+  源码上下文。
+
 ## [0.7.2] — 2026-11-24
 
 全量代码审查（review.md，基线 9909739）的修复批次：1 项 P0、11 项 P1 中的 9 项、

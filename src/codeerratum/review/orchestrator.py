@@ -50,6 +50,10 @@ class _PartialRun:
         self.calls: list[dict] = []
         self.diags: list[dict] = []
         self.units_done: set[str] = set()
+        # tiered verify results that were paid for before a stop landed
+        self.verified: list[Finding] = []
+        self.verify_scanner: str = ""
+        self.verify_verifier: str = ""
 
 
 def _one_line(text: str) -> str:
@@ -409,6 +413,13 @@ def _partial_collection(
             "after_clustering": len(merged),
             "after_falsification": None,
         }
+    # Verdicts from verify calls that finished before the stop were paid for:
+    # fold them in exactly as the normal path does, or the partial report
+    # silently reverts those findings to the scanner-only state.
+    if mode == "tiered" and partial.verified:
+        merged, _ = _merge_verification(
+            merged, partial.verified, partial.verify_scanner, partial.verify_verifier
+        )
     merged = rank_findings(merged, rejected_category_counts)
     comparison["parse"], comparison["parse_failures"] = _parse_snapshot(all_providers)
     comparison["stopped"] = {
@@ -582,6 +593,8 @@ async def run_review(
                     )
                     verify_provider = _make_provider(verifier_spec)
                     all_providers.append(verify_provider)
+                    partial.verify_scanner = scanner_id
+                    partial.verify_verifier = verifier_spec.model_id
                     verify_gate = asyncio.Semaphore(unit_concurrency())
 
                     async def verify_one(unit: ReviewUnit):
@@ -603,9 +616,18 @@ async def run_review(
                             active.add(task)
                             return await task
 
-                    vresults = await asyncio.gather(
-                        *(verify_one(u) for u in verify_units), return_exceptions=True
-                    )
+                    # Same sibling-recovery contract as falsify: a stop while
+                    # some verifiers are still queued on the gate must cancel
+                    # them too, not leave paid calls running in the background.
+                    verify_tasks = [asyncio.create_task(verify_one(u)) for u in verify_units]
+                    try:
+                        vresults = await asyncio.gather(*verify_tasks, return_exceptions=True)
+                    except BaseException:
+                        for task in verify_tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*verify_tasks, return_exceptions=True)
+                        raise
                     verified: list[Finding] = []
                     cancelled: asyncio.CancelledError | None = None
                     for unit, res in zip(verify_units, vresults, strict=True):
@@ -665,6 +687,7 @@ async def run_review(
                         all_calls.append(call)
                         partial.calls.append(call)
                         verified.extend(vf)
+                        partial.verified.extend(vf)
                     if cancelled is not None:
                         raise ReviewCancelled(t("server.stopped_by_user")) from cancelled
                     merged, extra = _merge_verification(

@@ -279,7 +279,19 @@ def new_side_sources(spec: str, repo_root: Path, paths: str = "") -> dict[str, s
     if spec.startswith("-"):
         raise DiffError("diff spec must not start with '-': git would parse it as an option")
     pathspec = normalize_pathspec(paths)
-    cmd = ["git", "diff", "--raw", "-z", "--no-color", "--end-of-options", spec]
+    # --abbrev=40 keeps the whole object id in diff-raw (--full-index only
+    # widens the "index abc..def" line in patch output). An abbreviated sha can
+    # be a prefix of another blob's id and bind a file to the wrong snapshot.
+    cmd = [
+        "git",
+        "diff",
+        "--raw",
+        "-z",
+        "--no-color",
+        "--abbrev=40",
+        "--end-of-options",
+        spec,
+    ]
     if pathspec:
         cmd += ["--", *pathspec.split()]
     result = _run_git(cmd, repo_root, binary=True)
@@ -355,9 +367,10 @@ def _read_blobs(wanted: list[tuple[str, str]], repo_root: Path) -> dict[str, str
         blobs.append((header[0].decode(), stream[start : start + size]))
         pos = start + size + 1  # trailing newline after the payload
     for path, sha in wanted:
-        # git echoes each object's FULL name in the header, but `git diff --raw`
-        # hands us core.abbrev-length shas — match by prefix, not equality.
-        data = next((payload for full_sha, payload in blobs if full_sha.startswith(sha)), None)
+        # --full-index above makes both sides 40-char ids, so equality is safe;
+        # prefix matching could bind a file to a different blob whose id merely
+        # starts with the same abbreviated sha.
+        data = next((payload for full_sha, payload in blobs if full_sha == sha), None)
         if data is not None:
             sources[path] = data.decode("utf-8", errors="replace")
     return sources

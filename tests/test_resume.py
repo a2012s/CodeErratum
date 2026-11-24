@@ -13,6 +13,7 @@ craft that ledger directly and drive `resume_review` with a stubbed
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -327,3 +328,120 @@ def test_resume_with_nothing_left_is_a_clean_noop(repo, monkeypatch):
     )
     with pytest.raises(LookupError):
         resume_review(repo, RUN, registry=full, progress=lambda _m: None)
+
+
+def test_resume_replans_after_waiting_for_the_run_lock(repo, registry, monkeypatch):
+    """The lock must serialize planning too, not just the final write.
+
+    A second sitting queued on the same run reads findings.json only after the
+    first wrote its merged report. Planning from the snapshot taken before the
+    wait would re-review the same unit and restore the stale ledger after
+    calls.json already marked it covered.
+    """
+    _seed_run(repo, [_unit("u1")], [], _old_collection([], []))
+    _patch_config(monkeypatch)
+
+    started = threading.Event()
+    release = threading.Event()
+    reviewed: list[str] = []
+
+    async def fake_run(registry_arg, mode, batch, repo_root, run_id, **kwargs):
+        reviewed.extend(u.unit_id for u in batch)
+        if len(reviewed) == 1:
+            started.set()
+            assert release.wait(10), "first sitting was never released"
+        return (
+            FindingCollection.model_validate(_old_collection([], [])),
+            [{"model": "gpt-a", "unit_id": "u1"}, {"model": "gpt-b", "unit_id": "u1"}],
+            [],
+        )
+
+    monkeypatch.setattr(resume_mod, "run_review", fake_run)
+    results: dict[str, object] = {}
+
+    def sitting(label: str) -> None:
+        try:
+            results[label] = resume_review(repo, RUN, registry=registry, progress=lambda _m: None)
+        except BaseException as exc:  # keep the thread alive so both joins can finish
+            results[label] = exc
+
+    first = threading.Thread(target=sitting, args=("first",))
+    first.start()
+    assert started.wait(10), "first sitting never reached the stub"
+    second = threading.Thread(target=sitting, args=("second",))
+    second.start()
+    release.set()
+    first.join(20)
+    second.join(20)
+    assert not first.is_alive() and not second.is_alive(), "a sitting never returned"
+
+    assert reviewed == ["u1"], "the queued sitting must not re-review the same unit"
+    assert not isinstance(results["first"], BaseException)
+    assert isinstance(results["second"], LookupError)  # nothing left after the first merge
+
+
+def test_resume_replays_original_pin_from_run_meta(repo, monkeypatch):
+    """Tiered quick: the recorded reviewer is the scanner, not the user's pin.
+
+    Re-pinning the scanner would promote it into the verifier seat on the
+    second sitting. run_meta.models is the original user pin and must win.
+    """
+    units = [_unit("u1"), _unit("u2")]
+    old = _old_collection([], [])
+    old["reviewer_models"] = ["flash"]
+    old["falsifier_model"] = "strong"
+    old["mode"] = "quick"
+    _seed_run(repo, units, [{"model": "flash", "unit_id": "u1"}], old)
+    run_dir = repo / ".codeerratum" / "runs" / RUN
+    (run_dir / "run_meta.json").write_text(
+        json.dumps({"models": ["strong"], "tiered": True, "author_model": None}),
+        encoding="utf-8",
+    )
+    _patch_config(monkeypatch)
+    pool = ModelRegistry(
+        models=[
+            ModelSpec(model_id="flash", base_url="http://a"),
+            ModelSpec(model_id="strong", base_url="http://b"),
+        ]
+    )
+    seen: dict = {}
+
+    async def fake_run(registry_arg, mode, batch, repo_root, run_id, **kwargs):
+        seen["pinned"] = kwargs.get("pinned")
+        seen["tiered"] = kwargs.get("tiered")
+        seen["batch"] = [u.unit_id for u in batch]
+        return FindingCollection.model_validate(old), [], []
+
+    monkeypatch.setattr(resume_mod, "run_review", fake_run)
+    resume_review(repo, RUN, registry=pool, progress=lambda _m: None)
+
+    assert seen["pinned"] == ["strong"], "the original pin, not the scanner, holds the seat"
+    assert seen["tiered"] is True
+    assert seen["batch"] == ["u2"]
+
+
+def test_calls_json_is_the_last_ledger_written(repo, registry, monkeypatch):
+    """A crash between files must leave the coverage ledger behind the findings."""
+    _seed_run(repo, [_unit("u1")], [], _old_collection([], []))
+    _patch_config(monkeypatch)
+    written: list[str] = []
+    real_write = resume_mod.atomic_write_text
+
+    def recording_write(path: Path, text: str) -> None:
+        written.append(path.name)
+        real_write(path, text)
+
+    monkeypatch.setattr(resume_mod, "atomic_write_text", recording_write)
+
+    async def fake_run(registry_arg, mode, batch, repo_root, run_id, **kwargs):
+        return (
+            FindingCollection.model_validate(_old_collection([], [])),
+            [{"model": "gpt-a", "unit_id": "u1"}, {"model": "gpt-b", "unit_id": "u1"}],
+            [],
+        )
+
+    monkeypatch.setattr(resume_mod, "run_review", fake_run)
+    resume_review(repo, RUN, registry=registry, progress=lambda _m: None)
+
+    assert "findings.json" in written
+    assert written[-1] == "calls.json", "calls.json is the coverage commit marker"

@@ -74,8 +74,32 @@ def _load_json(run_dir: Path, name: str):
 # the old ledger and overwrite the merged one — the later writer silently
 # discards the earlier batch's calls and findings. The lock file is crash-safe:
 # it carries the owner pid and mtime, so a stale lock from a dead process is
-# stolen after a grace period instead of blocking forever.
+# stolen quickly instead of blocking forever. A lock whose owner is still alive
+# is NEVER stolen on age alone: a long batch (1128 units / multi-hour token
+# window) would otherwise be entered twice and its paid results overwritten.
 RESUME_LOCK_STALE_S = 3600
+RESUME_LOCK_DEAD_GRACE_S = 2.0
+
+
+def _owner_alive(pid: int) -> bool:
+    """Check the recorded pid before treating a lock as abandoned.
+
+    Windows has no portable "signal 0" probe; there the mtime fallback below
+    is the only option and a dead owner's lock clears after the stale window.
+    """
+    if os.name == "nt":
+        return True
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # another user's live process
+    except OSError:
+        return False
+    return True
 
 
 def _run_lock(run_dir: Path) -> Path:
@@ -90,7 +114,15 @@ def _run_lock(run_dir: Path) -> Path:
         except FileExistsError:
             try:
                 age = time.time() - lock.stat().st_mtime
-                if age > RESUME_LOCK_STALE_S:
+                try:
+                    owner = int(lock.read_text(encoding="ascii").strip())
+                except (OSError, ValueError):
+                    owner = -1
+                if owner <= 0 or os.name == "nt":
+                    abandoned = age > RESUME_LOCK_STALE_S
+                else:
+                    abandoned = age > RESUME_LOCK_DEAD_GRACE_S and not _owner_alive(owner)
+                if abandoned:
                     lock.unlink(missing_ok=True)
                     continue
             except OSError:
@@ -243,25 +275,31 @@ def resume_review(
 
     repo_root = repo_root.resolve()
     run_dir = _run_dir(repo_root, run_id)
-    old_dump = _load_json(run_dir, "findings.json")
-    if not old_dump:
+    if not run_dir.is_dir():
         raise LookupError(t("resume.no_report", run_id=run_id))
-    old_collection = FindingCollection.model_validate(old_dump)
-    reviewer_models = old_collection.reviewer_models or []
-    if not reviewer_models:
-        raise ConfigError(t("resume.no_seats"))
-    mode = old_collection.mode or "quick"
-    meta = _load_json(run_dir, "run_meta.json") or {}
-
-    plan = plan_resume(repo_root, run_id, more=more, paths=paths)
-    queue = [ReviewUnit.model_validate(u) for u in _load_json(run_dir, "units.json") or []]
-    batch_ids = set(plan["batch_unit_ids"])
-    batch = [u for u in prioritize(queue) if u.unit_id in batch_ids]
-    if not batch:
-        raise LookupError(t("resume.nothing_left", run_id=run_id))
-
+    # Take the run lock BEFORE reading any ledger. A second sitting that queues
+    # here must plan from the first sitting's merged artifacts; planning from
+    # the snapshot it read while waiting would re-review the same units and
+    # write back stale findings after calls.json already marked them covered.
     lock = _run_lock(run_dir)
     try:
+        old_dump = _load_json(run_dir, "findings.json")
+        if not old_dump:
+            raise LookupError(t("resume.no_report", run_id=run_id))
+        old_collection = FindingCollection.model_validate(old_dump)
+        reviewer_models = old_collection.reviewer_models or []
+        if not reviewer_models:
+            raise ConfigError(t("resume.no_seats"))
+        mode = old_collection.mode or "quick"
+        meta = _load_json(run_dir, "run_meta.json") or {}
+
+        plan = plan_resume(repo_root, run_id, more=more, paths=paths)
+        queue = [ReviewUnit.model_validate(u) for u in _load_json(run_dir, "units.json") or []]
+        batch_ids = set(plan["batch_unit_ids"])
+        batch = [u for u in prioritize(queue) if u.unit_id in batch_ids]
+        if not batch:
+            raise LookupError(t("resume.nothing_left", run_id=run_id))
+
         # Seats come from the run's own record, resolved against the *current*
         # config (which holds the base URLs / keys). A model id dropped from the
         # config is a hard error, never a silent substitution.
@@ -489,12 +527,10 @@ def resume_review(
 
         ts = datetime.now(UTC).isoformat(timespec="seconds")
         markdown = render_markdown(merged, ts)
-        # Atomic writes: a crash mid-write must not leave calls.json updated
-        # while findings.json is stale — the next resume would treat units as
-        # covered (via calls.json) whose findings are gone.
-        atomic_write_text(
-            run_dir / "calls.json", json.dumps(merged_calls, ensure_ascii=False, indent=2)
-        )
+        # Atomic writes with calls.json LAST: it is the coverage ledger, so a
+        # crash between files must leave it behind findings.json. Then the next
+        # resume re-reviews (wasted tokens) instead of skipping units whose
+        # findings never landed (permanent, silent loss).
         atomic_write_text(
             run_dir / "findings.json",
             json.dumps(merged.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -516,6 +552,10 @@ def resume_review(
         if out is not None:
             out_path = out if out.is_absolute() else repo_root / out
             atomic_write_text(out_path, markdown)
+
+        atomic_write_text(
+            run_dir / "calls.json", json.dumps(merged_calls, ensure_ascii=False, indent=2)
+        )
 
         store.save_run(merged, ts)
         store.save_comparison(merged, ts)
