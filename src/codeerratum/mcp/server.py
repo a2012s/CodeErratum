@@ -232,6 +232,42 @@ def _root(args: dict) -> Path:
     return find_repo_root(Path(candidate))
 
 
+def _as_bool(value: Any, default: bool) -> bool:
+    """Coerce a schema-declared boolean without trusting the client's typing.
+
+    ``"false"`` is a truthy string in Python; a client that sends JSON strings
+    for booleans would silently flip tiered/include_non_code to True.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes"):
+            return True
+        if lowered in ("false", "0", "no"):
+            return False
+    return default
+
+
+def _as_int(
+    value: Any, default: int, minimum: int | None = None, maximum: int | None = None
+) -> int:
+    """Coerce an integer argument and clamp it to the advertised schema range.
+
+    ``LIMIT -1`` in SQLite means "unbounded", so an unclamped negative limit
+    silently returned every row instead of the promised page.
+    """
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None:
+        number = max(minimum, number)
+    if maximum is not None:
+        number = min(maximum, number)
+    return number
+
+
 def _tool_review_diff(args: dict) -> dict:
     try:
         outcome = execute_review(
@@ -241,12 +277,16 @@ def _tool_review_diff(args: dict) -> dict:
             # Omission means auto, the same 60-unit gate the CLI and schema
             # promise; 0 still means "review everything". A hardcoded 10 here
             # silently reviewed a sixth of the diff through MCP only.
-            max_units=(int(args["max_units"]) if args.get("max_units") is not None else None),
+            max_units=(
+                _as_int(args["max_units"], 0, minimum=0, maximum=500)
+                if args.get("max_units") is not None
+                else None
+            ),
             house_rules=str(args.get("house_rules") or ""),
             author_model=str(args.get("author_model") or "") or None,
             paths=str(args.get("paths") or ""),
-            tiered=bool(args["tiered"]) if "tiered" in args else True,
-            include_non_code=bool(args.get("include_non_code", False)),
+            tiered=_as_bool(args.get("tiered"), True),
+            include_non_code=_as_bool(args.get("include_non_code"), False),
         )
     except NoChanges as exc:
         return _text(f"没有可审查的变更：{exc}")
@@ -260,7 +300,8 @@ def _tool_review_diff(args: dict) -> dict:
 
 
 def _tool_list_runs(args: dict) -> dict:
-    rows = store_for(_root(args)).list_runs(limit=int(args.get("limit") or 20))
+    limit = _as_int(args.get("limit"), 20, minimum=1, maximum=200)
+    rows = store_for(_root(args)).list_runs(limit=limit)
     if not rows:
         return _text("还没有运行记录。")
     return _text(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -440,13 +481,21 @@ def handle(request: dict) -> dict | None:
     if method == "tools/list":
         return _ok(request_id, {"tools": TOOLS})
     if method == "tools/call":
-        params = request.get("params") or {}
-        name = params.get("name")
-        handler = _HANDLERS.get(name)
-        if handler is None:
-            return _fail(request_id, -32602, f"unknown tool: {name}")
+        # params extraction lives inside the try: a client that sends
+        # params as a string/list must yield a protocol error, not an
+        # AttributeError that kills the whole stdio session.
         try:
-            return _ok(request_id, handler(params.get("arguments") or {}))
+            params = request.get("params") or {}
+            if not isinstance(params, dict):
+                return _fail(request_id, -32602, "params must be an object")
+            name = params.get("name")
+            handler = _HANDLERS.get(name)
+            if handler is None:
+                return _fail(request_id, -32602, f"unknown tool: {name}")
+            arguments = params.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                return _fail(request_id, -32602, "arguments must be an object")
+            return _ok(request_id, handler(arguments))
         except Exception as exc:  # noqa: BLE001 - a tool crash must not end the session
             return _ok(request_id, _error(f"{type(exc).__name__}: {exc}"))
 

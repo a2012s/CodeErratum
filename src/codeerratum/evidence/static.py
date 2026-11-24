@@ -17,6 +17,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..i18n import t
+
 _CACHE: dict[tuple[str, int, int], list[StaticDiag]] = {}
 _CACHE_LIMIT = 256
 
@@ -125,8 +127,11 @@ def collect_static(file: str, cwd) -> list[StaticDiag]:
     if cached is not None:
         return list(cached)
     diags = run_ruff(str(file), cwd) + run_mypy(str(file), cwd)
-    if len(_CACHE) > _CACHE_LIMIT:
-        _CACHE.clear()
+    # Trim the oldest half instead of clearing everything: a clear() on a big
+    # review reset the hit rate to zero and re-ran hundreds of mypy subprocesses.
+    if len(_CACHE) >= _CACHE_LIMIT:
+        for stale in list(_CACHE)[: _CACHE_LIMIT // 2]:
+            del _CACHE[stale]
     _CACHE[key] = diags
     return list(diags)
 
@@ -135,12 +140,10 @@ def known_facts_block(diags: list[StaticDiag]) -> str:
     """Render diagnostics as a prompt block telling the model what is already known."""
     if not diags:
         return ""
-    lines = [
-        "# 已知静态工具诊断（已由 ruff/mypy 检出，禁止重复报告为你的发现）",
-        "以下问题是已知事实。除非你能指出静态工具漏掉的更深层的语义 bug，",
-        "否则不要把它们列为 finding。你可以引用它们作为证据。",
-        "",
-    ]
+    # The header follows the run's output language: a block of Chinese
+    # instructions inside an English prompt contradicts the language directive
+    # and nudges the model to answer in the wrong language.
+    lines = [t("evidence.known_facts"), ""]
     for d in sorted(diags, key=lambda d: d.line)[:20]:
         lines.append(f"- {d.file}:{d.line} [{d.tool}:{d.code}] {d.message}")
     return "\n".join(lines)

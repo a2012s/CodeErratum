@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import bisect
 import os
 import re
 import subprocess
@@ -19,6 +20,11 @@ from ..repo_ignore import STATE_DIR as STATE_DIR_NAME
 # untracked file never enters `git diff`, whatever the base is.
 EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+# A git invocation that outlives this is stuck (a hung fsck, a global hook, a
+# dead network mount) — abort it instead of blocking the pipeline forever.
+# snapshot_diff has its own, larger budget because it walks the whole tree.
+GIT_TIMEOUT_S = 120
+
 DIFF_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+)$")
 HUNK_HEADER = re.compile(
     r"^@@ -(?P<old>\d+)(?:,(?P<old_n>\d+))? \+(?P<new>\d+)(?:,(?P<new_n>\d+))? @@"
@@ -27,6 +33,26 @@ HUNK_HEADER = re.compile(
 
 class DiffError(RuntimeError):
     """Raised when git cannot produce the requested diff."""
+
+
+def _run_git(
+    cmd: list[str], repo_root: Path, *, binary: bool = False, timeout: int = GIT_TIMEOUT_S
+) -> subprocess.CompletedProcess | None:
+    """Run git with a hard timeout; ``None`` means it hung and was killed."""
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=repo_root,
+            capture_output=True,
+            text=not binary,
+            errors=None if binary else "replace",
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    except OSError:
+        return None
 
 
 def normalize_pathspec(paths: str) -> str:
@@ -67,14 +93,9 @@ def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
     cmd = ["git", "diff", "--no-color", "--unified=3", "--end-of-options", spec]
     if pathspec:
         cmd += ["--", *pathspec.split()]
-    result = subprocess.run(
-        cmd,
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
+    result = _run_git(cmd, repo_root)
+    if result is None:
+        raise DiffError(t("git.timeout", seconds=GIT_TIMEOUT_S, cmd=" ".join(cmd)))
     if result.returncode != 0:
         detail = result.stderr.strip() or f"git diff {spec} failed"
         if "ambiguous argument" in detail:
@@ -99,14 +120,8 @@ def has_commits(repo_root: Path) -> bool:
     ``git rev-parse HEAD`` still fails. The distinction decides which remedy to
     print, so it is checked rather than guessed from the spec.
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", "HEAD"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0
+    result = _run_git(["git", "rev-parse", "--verify", "--quiet", "HEAD"], repo_root)
+    return result is not None and result.returncode == 0
 
 
 def is_git_repo(repo_root: Path) -> bool:
@@ -115,14 +130,8 @@ def is_git_repo(repo_root: Path) -> bool:
     Asks git rather than testing ``.git``: a subdirectory of a repository has no
     ``.git`` of its own but is still inside one.
     """
-    result = subprocess.run(
-        ["git", "rev-parse", "--git-dir"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0
+    result = _run_git(["git", "rev-parse", "--git-dir"], repo_root)
+    return result is not None and result.returncode == 0
 
 
 def wants_full_worktree(spec: str, repo_root: Path) -> bool:
@@ -249,14 +258,8 @@ def snapshot_diff(repo_root: Path, paths: str = "") -> str:
 
 
 def get_commit(repo_root: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else "unknown"
+    result = _run_git(["git", "rev-parse", "HEAD"], repo_root)
+    return result.stdout.strip() if result is not None and result.returncode == 0 else "unknown"
 
 
 def new_side_sources(spec: str, repo_root: Path, paths: str = "") -> dict[str, str]:
@@ -279,11 +282,14 @@ def new_side_sources(spec: str, repo_root: Path, paths: str = "") -> dict[str, s
     cmd = ["git", "diff", "--raw", "-z", "--no-color", "--end-of-options", spec]
     if pathspec:
         cmd += ["--", *pathspec.split()]
-    result = subprocess.run(cmd, cwd=repo_root, capture_output=True)
+    result = _run_git(cmd, repo_root, binary=True)
+    if result is None:
+        raise DiffError(t("git.timeout", seconds=GIT_TIMEOUT_S, cmd=" ".join(cmd)))
     if result.returncode != 0:
-        raise DiffError(result.stderr.decode(errors="replace").strip() or "git diff failed")
+        stderr = (result.stderr or b"").decode(errors="replace").strip()
+        raise DiffError(stderr or "git diff failed")
 
-    sources: dict[str, str] = {}
+    wanted: list[tuple[str, str]] = []  # (path, new_sha)
     tokens = result.stdout.split(b"\0")
     index = 0
     while index < len(tokens):
@@ -303,11 +309,57 @@ def new_side_sources(spec: str, repo_root: Path, paths: str = "") -> dict[str, s
             index += 1
         if status[:1] == "D" or not new_sha.strip("0"):
             continue
-        blob = subprocess.run(
-            ["git", "cat-file", "blob", new_sha], cwd=repo_root, capture_output=True
+        wanted.append((path, new_sha))
+    return _read_blobs(wanted, repo_root)
+
+
+def _read_blobs(wanted: list[tuple[str, str]], repo_root: Path) -> dict[str, str]:
+    """Read many blobs in one ``git cat-file --batch`` invocation.
+
+    One subprocess per file meant hundreds of process spawns on a large diff —
+    and, before the timeout landed, hundreds of places to hang. The batch
+    protocol streams every blob in a single process; a missing sha comes back
+    as a ``missing`` header instead of a nonzero exit.
+    """
+    sources: dict[str, str] = {}
+    if not wanted:
+        return sources
+    stdin = ("\n".join(sha for _path, sha in wanted) + "\n").encode()
+    try:
+        proc = subprocess.run(
+            ["git", "cat-file", "--batch"],
+            cwd=repo_root,
+            input=stdin,
+            capture_output=True,
+            check=False,
+            timeout=GIT_TIMEOUT_S,
         )
-        if blob.returncode == 0:
-            sources[path] = blob.stdout.decode("utf-8", errors="replace")
+    except (subprocess.TimeoutExpired, OSError):
+        return sources  # degraded context: split_diff falls back to the worktree
+    if proc.returncode != 0:
+        return sources
+    stream = proc.stdout
+    blobs: list[tuple[str, bytes]] = []
+    pos = 0
+    while pos < len(stream):
+        nl = stream.find(b"\n", pos)
+        if nl < 0:
+            break
+        header = stream[pos:nl].split()
+        if len(header) < 2 or header[1] != b"blob":
+            # "<sha> missing" or a malformed line: skip just this record.
+            pos = nl + 1
+            continue
+        size = int(header[2])
+        start = nl + 1
+        blobs.append((header[0].decode(), stream[start : start + size]))
+        pos = start + size + 1  # trailing newline after the payload
+    for path, sha in wanted:
+        # git echoes each object's FULL name in the header, but `git diff --raw`
+        # hands us core.abbrev-length shas — match by prefix, not equality.
+        data = next((payload for full_sha, payload in blobs if full_sha.startswith(sha)), None)
+        if data is not None:
+            sources[path] = data.decode("utf-8", errors="replace")
     return sources
 
 
@@ -401,14 +453,17 @@ def _build_symbol_index(source: str) -> list[tuple[int, int, str, str]]:
 
 
 def _symbol_for_line(index: list[tuple[int, int, str, str]], line: int) -> tuple[str, str]:
-    best: tuple[int, str, str] | None = None
-    for start, end, name, kind in index:
+    """Smallest symbol span containing ``line`` (index is sorted by start line).
+
+    Top-level declarations nest (a method inside its class), so the nearest
+    preceding start whose span still contains the line is the smallest
+    containing span — which is why a backwards scan from the bisect position
+    stops at the first hit instead of walking the whole index.
+    """
+    pos = bisect.bisect_right(index, line, key=lambda item: item[0])
+    for start, end, name, kind in reversed(index[:pos]):
         if start <= line <= end:
-            span = end - start
-            if best is None or span < best[0]:
-                best = (span, name, kind)
-    if best:
-        return best[1], best[2]
+            return name, kind
     return "<module>", "module"
 
 
@@ -695,7 +750,8 @@ def split_diff(
         source = (
             blob if blob is not None else source_path.read_text(encoding="utf-8", errors="replace")
         )
-        if hunks and not all(_hunk_matches_source(h, source.splitlines()) for h in hunks):
+        source_lines = source.splitlines()
+        if hunks and not all(_hunk_matches_source(h, source_lines) for h in hunks):
             if notices is not None:
                 notices.append(
                     f"skipped {file} (file contents do not match the diff revision; "

@@ -217,6 +217,13 @@ _ACCEPTED = (
     "属实",
     "已采纳",
     "采纳",
+    # "已复现" is the highest evidence grade the report itself hands the
+    # executor (VERIFICATION_LABEL); leaving it out of the vocabulary made
+    # exactly those rows read as "needs a human" and silently vanish from the
+    # acceptance stats.
+    "已复现",
+    "复现成功",
+    "reproduced",
     "partially fixed",
     "partial",
     "fixed",
@@ -257,13 +264,11 @@ _NEG_PREFIXES = (
     "待",
     "尚",
     "非",
-    "not ",
-    "n't ",
-    "no ",
-    "non",
-    "un",
-    "pending ",
 )
+# English negation prefixes need a word boundary: plain endswith("un") read
+# "...tests run" (and "begun", "rerun") as a negation of the verdict that
+# follows, silently dropping real acceptances.
+_EN_PREFIX_RE = re.compile(r"(?:^|[\s\"'\(\[-])(?:not|no|non|un|pending|n't)[\s-]*$", re.IGNORECASE)
 
 # Qualifiers that follow a positive verdict. "已修复"/"fixed" alone is evidence
 # of acceptance, but "部分修复但仍有问题" and "fixed without full verification"
@@ -485,13 +490,27 @@ def _negated_at(text: str, pos: int) -> bool:
     clause = before[breaks[-1].end() :] if breaks else before
     if any(clause.endswith(prefix) for prefix in _NEG_PREFIXES):
         return True
+    if _EN_PREFIX_RE.search(clause):
+        return True
     return bool(_EN_NEGATION_RE.search(clause))
+
+
+def _word_pattern(word: str) -> str:
+    """Whole-word regex for ASCII vocabulary; substring for Chinese.
+
+    Chinese verdicts are compositional without separators ("未通过" contains
+    "通过"), so substring matching is required there. English words glued into
+    longer tokens must not match, or "bypassed" counts as a "pass".
+    """
+    if word.isascii():
+        return r"(?<![A-Za-z])" + re.escape(word) + r"(?![A-Za-z])"
+    return re.escape(word)
 
 
 def _has_rejected_word(text: str) -> bool:
     """True when a rejection phrase is present without its own negation."""
     for word in _REJECTED:
-        for match in re.finditer(re.escape(word), text):
+        for match in re.finditer(_word_pattern(word), text):
             if not _negated_at(text, match.start()):
                 return True
     return False
@@ -504,7 +523,7 @@ def _has_accepted_word(text: str) -> bool:
     because a different accepted word appears somewhere else in the cell.
     """
     for word in _ACCEPTED:
-        for match in re.finditer(re.escape(word), text):
+        for match in re.finditer(_word_pattern(word), text):
             if not _negated_at(text, match.start()):
                 return True
     return False

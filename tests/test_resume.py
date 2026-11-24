@@ -203,7 +203,19 @@ def test_resume_merges_batches_and_drops_stale_failures(repo, registry, monkeypa
         seen["batch"] = [u.unit_id for u in batch]
         seen["pinned"] = kwargs.get("pinned")
         seen["run_id"] = run_id
-        return new_collection, [{"model": "gpt-a", "unit_id": "u3"}], []
+        # Dual mode: every reviewer records a call for every unit it finished.
+        # units_done counts only units covered by ALL reviewers, so the fake
+        # must carry both seats' entries.
+        return (
+            new_collection,
+            [
+                {"model": "gpt-a", "unit_id": "u3"},
+                {"model": "gpt-a", "unit_id": "u4"},
+                {"model": "gpt-b", "unit_id": "u3"},
+                {"model": "gpt-b", "unit_id": "u4"},
+            ],
+            [],
+        )
 
     monkeypatch.setattr(resume_mod, "run_review", fake_run)
 
@@ -231,11 +243,13 @@ def test_resume_merges_batches_and_drops_stale_failures(repo, registry, monkeypa
     assert merged.comparison["parse"]["repaired"] == 1
 
     # artifacts rewritten in place, findings.json now the merged collection
-    dump = json.loads((repo / ".codeerratum" / "runs" / RUN / "findings.json").read_text())
+    dump = json.loads(
+        (repo / ".codeerratum" / "runs" / RUN / "findings.json").read_text(encoding="utf-8")
+    )
     assert len(dump["findings"]) == 3
     assert dump["comparison"]["resumed"]["batches"] == 2
     # review.md renders the merged set (3 findings, one per row)
-    md = (repo / ".codeerratum" / "runs" / RUN / "review.md").read_text()
+    md = (repo / ".codeerratum" / "runs" / RUN / "review.md").read_text(encoding="utf-8")
     assert "旧发现" in md and "新发现" in md
 
 

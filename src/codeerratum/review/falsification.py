@@ -17,6 +17,23 @@ from .executor import language_directive
 
 PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "falsify.md"
 
+_FALSIFY_CACHE: dict[Path, tuple[int, str]] = {}
+
+
+def _falsify_prompt() -> str:
+    """The falsify prompt template, cached per path and invalidated on mtime.
+
+    Re-reading per finding cost one file IO for every falsified claim; tests
+    that swap the file's contents still see the new text via mtime invalidation.
+    """
+    stat = PROMPT_PATH.stat()
+    entry = _FALSIFY_CACHE.get(PROMPT_PATH)
+    if entry is None or entry[0] != stat.st_mtime_ns:
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        _FALSIFY_CACHE[PROMPT_PATH] = (stat.st_mtime_ns, text)
+        return text
+    return entry[1]
+
 
 class LLMFalsify(BaseModel):
     verdict: str = Field(description="Exactly one of: refuted, confirmed, insufficient_context")
@@ -53,7 +70,7 @@ def build_falsify_messages(
     finding: Finding, context: str, known_facts: str, output_lang: str = ""
 ) -> list[dict[str, str]]:
     anchor = finding.anchors[0]
-    prompt = PROMPT_PATH.read_text(encoding="utf-8").format(
+    prompt = _falsify_prompt().format(
         category=finding.category.value,
         claim=finding.claim,
         detail=finding.detail,

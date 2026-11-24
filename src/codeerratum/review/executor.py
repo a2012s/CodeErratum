@@ -119,6 +119,26 @@ def truncate_house_rules(text: str, limit: int = MAX_HOUSE_RULES_CHARS) -> tuple
     return text[:limit].rstrip() + "\n… (truncated)", True
 
 
+_PROMPT_CACHE: dict[Path, tuple[int, str]] = {}
+
+
+def _base_prompt() -> str:
+    """The prompt file, cached per path and invalidated on mtime change.
+
+    Every unit × model re-read and re-partitioned the same file; caching it
+    saves hundreds of file reads on a large review. Keyed on mtime so tests
+    that swap the file's contents (and a user editing prompts between runs in
+    a long-lived server) still see the new text.
+    """
+    stat = PROMPT_PATH.stat()
+    entry = _PROMPT_CACHE.get(PROMPT_PATH)
+    if entry is None or entry[0] != stat.st_mtime_ns:
+        text = PROMPT_PATH.read_text(encoding="utf-8")
+        _PROMPT_CACHE[PROMPT_PATH] = (stat.st_mtime_ns, text)
+        return text
+    return entry[1]
+
+
 def load_prompt(house_rules: str = "", output_lang: str = "") -> str:
     """Base prompt, with the owner's additions spliced in before the Output section.
 
@@ -126,7 +146,7 @@ def load_prompt(house_rules: str = "", output_lang: str = "") -> str:
     house rules block can never override it because both are spliced from code,
     not from user text.
     """
-    base = PROMPT_PATH.read_text(encoding="utf-8")
+    base = _base_prompt()
     head, marker, tail = base.partition(HOUSE_RULES_MARKER)
     if not marker:
         raise RuntimeError(

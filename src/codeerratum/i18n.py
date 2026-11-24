@@ -44,6 +44,16 @@ def get_lang() -> str:
 
 
 def set_lang(value: str | None) -> str:
+    """Set the thread-local language; ``None`` falls back to ``CODEERRATUM_LANG``.
+
+    Hard-setting "zh" when a request carries no language header used to defeat
+    the environment default: a headless caller that started the server with
+    ``CODEERRATUM_LANG=en`` got Chinese responses for every request that did
+    not send ``X-Lang``.
+    """
+    if value is None:
+        _current.set(None)  # back to the env-seeded default
+        return get_lang()
     lang = normalize_lang(value)
     _current.set(lang)
     return lang
@@ -121,6 +131,12 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "server.dropped_name_invalid": ("拖入的文件夹名无效", "That dropped folder name is unusable"),
     "server.open_unknown": ("系统返回失败", "the system reported no detail"),
+    "server.key_url_mismatch": (
+        "拒绝探测：保存的 API key 只能用于它保存时的端点 {saved_url}；"
+        "要测试 {url} 请粘贴该端点的 key。",
+        "Probe refused: the stored API key may only be tested against its saved "
+        "endpoint {saved_url}; paste that endpoint's key to test {url}.",
+    ),
     # ---- server: no project selected (desktop/bare launch) ----
     "server.no_project": (
         "还没有添加项目：先在总览页添加一个 git 仓库",
@@ -280,6 +296,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "project probably has no .gitignore, so .venv / node_modules / dist were "
         "being walked; add one and retry.",
     ),
+    "git.timeout": (
+        "git 命令超过 {seconds} 秒未返回，已中止：{cmd}",
+        "git did not return within {seconds}s and was aborted: {cmd}",
+    ),
     # ---- pipeline notices ----
     "pipeline.no_commits_snapshot": (
         "仓库还没有提交，已改为审查全部工作区文件（遵循 .gitignore，跳过 .codeerratum）",
@@ -376,6 +396,15 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "resume.models_missing": (
         "当前配置里找不到原运行使用的模型：{models}，无法保证席位一致，已取消续跑",
         "Models from the original run are missing from the config: {models} — resume aborted",
+    ),
+    "resume.corrupt_ledger": (
+        "运行产物 {name} 已损坏（{error}）：文件可能在上次运行中断时写了一半，无法续跑。",
+        "Run artifact {name} is corrupt ({error}): it was probably half-written when the "
+        "last run was interrupted; this run cannot be resumed.",
+    ),
+    "resume.locked": (
+        "该运行已有一次续跑在进行中（{path} 已被占用），请等它结束后再试。",
+        "A resume for this run is already in progress ({path} is held); retry when it finishes.",
     ),
     "resume.start": (
         "续跑：已完成 {done}/{total} 个单元，本批再审 {batch} 个（同席位，不重跑已完成单元）",
@@ -511,6 +540,17 @@ MESSAGES: dict[str, tuple[str, str]] = {
     "desk.parent_gone": (
         "启动本服务的进程已退出，服务随之停止",
         "The process that launched this server exited; stopping",
+    ),
+    # ---- evidence / prompts ----
+    "evidence.known_facts": (
+        "# 已知静态工具诊断（已由 ruff/mypy 检出，禁止重复报告为你的发现）\n"
+        "以下问题是已知事实。除非你能指出静态工具漏掉的更深层的语义 bug，\n"
+        "否则不要把它们列为 finding。你可以引用它们作为证据。",
+        "# Known static-tool diagnostics (already reported by ruff/mypy; do not "
+        "re-report them as your findings)\n"
+        "The issues below are known facts. Unless you can point to a deeper semantic "
+        "bug the static tools missed,\n"
+        "do not list them as findings. You may cite them as evidence.",
     ),
 }
 

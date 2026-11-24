@@ -65,7 +65,18 @@ def annotation_coverage(root: Path, scan: Path | None = None) -> float:
         except ValueError:
             rel_parts = path.parts
         if any(
-            part.startswith(".") or part in {"__pycache__", ".venv", "build", "dist"}
+            part.startswith(".")
+            or part
+            in {
+                "__pycache__",
+                ".venv",
+                "venv",
+                "build",
+                "dist",
+                "node_modules",
+                "site-packages",
+                ".tox",
+            }
             for part in rel_parts
         ):
             continue

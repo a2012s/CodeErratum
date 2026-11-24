@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
+import shutil
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -49,6 +51,18 @@ from .store import ReviewStore
 STATE_DIR = ".codeerratum"
 HOUSE_RULES_FILE = f"{STATE_DIR}/rules.md"
 VALID_MODES = ("quick", "dual", "committee")
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write a file via temp + os.replace so a crash can never leave half a file.
+
+    The run ledger (calls.json / findings.json) is read back by resume; a torn
+    write there poisons the coverage calculation and silently loses findings.
+    Windows os.replace is atomic within one volume, same as POSIX rename.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 class PipelineError(Exception):
@@ -216,7 +230,7 @@ NON_CODE_SUFFIXES = {
     ".yml",
     ".ini",
 }
-I18N_PATH_PARTS = ("/i18n/", "/locale", "/locales/", "/translations/", "/lang/")
+I18N_PATH_PARTS = ("/i18n/", "/locale/", "/locales/", "/translations/", "/lang/")
 
 
 def is_non_code_unit(unit: ReviewUnit) -> bool:
@@ -578,6 +592,9 @@ def execute_review(
         if note not in announced:
             say(note)
     if not units:
+        # No unit means nothing was ever persisted except the empty queue; an
+        # abandoned run directory would pollute the run list forever.
+        shutil.rmtree(run_dir, ignore_errors=True)
         raise NoChanges("No reviewable units found.")
 
     # A budget of 0 means "no budget": every unit the diff produced. The cap is
@@ -635,6 +652,12 @@ def execute_review(
         # still shortens the run inside review, but report writing always
         # completes.
         emit(t("pipeline.report_writing"))
+    except ReviewCancelled:
+        # ReviewCancelled only escapes when zero units finished, so the run
+        # directory holds no report — remove it instead of leaving an
+        # unresumable shell in the run list.
+        shutil.rmtree(run_dir, ignore_errors=True)
+        raise
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
 
@@ -728,34 +751,33 @@ def execute_review(
     collection.house_rules_chars = rules.chars
     collection.house_rules_source = rules.source
 
-    (run_dir / "calls.json").write_text(
-        json.dumps(calls, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (run_dir / "findings.json").write_text(
+    atomic_write_text(run_dir / "calls.json", json.dumps(calls, ensure_ascii=False, indent=2))
+    atomic_write_text(
+        run_dir / "findings.json",
         json.dumps(collection.model_dump(mode="json"), ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
-    (run_dir / "static_diags.json").write_text(
-        json.dumps(all_diags, ensure_ascii=False, indent=2), encoding="utf-8"
+    atomic_write_text(
+        run_dir / "static_diags.json",
+        json.dumps(all_diags, ensure_ascii=False, indent=2),
     )
     # A "parse success rate is a hard gate" claim that only exists in memory
     # cannot be audited. Persist both the counters and a bounded failure sample.
-    (run_dir / "parse_stats.json").write_text(
+    atomic_write_text(
+        run_dir / "parse_stats.json",
         json.dumps(collection.comparison.get("parse", {}), ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
-    (run_dir / "parse_failures.json").write_text(
+    atomic_write_text(
+        run_dir / "parse_failures.json",
         json.dumps(collection.comparison.get("parse_failures", []), ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
 
     ts = datetime.now(UTC).isoformat(timespec="seconds")
     markdown = render_markdown(collection, ts)
-    (run_dir / "review.md").write_text(markdown, encoding="utf-8")
+    atomic_write_text(run_dir / "review.md", markdown)
     out_path: Path | None = None
     if out is not None:
         out_path = out if out.is_absolute() else repo_root / out
-        out_path.write_text(markdown, encoding="utf-8")
+        atomic_write_text(out_path, markdown)
 
     store.save_run(collection, ts)
     store.save_comparison(collection, ts)

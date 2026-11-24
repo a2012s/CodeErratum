@@ -156,16 +156,19 @@ def collect(root: Path, src: Path | None = None) -> list[ModuleDoc]:
         raise NotADirectoryError(f"not a directory: {base}")
     modules: list[ModuleDoc] = []
     for path in sorted(base.rglob("*.py")):
+        # Skip build clutter BEFORE parsing: ast.parse on every .py under
+        # node_modules / .venv dominated docs_overview latency on real trees.
         try:
             rel_parts = path.relative_to(root).parts
-            doc = extract_module(path, root, base)
+            anchor, module_root = root, base
         except ValueError:
             # src passed as an absolute path outside the repo: key everything by the
             # scan base so the index stays stable.
             rel_parts = path.relative_to(base).parts
-            doc = extract_module(path, base, base)
+            anchor = module_root = base
         if any(part in SKIP_DIRS for part in rel_parts):
             continue
+        doc = extract_module(path, anchor, module_root)
         if doc is not None:
             modules.append(doc)
     return modules

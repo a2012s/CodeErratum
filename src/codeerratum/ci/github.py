@@ -233,9 +233,24 @@ def _request(
 
 
 def already_posted(pr: PullRequest, token: str, marker: str, api: str = API_ROOT) -> bool:
-    url = f"{api}/repos/{pr.slug}/issues/{pr.number}/comments?per_page=100"
-    comments = _request("GET", url, token)
-    return any(marker in (c.get("body") or "") for c in comments)
+    """Scan every comment page for this commit's marker.
+
+    One page of 100 was the whole scan: an active PR with more comments than
+    that made the idempotency check miss the marker and re-post the entire
+    review on the same commit. GitHub paginates via the Link header, which
+    ``_request`` does not surface, so walk the implicit ``page`` param until a
+    short page arrives.
+    """
+    base = f"{api}/repos/{pr.slug}/issues/{pr.number}/comments?per_page=100"
+    page = 1
+    while True:
+        url = base if page == 1 else f"{base}&page={page}"
+        comments = _request("GET", url, token)
+        if any(marker in (c.get("body") or "") for c in comments):
+            return True
+        if len(comments) < 100:
+            return False
+        page += 1
 
 
 def _inline_payloads(pr: PullRequest, inline: list[Finding]) -> list[dict]:

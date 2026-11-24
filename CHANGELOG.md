@@ -1,5 +1,122 @@
 # Changelog
 
+## [0.7.2] — 2026-11-24
+
+全量代码审查（review.md，基线 9909739）的修复批次：1 项 P0、11 项 P1 中的 9 项、
+一批低成本 P2。架构级条目（review_status 全量轮询增量协议、运行中崩溃的可续跑、
+请求体读超时、config 并发保存）保留待办，见文末。
+
+### Fixed — 数据完整性
+
+- **P0 产物账本原子写**：首跑与续跑写 `calls.json` / `findings.json` /
+  `static_diags.json` / `parse_stats.json` / `parse_failures.json` /
+  `review.md` 全部改为临时文件 + `os.replace`。此前崩溃半写会让下一次
+  resume 按新 calls.json 把丢了 findings 的单元判成"已完成"，发现永久丢失。
+- **P1 续跑跨进程文件锁**：`resume.lock`（O_CREAT|O_EXCL，带 pid 与过期
+  回收）串行化同一 run 的并发 sitting，消除"后写者覆盖先写者"的 lost update。
+- **P1 账本读取容错**：损坏的 JSON 账本以指名文件的清晰错误拒绝续跑，
+  不再裸抛 traceback。
+- **P2 resume 覆盖计数**：`units_done` 只累计本批真正被全部 reviewer 完成的
+  单元；provider_error 单元不再虚增进度。
+- **P2 续跑替换旧 finding 不再残留**：被本批替换且未被新报告复现的 finding
+  行按 run_id 定向删除，`stats()` / `get_finding()` 不再统计已废弃记录。
+
+### Fixed — 审查正确性
+
+- **P1 falsify 阶段阻塞事件循环**：`_context_for`（jedi 全项目引用 +
+  ruff/mypy 子进程，各 120s 超时）改为 `asyncio.to_thread`，与 review 阶段
+  一致。此前单次 mypy 就能把整个并发运行冻结数十秒。
+- **P2 verify/falsify 接入 partial sink**：停止落在 verify/falsify 阶段时，
+  已完成的调用（含 token 账单）与 refuted 丢弃镜像进部分报告，不再丢失。
+- **P2 verify 取消不再丢弃已完成结果**：`CancelledError` 处理改为先收完
+  其余已完成判定再进入部分报告路径。
+- **P2 falsify gather 补齐兄弟任务回收**：一个证伪协程取消后，其余仍在
+  gate 排队的付费调用一并取消，不再在后台继续烧 token。
+- **P1 resume 席位翻转**：改用 run_meta.json 里用户的原始 pin（旧运行回落
+  到记录的 reviewer），tiered quick 不再把原 scanner 错误晋升为 verifier；
+  `tiered` 对无 run_meta 的旧运行按 comparison 实测推断，不再一律默认 True；
+  resume 现在透传 author_model。
+- **P1 resume 规则与语言等价性**：新 sitting 以仓库 `rules.md` 与当前
+  `get_lang()` 运行（此前 house_rules="" / output_lang="" 却沿袭旧 sha，
+  报告虚报规则生效、语言混杂）。
+- **P2 pinned 路径 falsifier 按评分排序**，与未 pin 路径一致；registry 声明
+  顺序不再决定席位。
+- **P2 route_quick_tier 显式拒绝全被排除的 pinned**，与 `route()` 行为对齐。
+- **P2 token 计量**：schema 修复重试的第二次请求 usage 累加进总账（此前被
+  覆盖，恰好漏记最贵的双倍上下文路径）；`raw_request_hash` 按最终发出的
+  payload 计算，降级/修复路径可审计。
+- **P2 "已复现" 计入采纳**：`已复现` / `reproduced` 补进 _ACCEPTED 词表，
+  执行方按报告最高证据等级回填的行不再静默丢失。
+- **P2 英文否定前缀词边界**：`un` / `non` / `pending` 改用词边界正则，
+  "tests run" / "begun" 不再被误判为否定；英文正/负词匹配加词边界，
+  "bypassed" 不再命中 "pass"。
+
+### Fixed — 安全与健壮性
+
+- **P1 check_model 密钥转发限制**：`__KEEP__` 解析出的已存 API key 只允许
+  发往它保存时的 base_url，同 host 校验失败即拒绝探测，堵住密钥外泄原语。
+- **P1 resume SSE 信号量过度释放**：`_stream_resume` 只在真正获取执行槽位
+  后释放，排队中被取消不再虚增 BoundedSemaphore 计数、破坏其他项目的运行。
+- **P1 MCP 畸形请求不再杀会话**：`tools/call` 的 params/arguments 解析移入
+  try 块，非对象 params 回协议错误而非 AttributeError 终止 stdio 循环。
+- **P1 git 子进程全面加超时**（120s）：get_diff / rev-parse / cat-file 等
+  此前可无限挂起并卡死 MCP 单线程循环。
+- **P1 new_side_sources 改 `git cat-file --batch`**：大 diff 从每文件一次
+  进程创建改为单进程流式读取。
+- **P2 CLI accept/reject/compare/stats 异常兜底**：损坏/不可用的 feedback.db
+  报可读错误并 exit 1，不再向用户抛 traceback。
+- **P2 set_status 的 reason 写库前截断 1000 字符**，与 outcomes 路径对齐。
+- **P2 `_safe_error` 路径脱敏大小写/分隔符无关**，Windows 变体路径不再
+  泄入前端错误文本。
+- **P2 GitHub 幂等检测翻页**：活跃 PR 超 100 条评论后重跑不再整份重发。
+- **P2 `set_lang(None)` 回退 `CODEERRATUM_LANG`**，无 `X-Lang` 头的请求不再
+  被硬置为中文。
+- 审查项复核后**维持现状**：`reconcile --dry-run` 在有未匹配行时保持 exit 0
+  ——既有测试明确了"预演过期报告属合法"的设计意图，dry-run 是预演而非
+  失败信号，不按 review.md 的建议改。
+
+### Changed — 性能
+
+- **P2 提示词进程内缓存**：系统提示词与证伪提示词每进程读一次，不再
+  每 unit × 模型 / 每 finding 重读文件。
+- **P2 聚类分词记忆化**（lru_cache），文件桶内 O(n²) 配对不再重复分词。
+- **P2 `_symbol_for_line` 改二分**，大文件逐变更行线性扫描消除。
+- **P2 `_hunk_matches_source` 的 `splitlines()` 提出 hunk 循环**。
+- **P2 静态诊断缓存改裁剪最旧一半**，不再全清导致命中率周期归零。
+- **P2 `docs collect()` 的 SKIP_DIRS 过滤前置**，不再先 ast.parse 再丢弃。
+- **P2 `annotation_coverage` 目录过滤补齐** node_modules / venv /
+  site-packages / .tox。
+- **P2 I18N 路径匹配收紧**：`/locale` 改 `/locale/`，`locale_utils` 等代码
+  目录不再被误判为非代码跳过评审。
+- **P2 known_facts_block 提示词头部走 i18n**，英文运行不再混入中文指令。
+- **P2 "No reviewable units" 与无完成单元的取消清理 run 目录**，不再留垃圾
+  空壳在运行列表。
+- **P2 MCP 参数运行时校验**：布尔字符串矫正、max_units/limit 钳制到 schema
+  范围（负 limit 曾返回全表）。
+- **P2 `read_markdown` 快照 repo_root**，切仓竞态不再拼错项目路径。
+- **P2 store 的 profiles 写入并入 save_run 同一事务**，中途崩溃不再丢失
+  该 run 的画像样本。
+- **P3 `git` 布尔探测（has_commits / is_git_repo / get_commit）超时降级**。
+
+### 待办（本轮明确不做，均已在 review.md 记录）
+
+- `review_status` 全量轮询的增量/版本号协议（P1，需前后端同步改）。
+- 运行中崩溃的可续跑（P1，账本需随审查增量落盘，属架构改动）。
+- `_body()` 读超时（P2，socket 超时会误伤分钟级静默的 SSE 帧）。
+- config 并发保存丢更新、hub remove TOCTOU、hub `restore()` 批量写盘（P2/P3）。
+- store 重建 / config 重读 / docs AST 全扫的每请求缓存（P2，性能惯性）。
+
+### Tests
+
+全量 `pytest --basetemp=/tmp/ce_pytest`、`ruff check .`、`ruff format --check .`
+已跑。Windows 开发机上 521 passed / 9 failed——这 9 项与未修改的 0.7.1 基线
+逐一对齐（GBK 编码 ×2、CRLF ×3、POSIX 权限位 ×2、Windows 绝对路径语义 ×2），
+均为平台差异或既有问题；Linux CI 基线 530 passed 不受影响。本批实际净修复
+了基线上 Windows 的 `test_resume` GBK 失败（补 `encoding="utf-8"`）。
+
+`hub 隔离测试（test_project_api_is_isolated_per_slug）`在未修改基线上同样
+失败，属既有问题，不在本批范围。
+
 ## [0.7.1] — 2026-11-23
 
 ### Fixed

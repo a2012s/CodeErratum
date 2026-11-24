@@ -153,12 +153,12 @@ class ModelRegistry(BaseModel):
             taken = {m.model_id for m in reviewers}
             # The author ban covers every seat, not just reviewers. Selecting
             # the falsifier from self.models would let the author judge its own
-            # code from the other side of the table.
+            # code from the other side of the table. Ranked by the same score
+            # as the unpinned path: registry declaration order must not decide
+            # which model gets the seat.
+            ranked_available = sorted(self.available(author_model), key=lambda m: -m.score(lenses))
             falsifier = (
-                next(
-                    (m for m in self.available(author_model) if m.model_id not in taken),
-                    None,
-                )
+                next((m for m in ranked_available if m.model_id not in taken), None)
                 if n >= 2
                 else None
             )
@@ -210,6 +210,11 @@ class ModelRegistry(BaseModel):
         if unknown:
             raise ValueError(f"unknown model id(s): {', '.join(unknown)}")
         trusted = [by_id[mid] for mid in dict.fromkeys(pinned or []) if by_id[mid] in pool]
+        if pinned and not trusted:
+            # Same contract as route(): pinning only the author model is an
+            # error, never a silent substitution — here it used to quietly seat
+            # the strongest pool model as the verifier instead.
+            raise ValueError("all pinned model(s) are excluded as the author model")
 
         def lateness(m: ModelSpec) -> tuple[int, float, str]:
             # Model ids normally carry the speed class (flash/mini/lite/...).

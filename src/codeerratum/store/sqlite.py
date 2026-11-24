@@ -156,12 +156,16 @@ class ReviewStore:
                     "VALUES (?,?,?,?)",
                     (collection.run_id, reason, model, count),
                 )
-        # A stopped run has only the units that finished. Feeding those
-        # assertions into model_profile would teach routing from an unfinished
-        # sample ("no refutations" because the falsifier never ran), so the
-        # per-model record stays untouched.
-        if not collection.stopped:
-            self.update_profiles(collection)
+            # Profiles join the same transaction: a crash between the two
+            # commits used to leave findings recorded while the per-model
+            # record lost every sample from this run, with no way to re-derive
+            # them (save_run is the only writer).
+            # A stopped run has only the units that finished. Feeding those
+            # assertions into model_profile would teach routing from an
+            # unfinished sample ("no refutations" because the falsifier never
+            # ran), so the per-model record stays untouched.
+            if not collection.stopped:
+                self._update_profiles_conn(conn, collection)
 
     def save_comparison(self, collection: FindingCollection, created_at: str) -> None:
         """Phase-3: persist cross-model comparison data for the eval/resume narrative.
@@ -217,6 +221,29 @@ class ReviewStore:
             rows = conn.execute("SELECT * FROM model_profile ORDER BY n_assert DESC").fetchall()
             return [dict(r) for r in rows]
 
+    def delete_findings(self, finding_ids: list[str], run_id: str | None = None) -> int:
+        """Remove rows a merged report no longer contains (resume replaced them).
+
+        Scoped to ``run_id`` when given: a finding id is a content hash and can
+        be shared with other runs whose rows — and their human verdicts — must
+        survive. Callers must exclude ids the fresh report re-produced, because
+        save_run would re-insert them with status 'open' and lose the verdict.
+        """
+        if not finding_ids:
+            return 0
+        with self._conn() as conn:
+            placeholders = ",".join("?" * len(finding_ids))
+            if run_id is None:
+                cur = conn.execute(
+                    f"DELETE FROM findings WHERE id IN ({placeholders})", finding_ids
+                )
+            else:
+                cur = conn.execute(
+                    f"DELETE FROM findings WHERE id IN ({placeholders}) AND run_id = ?",
+                    [*finding_ids, run_id],
+                )
+            return cur.rowcount
+
     def update_profiles(self, collection: FindingCollection) -> None:
         """Accumulate the per-model record that later feeds routing.
 
@@ -237,32 +264,39 @@ class ReviewStore:
         counts that routing depends on.
         """
         with self._conn() as conn:
-            # Refuted findings are profile samples too. A model that claims a
-            # unique bug and gets falsified must pay the n_refuted price — if
-            # only survivors counted, precision would reward reporting volume.
-            # They are never written to `findings`, so no human verdict is
-            # created for a claim the falsifier already broke.
-            for f in [*collection.findings, *collection.refuted_findings]:
-                unique = f.agreement == "unique" and len(f.source_models) == 1
-                # One finding is one precision sample for each asserting model, no
-                # matter how many falsifiers weighed in. Refute wins ties so a
-                # disputed finding never inflates its author's precision.
-                roles = {v.role for v in f.verdicts}
-                outcome = "refute" if "refute" in roles else "confirm" if "confirm" in roles else ""
-                for model_id in f.source_models:
-                    if not model_id:
-                        continue
-                    if self._record_event(conn, collection.run_id, f.id, model_id, "assert"):
-                        self._bump_profile(conn, model_id, "n_assert")
-                    if unique and self._record_event(
-                        conn, collection.run_id, f.id, model_id, "unique"
-                    ):
-                        self._bump_profile(conn, model_id, "n_unique")
-                    if outcome and self._record_event(
-                        conn, collection.run_id, f.id, model_id, outcome
-                    ):
-                        column = "n_confirmed" if outcome == "confirm" else "n_refuted"
-                        self._bump_profile(conn, model_id, column)
+            self._update_profiles_conn(conn, collection)
+
+    def _update_profiles_conn(
+        self, conn: sqlite3.Connection, collection: FindingCollection
+    ) -> None:
+        """Profile accumulation on a caller-supplied connection.
+
+        Split out so ``save_run`` can include it in its own transaction (see
+        the comment there) while the standalone ``update_profiles`` keeps its
+        single-op connection discipline.
+        """
+        # Refuted findings are profile samples too. A model that claims a
+        # unique bug and gets falsified must pay the n_refuted price — if
+        # only survivors counted, precision would reward reporting volume.
+        # They are never written to `findings`, so no human verdict is
+        # created for a claim the falsifier already broke.
+        for f in [*collection.findings, *collection.refuted_findings]:
+            unique = f.agreement == "unique" and len(f.source_models) == 1
+            # One finding is one precision sample for each asserting model, no
+            # matter how many falsifiers weighed in. Refute wins ties so a
+            # disputed finding never inflates its author's precision.
+            roles = {v.role for v in f.verdicts}
+            outcome = "refute" if "refute" in roles else "confirm" if "confirm" in roles else ""
+            for model_id in f.source_models:
+                if not model_id:
+                    continue
+                if self._record_event(conn, collection.run_id, f.id, model_id, "assert"):
+                    self._bump_profile(conn, model_id, "n_assert")
+                if unique and self._record_event(conn, collection.run_id, f.id, model_id, "unique"):
+                    self._bump_profile(conn, model_id, "n_unique")
+                if outcome and self._record_event(conn, collection.run_id, f.id, model_id, outcome):
+                    column = "n_confirmed" if outcome == "confirm" else "n_refuted"
+                    self._bump_profile(conn, model_id, column)
 
     @staticmethod
     def _bump_profile(conn: sqlite3.Connection, model_id: str, column: str) -> None:

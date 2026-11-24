@@ -162,11 +162,19 @@ def pick_folder(title: str | None = None) -> Path:
 
 
 def _safe_error(exc: Exception, repo_root: Path) -> str:
-    """Show the real reason in the browser without leaking local filesystem paths."""
+    """Show the real reason in the browser without leaking local filesystem paths.
+
+    Matching is case-insensitive and separator-agnostic: on Windows the same
+    directory appears in exception text as ``D:\\x`` or ``d:/x`` depending on
+    where it came from, and a plain str.replace misses those variants.
+    """
     text = " ".join(str(exc).split())
-    for path in (str(repo_root), str(Path.home())):
-        if path:
-            text = text.replace(path, "<repo>" if path == str(repo_root) else "~")
+    for path, token in ((repo_root, "<repo>"), (Path.home(), "~")):
+        raw = str(path)
+        if not raw:
+            continue
+        pattern = re.escape(raw.replace("\\", "/"))
+        text = re.sub(pattern, token, text.replace("\\", "/"), flags=re.IGNORECASE)
     return text[:400] or type(exc).__name__
 
 
@@ -447,8 +455,15 @@ class WebApp:
         The row may be edited but not yet saved, so its typed key is what gets
         tested. ``__KEEP__`` means "keep the stored key" — resolve it first, or
         the probe would test with no key and report a false red cross.
+
+        The resolved stored key may only travel to the endpoint it is stored
+        for. Sending it to whatever ``base_url`` the request names would be a
+        key-exfiltration primitive (any same-origin page, or a forged request
+        once ``--host`` exposes the UI, could read the real key out of the
+        response timing/errors of an attacker-controlled endpoint).
         """
         api_key = str(payload.get("api_key") or "").strip()
+        requested_url = str(payload.get("base_url") or "").strip()
         if api_key == KEEP_SECRET:
             api_key = ""
             try:
@@ -459,12 +474,20 @@ class WebApp:
                 saved = None
             if saved:
                 model_id = str(payload.get("model_id") or "").strip()
-                api_key = next(
-                    (m.api_key for m in saved.registry.models if m.model_id == model_id), ""
-                )
+                stored = next((m for m in saved.registry.models if m.model_id == model_id), None)
+                if stored is not None:
+                    if requested_url.rstrip("/") != stored.base_url.rstrip("/"):
+                        raise PipelineError(
+                            t(
+                                "server.key_url_mismatch",
+                                url=requested_url or "(empty)",
+                                saved_url=stored.base_url,
+                            )
+                        )
+                    api_key = stored.api_key
         return probe_model(
             model_id=str(payload.get("model_id") or ""),
-            base_url=str(payload.get("base_url") or ""),
+            base_url=requested_url,
             api_key=api_key,
         )
 
@@ -606,7 +629,10 @@ class WebApp:
     def read_markdown(self, run_id: str) -> str:
         if not RUN_ID_RE.match(run_id):
             raise LookupError("invalid run id")
-        path = self.repo_root / STATE_DIR / "runs" / run_id / "review.md"
+        # Snapshot like get_run: switch_repo may repoint repo_root mid-request,
+        # and a run_id from project A must never resolve against project B.
+        repo_root = self.repo_root
+        path = repo_root / STATE_DIR / "runs" / run_id / "review.md"
         if not path.exists():
             raise LookupError("review.md not found for this run")
         return path.read_text(encoding="utf-8")
@@ -911,6 +937,9 @@ class WebApp:
             raise LookupError("invalid finding id")
         if status not in ("open", "accepted", "rejected"):
             raise ValueError("status must be open/accepted/rejected")
+        # Same cap as the outcomes path: a 2MB POST body must not be able to
+        # stuff a near-unbounded blob into feedback.db one row at a time.
+        reason = str(reason)[:1000]
         found = self.store.find_finding(finding_id)
         if not found:
             raise LookupError(f"no finding starts with {finding_id}")
@@ -1129,6 +1158,7 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                 self._error(HTTPStatus.CONFLICT, str(exc))
                 return
             final_status, final_tokens, final_error = "done", None, ""
+            slot_held = False
             try:
                 try:
                     self._sse_headers()
@@ -1136,6 +1166,7 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                     self._client_gone = True
                 self._sse_event("log", {"message": t("server.stream_connected")})
                 app._wait_for_slot()
+                slot_held = True
                 outcome = resume_review(
                     app.repo_root,
                     run_id,
@@ -1171,7 +1202,11 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                 )
                 self._sse_event("error", {"error": final_error})
             finally:
-                if app._gate is not None:
+                # Release only a slot we actually acquired: _wait_for_slot can
+                # raise ReviewCancelled while still queued, and releasing then
+                # would inflate a BoundedSemaphore and corrupt the hub's gate
+                # for every other project.
+                if slot_held and app._gate is not None:
                     app._gate.release()
                 app.release_review_lock(
                     status=final_status,

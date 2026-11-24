@@ -11,6 +11,7 @@ Design constraints (from internal tech doc §5):
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 from ..models.finding import Agreement, Finding, Verdict
 
@@ -23,8 +24,14 @@ SAME_LINE_CROSS_CATEGORY_THRESHOLD = 0.8
 _TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[\u4e00-\u9fff]")
 
 
-def _tokens(text: str) -> set[str]:
-    return set(_TOKEN_RE.findall(text.lower()))
+@lru_cache(maxsize=4096)
+def _tokens(text: str) -> frozenset[str]:
+    """Token set for one claim, cached.
+
+    Clustering re-compares the same claim O(n) times inside a file bucket;
+    re-tokenizing on every comparison was pure waste on large runs.
+    """
+    return frozenset(_TOKEN_RE.findall(text.lower()))
 
 
 def jaccard(a: str, b: str) -> float:

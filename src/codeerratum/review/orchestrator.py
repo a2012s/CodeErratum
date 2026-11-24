@@ -607,19 +607,26 @@ async def run_review(
                         *(verify_one(u) for u in verify_units), return_exceptions=True
                     )
                     verified: list[Finding] = []
+                    cancelled: asyncio.CancelledError | None = None
                     for unit, res in zip(verify_units, vresults, strict=True):
                         if isinstance(res, BaseException):
                             if isinstance(res, asyncio.CancelledError):
-                                raise ReviewCancelled(t("server.stopped_by_user")) from res
-                            all_calls.append(
-                                {
-                                    "model": verifier_spec.model_id,
-                                    "role": "verify",
-                                    "unit_id": unit.unit_id,
-                                    "verdict": "error",
-                                    "error": str(res),
-                                }
-                            )
+                                # Keep walking the remaining results: verdicts
+                                # that already finished were paid for and must
+                                # reach the partial report too. The raise below
+                                # (after the loop) turns this into a partial
+                                # collection via the outer handler.
+                                cancelled = res
+                                continue
+                            error_call = {
+                                "model": verifier_spec.model_id,
+                                "role": "verify",
+                                "unit_id": unit.unit_id,
+                                "verdict": "error",
+                                "error": str(res),
+                            }
+                            all_calls.append(error_call)
+                            partial.calls.append(error_call)
                             say(
                                 t(
                                     "orch.verify_failed",
@@ -632,30 +639,34 @@ async def run_review(
                             # Previously it only landed in calls.json
                             # (verdict=error), so `dropped_by_reason` and the
                             # report notes both under-counted.
-                            all_rejected.append(
-                                {
-                                    "unit_id": unit.unit_id,
-                                    "model": verifier_spec.model_id,
-                                    "reason": "verify_error",
-                                    "error": str(res),
-                                    "error_hint": _failure_text(res, verify_provider),
-                                }
-                            )
+                            rejection = {
+                                "unit_id": unit.unit_id,
+                                "model": verifier_spec.model_id,
+                                "reason": "verify_error",
+                                "error": str(res),
+                                "error_hint": _failure_text(res, verify_provider),
+                            }
+                            all_rejected.append(rejection)
+                            partial.rejected.append(rejection)
                             continue
                         vf, rej, completion, diags = res
                         all_rejected.extend(rej)
+                        partial.rejected.extend(rej)
                         all_diags.extend(diags)
-                        all_calls.append(
-                            {
-                                "model": verifier_spec.model_id,
-                                "family": verify_provider.family,
-                                "unit_id": unit.unit_id,
-                                "role": "verify",
-                                "latency_ms": completion.latency_ms,
-                                "usage": completion.usage.model_dump(),
-                            }
-                        )
+                        partial.diags.extend(diags)
+                        call = {
+                            "model": verifier_spec.model_id,
+                            "family": verify_provider.family,
+                            "unit_id": unit.unit_id,
+                            "role": "verify",
+                            "latency_ms": completion.latency_ms,
+                            "usage": completion.usage.model_dump(),
+                        }
+                        all_calls.append(call)
+                        partial.calls.append(call)
                         verified.extend(vf)
+                    if cancelled is not None:
+                        raise ReviewCancelled(t("server.stopped_by_user")) from cancelled
                     merged, extra = _merge_verification(
                         merged, verified, scanner_id, verifier_spec.model_id
                     )
@@ -725,8 +736,15 @@ async def run_review(
                 raise ReviewCancelled(t("server.stopped_by_user"))
             source_models = set(f.source_models)
             source_unit = units_by_id.get(f.unit_id)
+            # build_context runs a whole-project reference search and
+            # collect_static runs ruff+mypy subprocesses (each up to 120 s). On
+            # the event loop that froze every in-flight HTTP response and the
+            # stop watcher for the whole duration; the review phase already
+            # offloads the same two calls with to_thread.
             context, facts = (
-                _context_for(source_unit, repo_root, sources) if source_unit else ("", "")
+                await asyncio.to_thread(_context_for, source_unit, repo_root, sources)
+                if source_unit
+                else ("", "")
             )
             # Pick a falsifier that did not assert the finding; prefer the dedicated
             # spare model, otherwise a reviewer outside the finding's source models.
@@ -752,17 +770,19 @@ async def run_review(
                     )
                     active.add(falsify_task)
                     verdict, completion = await falsify_task
-                    all_calls.append(
-                        {
-                            "model": chosen_model,
-                            "family": chosen_provider.family,
-                            "unit_id": f.unit_id,
-                            "role": "falsify",
-                            "verdict": verdict.verdict,
-                            "latency_ms": completion.latency_ms,
-                            "usage": completion.usage.model_dump(),
-                        }
-                    )
+                    call = {
+                        "model": chosen_model,
+                        "family": chosen_provider.family,
+                        "unit_id": f.unit_id,
+                        "role": "falsify",
+                        "verdict": verdict.verdict,
+                        "latency_ms": completion.latency_ms,
+                        "usage": completion.usage.model_dump(),
+                    }
+                    all_calls.append(call)
+                    # Mirror into the partial sink so a stop landing in this
+                    # phase still reports the calls (and tokens) it consumed.
+                    partial.calls.append(call)
                     say(
                         t(
                             "orch.falsify_verdict",
@@ -772,14 +792,14 @@ async def run_review(
                         )
                     )
                 except Exception as exc:  # noqa: BLE001
-                    all_calls.append(
-                        {
-                            "model": chosen_model,
-                            "role": "falsify",
-                            "verdict": "error",
-                            "error": str(exc),
-                        }
-                    )
+                    error_call = {
+                        "model": chosen_model,
+                        "role": "falsify",
+                        "verdict": "error",
+                        "error": str(exc),
+                    }
+                    all_calls.append(error_call)
+                    partial.calls.append(error_call)
                     say(
                         t(
                             "orch.falsify_failed",
@@ -789,7 +809,18 @@ async def run_review(
                     )
 
         if targets:
-            await asyncio.gather(*(falsify_one(f) for f in targets))
+            # Same sibling-recovery contract as the review gather below: a
+            # propagated cancellation (or one falsify_one crashing) must not
+            # leave the remaining paid calls running in the background.
+            falsify_tasks = [asyncio.create_task(falsify_one(f)) for f in targets]
+            try:
+                await asyncio.gather(*falsify_tasks)
+            except BaseException:
+                for task in falsify_tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*falsify_tasks, return_exceptions=True)
+                raise
 
         # Recompute agreement after falsification and drop fully-refuted findings that
         # were only ever asserted by a single model (a unique claim that got broken).
@@ -807,17 +838,17 @@ async def run_review(
                 and not any(v.role == "confirm" for v in f.verdicts)
             ):
                 # single-source claim that the falsifier broke with a counterexample
-                all_rejected.append(
-                    {
-                        "unit_id": f.unit_id,
-                        "model": ",".join(f.source_models),
-                        "reason": "refuted",
-                        "claim": f.claim,
-                        "finding_id": f.id,
-                        "source_models": list(f.source_models),
-                        "verdicts": [v.model_dump(mode="json") for v in f.verdicts],
-                    }
-                )
+                rejection = {
+                    "unit_id": f.unit_id,
+                    "model": ",".join(f.source_models),
+                    "reason": "refuted",
+                    "claim": f.claim,
+                    "finding_id": f.id,
+                    "source_models": list(f.source_models),
+                    "verdicts": [v.model_dump(mode="json") for v in f.verdicts],
+                }
+                all_rejected.append(rejection)
+                partial.rejected.append(rejection)
                 # Keep the full finding for the profile writer: a broken unique
                 # claim is exactly the sample that distinguishes a careful model
                 # from one that only reports a lot. It must not enter `findings`,

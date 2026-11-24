@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import sqlite3
 import sys
 import threading
 import webbrowser
@@ -660,8 +661,12 @@ def desktop(
 @app.command()
 def accept(finding_prefix: str = typer.Argument(..., help="Finding id prefix to accept")) -> None:
     """Mark a finding as accepted (true positive)."""
-    store = _store(find_repo_root(Path(".")))
-    found = store.find_finding(finding_prefix)
+    try:
+        store = _store(find_repo_root(Path(".")))
+        found = store.find_finding(finding_prefix)
+    except (sqlite3.Error, OSError) as exc:
+        console.print(f"[red]feedback store unavailable: {exc}[/red]")
+        raise typer.Exit(1) from exc
     if not found:
         console.print(f"[red]No finding starts with {finding_prefix}[/red]")
         raise typer.Exit(1)
@@ -676,8 +681,12 @@ def reject(
     reason: str = typer.Option("", "--reason", "-r", help="Why it is a false positive"),
 ) -> None:
     """Mark a finding as rejected (false positive) with a reason."""
-    store = _store(find_repo_root(Path(".")))
-    found = store.find_finding(finding_prefix)
+    try:
+        store = _store(find_repo_root(Path(".")))
+        found = store.find_finding(finding_prefix)
+    except (sqlite3.Error, OSError) as exc:
+        console.print(f"[red]feedback store unavailable: {exc}[/red]")
+        raise typer.Exit(1) from exc
     if not found:
         console.print(f"[red]No finding starts with {finding_prefix}[/red]")
         raise typer.Exit(1)
@@ -731,6 +740,8 @@ def reconcile(
     for problem in parsed.problems[:10]:
         console.print(f"[yellow]- {problem}[/yellow]")
     if dry_run:
+        # Deliberate: a dry run is a preview, and "this report is stale" is a
+        # legal thing to preview, not a failure of the preview itself.
         console.print(f"[dim]{t('cli.reconcile_dry')}[/dim]")
     elif counts["updated"]:
         console.print(f"[green]{t('cli.reconcile_done', path=store.db_path)}[/green]")
@@ -745,9 +756,13 @@ def reconcile(
 @app.command()
 def compare() -> None:
     """Show cross-model comparison and per-model profile (phase-3 resume evidence)."""
-    store = _store(find_repo_root(Path(".")))
-    history = store.comparison_history()
-    profiles = store.model_profiles()
+    try:
+        store = _store(find_repo_root(Path(".")))
+        history = store.comparison_history()
+        profiles = store.model_profiles()
+    except (sqlite3.Error, OSError) as exc:
+        console.print(f"[red]feedback store unavailable: {exc}[/red]")
+        raise typer.Exit(1) from exc
 
     console.print("[bold]交叉审查对照记录[/bold]\n")
     if not history:
@@ -780,7 +795,11 @@ def compare() -> None:
 @app.command()
 def stats() -> None:
     """Show acceptance-rate stats — the resume-ready evidence produced by daily use."""
-    s = _store(find_repo_root(Path("."))).stats()
+    try:
+        s = _store(find_repo_root(Path("."))).stats()
+    except (sqlite3.Error, OSError) as exc:
+        console.print(f"[red]feedback store unavailable: {exc}[/red]")
+        raise typer.Exit(1) from exc
     console.print("[bold]CodeErratum 使用统计[/bold]\n")
     console.print(f"审查运行数：{s['runs']}")
     console.print(f"发现总数：{s['findings_total']}")

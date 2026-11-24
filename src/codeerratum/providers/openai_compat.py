@@ -220,7 +220,6 @@ class OpenAICompatProvider:
         js = schema_to_json_schema(schema) if schema else None
         payload = self._build_payload(model_id, messages, temperature, max_tokens, js)
 
-        rhash = request_hash(payload)
         raw_text = ""
         parsed: BaseModel | None = None
         usage = Usage()
@@ -245,10 +244,15 @@ class OpenAICompatProvider:
             raw_text = choice.get("message", {}).get("content", "") or ""
             finish_reason = choice.get("finish_reason", "stop")
             u = data.get("usage", {}) or {}
+            # Accumulate, don't overwrite: the repair retry is a real second
+            # request with its own bill (double-length context), and replacing
+            # the first attempt's usage under-counted exactly the most
+            # expensive path.
             usage = Usage(
-                input_tokens=u.get("prompt_tokens", 0),
-                output_tokens=u.get("completion_tokens", 0),
-                cached_tokens=(u.get("prompt_tokens_details") or {}).get("cached_tokens", 0),
+                input_tokens=usage.input_tokens + int(u.get("prompt_tokens", 0) or 0),
+                output_tokens=usage.output_tokens + int(u.get("completion_tokens", 0) or 0),
+                cached_tokens=usage.cached_tokens
+                + int((u.get("prompt_tokens_details") or {}).get("cached_tokens", 0) or 0),
             )
             if schema is None:
                 parsed = None
@@ -306,7 +310,10 @@ class OpenAICompatProvider:
             text=raw_text,
             parsed=parsed,
             usage=usage,
-            raw_request_hash=rhash,
+            # Hash the payload as it finally went out: the schema fallback and
+            # the repair retry both mutate it, and the old pre-loop hash could
+            # not be matched to the request calls.json claims to audit.
+            raw_request_hash=request_hash(payload),
             latency_ms=int((time.monotonic() - t0) * 1000),
             finish_reason=finish_reason,
         )
