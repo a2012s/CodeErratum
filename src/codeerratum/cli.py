@@ -16,6 +16,7 @@ import typer
 from rich.console import Console
 
 from . import __version__
+from . import eval as _eval
 from .i18n import t
 from .pipeline import (
     ConfigError,
@@ -822,3 +823,85 @@ def stats() -> None:
         console.print("\n[bold]机器丢弃原因（非人工驳回）[/bold]")
         for row in s["dropped_by_reason"][:10]:
             console.print(f"  {row['reason']:<32} {row['n']:>3}")
+
+
+@app.command(name="eval")
+def eval_command(
+    repo: Path = typer.Option(Path("."), "--repo", help="仓库路径"),
+    seeded: Path | None = typer.Option(
+        None, "--seeded", help="种 bug 清单（JSON），测召回率与证伪误杀"
+    ),
+    export: Path | None = typer.Option(
+        None, "--export", help="把待标注数据写成 JSONL 后退出（refuted 行的 human 留空待回填）"
+    ),
+    labels: Path | None = typer.Option(
+        None, "--labels", help="用人工标注好的 JSONL 代替库内裁决来算模型精度"
+    ),
+    run_id: list[str] = typer.Option(None, "--run-id", help="只评指定 run（可重复）"),
+    limit: int = typer.Option(20, "--limit", help="未指定 run 时最多评最近的几个"),
+    as_json: bool = typer.Option(False, "--json", help="输出机器可读 JSON"),
+) -> None:
+    """离线评测审查质量。stats 回答人工「用了没有」，eval 回答审查「对不对」。"""
+    root = find_repo_root(repo)
+    payload: dict = {}
+    warnings: list[str] = []
+    ids = [str(r) for r in (run_id or [])]
+    one_run = ids[0] if len(ids) == 1 else None
+
+    if export:
+        try:
+            rows = _eval.export_labels(_store(root), repo_root=root, run_id=one_run)
+        except (sqlite3.Error, OSError) as exc:
+            console.print(f"[red]feedback store unavailable: {exc}[/red]")
+            raise typer.Exit(1) from exc
+        try:
+            with export.open("w", encoding="utf-8") as fh:
+                for row in rows:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            console.print(f"[red]cannot write {export}: {exc}[/red]")
+            raise typer.Exit(1) from exc
+        console.print(f"[green]已写出 {len(rows)} 行标注数据到 {export}[/green]")
+        console.print(
+            "[dim]kind=refuted 行的 human 字段请人工回填：true=证伪轮误杀，false=杀得对[/dim]"
+        )
+        return
+
+    if seeded:
+        try:
+            bugs = _eval.load_seeded_bugs(seeded)
+        except (OSError, ValueError) as exc:
+            console.print(f"[red]种 bug 清单不可用：{exc}[/red]")
+            raise typer.Exit(1) from exc
+        wanted = ids or None
+        collections, warns = _eval.run_collections(root, wanted, limit)
+        warnings.extend(warns)
+        if not collections:
+            console.print(
+                f"[yellow]没有可评分的 run 账本（{root}/.codeerratum/runs 为空或均已清理）[/yellow]"
+            )
+        else:
+            payload["seeded"] = _eval.score_seeded(collections, bugs)
+
+    try:
+        if labels:
+            rows = [
+                json.loads(line)
+                for line in labels.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        else:
+            rows = _eval.export_labels(_store(root), repo_root=root, run_id=one_run)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        console.print(f"[red]标注数据不可用：{exc}[/red]")
+        raise typer.Exit(1) from exc
+    payload["labels"] = _eval.score_labels(rows)
+
+    if warnings:
+        payload["warnings"] = warnings
+    if as_json:
+        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        console.print(_eval.format_eval(payload.get("seeded"), payload.get("labels")))
+        for warning in warnings:
+            console.print(f"[yellow]{warning}[/yellow]")

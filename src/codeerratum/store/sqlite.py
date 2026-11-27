@@ -376,6 +376,34 @@ class ReviewStore:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def adjudication_rows(self, run_id: str | None = None) -> list[dict]:
+        """Every reported finding with its human verdict and the models that asserted it.
+
+        The join is done in Python rather than with ``group_concat`` because the
+        bundled SQLite has no guaranteed version, and a finding asserted by three
+        models is three precision samples — one for each — not one combined row.
+        ``runs.model_id`` cannot answer this: in dual mode it is a comma-joined
+        string, so grouping it measures seat combinations, not models.
+        """
+        sql = "SELECT * FROM findings"
+        args: tuple = ()
+        if run_id:
+            sql += " WHERE run_id=?"
+            args = (run_id,)
+        sql += " ORDER BY created_at DESC"
+        with self._conn() as conn:
+            findings = [dict(r) for r in conn.execute(sql, args).fetchall()]
+            event_sql = (
+                "SELECT run_id, finding_id, model_id FROM verdict_events WHERE role='assert'"
+            )
+            events = conn.execute(event_sql, args if run_id else ()).fetchall()
+        asserted: dict[tuple[str, str], list[str]] = {}
+        for e in events:
+            asserted.setdefault((e["run_id"], e["finding_id"]), []).append(e["model_id"])
+        for row in findings:
+            row["models"] = sorted(set(asserted.get((row["run_id"], row["id"]), [])))
+        return findings
+
     def list_runs(self, limit: int = 50) -> list[dict]:
         """Newest first, for the UI's run history.
 

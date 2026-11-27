@@ -1,0 +1,26 @@
+{
+  "_about": "Ground truth for the seeded-bug demo. Line numbers are for the reviewed file as committed by run_experiment.sh (buggy_refunds.py copied to refunds.py). Feeds `codeerratum eval --seeded`. The naive/aware entry is the documented false-kill sample: both reviewers reported it and the falsifier refuted both (see expected-review.md).",
+  "bugs": [
+    {
+      "file": "refunds.py",
+      "start_line": 22,
+      "end_line": 22,
+      "category": "error_code_inconsistent",
+      "note": "os.replace_atomic 是幻觉 API，调用即 AttributeError"
+    },
+    {
+      "file": "refunds.py",
+      "start_line": 20,
+      "end_line": 22,
+      "category": "semantic_drift",
+      "note": "docstring 承诺 append，实现是 w 模式覆盖 + rename，审计历史丢失"
+    },
+    {
+      "file": "refunds.py",
+      "start_line": 28,
+      "end_line": 29,
+      "category": "unhandled_exception",
+      "note": "aware now_utc 与 naive deadline 比较抛 TypeError（证伪轮误杀样本）"
+    }
+  ]
+}
