@@ -29,7 +29,7 @@
 ## 当前状态
 
 - **第一至六期已实现并通过测试**（完整回归套件 + 真实 HTTP 端到端验证 + CI）
-- 可用命令：`review`（出工单）/ `pr`（贴到 PR）/ `docs`（模块文档与签名漂移）/ `mcp`（给 agent 用的 stdio 服务）/ `ui`（本地图形界面）/ `accept` / `reject` / `reconcile`（回收执行结果）/ `stats` / `compare`
+- 可用命令：`review`（出工单）/ `pr`（贴到 PR）/ `pr-collect`（回收 PR 侧裁决）/ `docs`（模块文档与签名漂移）/ `mcp`（给 agent 用的 stdio 服务）/ `ui`（本地图形界面）/ `desktop` / `accept` / `reject` / `reconcile`（回收执行结果）/ `resume`（续跑）/ `eval`（离线评测）/ `suggest-rules`（驳回模式转候选规范）/ `stats` / `compare`
 - 实现语言 Python ≥3.11；Python 走符号级审查，其他语言走文件级；OpenAI 兼容 provider（云端或本地）；correctness 视角
 - 三种审查模式：`quick`（单模型）/ `dual`（双模型+证伪）/ `committee`（三模型）
 - 不依赖 Docker；单模型三环境变量即可跑通（含本地 Ollama），多模型用 JSON 配置
@@ -127,6 +127,31 @@ codeerratum review --diff HEAD~1 -o erratumReview.md
 不花 token 就能看到真实格式的产物：[`examples/sample-review.md`](examples/sample-review.md)——格式是真的，内容来自仓库自带的假模型端点。
 双模型下报告分三区：**独有发现**（仅一家报出，最值得看）/ **冲突区**（意见相反，待人工裁决）/ **共识区**。
 审查后反馈：`codeerratum accept <finding_id>` / `codeerratum reject <finding_id> --reason "..."`，`codeerratum stats` 看采纳率，`codeerratum compare` 看各模型独有发现数与实测画像。执行方 AI 填完工单末尾的《执行结果》表后，用 `codeerratum reconcile erratumReview.md` 直接把结果回填到同一个数据库：`已修复` / `部分修复` 记为采纳，`误报` / `不适用` / `跳过` 记为驳回，`未修复` / `待处理` 保持 open，不污染采纳率；`--dry-run` 可先看映射结果。所有命令在仓库任意子目录执行都指向同一个数据库。
+
+### 成本、续跑与复用
+
+`max_units` 限制审多少单元，`--token-budget` 限制烧多少 token（也可用环境变量
+`CODEERRATUM_TOKEN_BUDGET`）。第一次付费调用前把预估写进 `runs/<id>/estimate.json`
+（单元数 / 席位数 / 输入字符数 / 预估 token），预估超预算会当场说出来，而不是等报告
+变成半份才发现；运行中越线即熔断，走与人工「停止审查」相同的部分报告路径，报告里写明
+是预算熔断、剩余额度，以及可以 `codeerratum resume <run_id>` 续跑。
+
+长任务不再因进程被杀而整批作废：账本按单元增量落盘（默认新增 3 个单元或距上次 45 秒
+刷一次，`CODEERRATUM_CHECKPOINT_UNITS` / `CODEERRATUM_CHECKPOINT_SECONDS` 可调），
+`resume` 读账本跳过已完成单元，原席位跑剩余队列，run_id 与产物路径不变。
+
+同一文件内容没改时也不再重复计费：单元缓存按**实际发出的完整请求**取键
+（model + messages + schema + temperature + max_tokens），逐字节相同才命中，命中即重放
+模型回复；`convert_findings` 与锚点校验每次都重跑，所以复用不会绕过可信度检查。缓存行
+记 `cached` 且 usage 为 0，token 汇总不虚高；`CODEERRATUM_UNIT_CACHE=0` 关闭。
+
+### 静态证据
+
+工单里的「已知事实」区块不是模型说的，是工具说的：Python 走 `ruff` + `mypy`，
+TypeScript / JavaScript（`.ts/.tsx/.js/.jsx/.mjs/.cjs`）走 `tsc` + `eslint`。两者都
+仓库本地优先（`node_modules/.bin`），其次 PATH，都没装就静默降级——绝不 `npm install`、
+绝不联网、绝不让审查因为缺工具而失败。没有 `package.json` 的仓库不会启动 TS 路径；
+`tsc` 是整项目编译，因此按仓库记忆并加仓库级锁，并行单元排队而不是同开 N 个编译进程。
 
 ### 项目规范（可选）
 
@@ -276,11 +301,50 @@ GITHUB_TOKEN=... codeerratum pr --post
 行内评论上限 5 条，且每一行都必须真的在 diff 里。GitHub 会因为一条评论指到 diff 外而
 把**整个 review** 拒掉，所以放不进 diff 的发现会转到摘要表，而不是拖着另外四条一起失败。
 同一 commit 重跑不会重复刷评论（摘要带隐藏 marker，发之前先查）。
+摘要评论还带一份隐藏的标签映射 `<!-- codeerratum:labels:F-001=<finding_id>,... -->`，
+以及一行回复语法提示。
+
+裁决可以在 PR 里给，不必回到跑审查的那台机器：
+
+```bash
+codeerratum pr-collect --pr owner/repo#12 --dry-run   # 先看会写什么
+GITHUB_TOKEN=... codeerratum pr-collect --pr owner/repo#12
+```
+
+维护者在工单下回一行 `F-001 accept` 或 `F-001 reject: 原因`，`pr-collect` 就把它写进
+同一个反馈库（reason 记 `github:@author`），采纳率与模型路由随之更新。解析刻意只认
+「标签 + 裁决词」，散文不算裁决；我们自己发的评论整条跳过——摘要里写着语法示例，
+读回来就会凭空造出采纳率。重跑幂等，已经是该状态的不会刷 reason。标签优先取 PR 内嵌
+的映射，跑过 `pr` 的仓库也能只凭 `.codeerratum/runs/<id>/review.md` 回收（早期版本
+发布的评论没有映射）。
 
 在 Actions 里用仓库自带的 [`action.yml`](action.yml)，示例 workflow 见
 [`docs/github-action.yml`](docs/github-action.yml)。两个坑要提前知道：`fetch-depth: 0`
 是必须的（浅克隆看不到 merge base）；fork 的 PR 拿不到 secrets，示例里显式跳过，
 而不是让每个外部贡献都红一次。
+
+### 离线评测与规范建议
+
+`stats` 回答人工「用了没有」，`eval` 回答审查「对不对」：
+
+```bash
+codeerratum eval                                  # 库内裁决算各模型 precision
+codeerratum eval --seeded demo/seeded-bugs/bugs.json --run-id <id>
+codeerratum eval --export labels.jsonl            # 导出待标注集（refuted 行留空待回填）
+```
+
+种一份已知 bug 清单，就能按 run 账本算召回率、precision、证伪轮误杀率，聚类吞并率与
+证伪杀率分阶段报。**没有人工标注时误杀率是 `null` 而不是 0**——把「没数据」显示成
+「零误杀」是最容易被忘掉的那类自欺。这也是调聚类相似度阈值（当前 0.8）之前该有的东西。
+
+```bash
+codeerratum suggest-rules            # dry-run：列出反复被驳回的模式
+codeerratum suggest-rules --min 3 --append
+```
+
+同一目录、同一分类被反复驳回时聚成候选项目规范，追加写 `.codeerratum/rules.md`：旧内容
+逐字保留、重复行跳过（幂等）、超过加载上限时拒绝写入并报出超出量，而不是写了再被截断。
+这是闭环数据第二次反哺审查——第一次是改路由分数，这一次是改提示词。
 
 ### 模块文档与签名漂移
 
@@ -345,6 +409,7 @@ codeerratum review --diff HEAD~1
 | 五 | 文档生成：模块地图 + 签名漂移 | ✅ 已实现 |
 | 六 | 扩展：MCP 服务、本地模型、语言标签（**沙箱复现明确不做**） | ✅ 已实现（按设计裁剪） |
 | 旁支 | 本地 Web UI：三区分流、界面内裁决、文档抽屉 | ✅ 已实现 |
+| 七 | 自我度量与成本：离线评测、单元级检查点续跑、跨 run 缓存、token 预算、PR 侧裁决回收、驳回模式转规范、TS/JS 静态证据 | ✅ 已实现 |
 
 沙箱复现是唯一明确拒绝的功能：它意味着在无鉴权的本地服务里执行来自 PR 的不可信代码。
 风险收益不成比例，而且「我运行你的代码来证明 bug」这个承诺，个人项目兜不住。

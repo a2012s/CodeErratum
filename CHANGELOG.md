@@ -1,5 +1,105 @@
 # Changelog
 
+## [0.7.4] — 2026-11-28
+
+把 0.7.2 挂在文末的五个待办全部做掉，再把闭环从「本机 Web UI」推到两个此前够不着
+的地方：PR 评论区（裁决真正发生的位置）与离线（有 ground truth 可比的位置）。
+
+### Added — 闭环与可信度
+
+- **PR 裁决回收**（`91139d3`…`50771e7`）：摘要评论内嵌
+  `<!-- codeerratum:labels:F-001=<finding_id>,... -->`，维护者回一行
+  `F-001 accept` / `F-001 reject: 原因`，`codeerratum pr-collect` 写回同一个反馈库
+  并回灌模型路由。裁决此前只能在跑审查的机器上产生，而一条 finding 真正被判定是在
+  PR 里——团队用时采纳率几乎恒为空。工单编号只有一处真源（`report.render_sections`
+  同时驱动正文与标签映射），因为把裁决记到另一条 finding 上比没有裁决更糟。
+  只认「标签 + 裁决词」，散文不算裁决；自家评论整条跳过，否则会把我们教的语法读成
+  采纳；同 PR 两次 run 取最新映射而非并集。重跑幂等。
+- **离线评测 harness**：`codeerratum eval`。种 bug 清单（`demo/seeded-bugs/bugs.json`）
+  对 run 账本算 recall / precision / false_kill_rate，聚类吞并率与证伪杀率按阶段分报；
+  `--export` 导出标注文件（被证伪的 claim 也在内，等人回填）。没有标注集时
+  false_kill_rate 是 `null` 而不是 0——这是「会自我度量」从采纳率一个数字升级成
+  可比较的指标，也是调聚类阈值前本该先有而一直没有的东西。
+- **驳回模式 → 候选项目规范**：`codeerratum suggest-rules`。同一目录同一分类被反复
+  驳回时聚成候选规则，默认 dry-run，`--append` 才写 `.codeerratum/rules.md`，且旧内容
+  逐字保留、重复行跳过、超 4000 字符上限时拒绝写入并报超出量（不是写了再让加载端截断）。
+  闭环数据第一次反过来改提示词，而不只是改路由分数。
+- **token 成本护栏**：`review` / `resume` 新增 `--token-budget`（或
+  `CODEERRATUM_TOKEN_BUDGET`）。第一次付费调用前先写 `estimate.json`（单元数/席位数/
+  输入字符数/预估 token），并在报告与进度流里提前说出「预估已超预算」；运行中越线即
+  熔断，走与人工中断相同的 partial 路径，报告注明是预算熔断并可 `resume` 续跑。
+  此前只有 `max_units` 限制审多少单元，不限制烧多少 token。
+  三个入口平权：Web 表单新增「token 预算」可选输入（续跑流同样接受），MCP 的
+  `review_diff` schema 暴露 `token_budget`；「留空 = 读环境变量」与「0 = 明确不限」
+  的区分在 CLI、Web、MCP 完全一致——同一控制此前只在 CLI 有，正是 AGENTS.md
+  记过的入口不平权 bug 类。
+- **TypeScript/JavaScript 静态证据**：`.ts/.tsx/.js/.jsx/.mjs/.cjs` 走 `tsc` +
+  `eslint --format json`，此前 TS 项目只有裸 LLM 审查，可信度机制全在 Python 一侧。
+  repo-local（`node_modules/.bin`）优先，其次 PATH，都没有就静默降级：绝不
+  `npm install`、绝不联网、绝不让审查失败。没有 `package.json` 的仓库不启动该路径。
+  `tsc` 是整项目编译，故按 repo 记忆 + repo 级锁（并行单元排队而非同开 N 个编译），
+  失效指纹带源码文件数与最新 mtime，常驻的桌面应用不会把上一轮的类型错误喂给模型。
+
+### Added — 成本与长任务
+
+- **单元级检查点**：账本原来只在批次结束时落盘，跑到 95% 被杀掉就作废 95% 的 token。
+  现在每完成一个单元即可刷 `findings.json` / `calls.json` / `review.md` 与 SQLite，
+  节流默认「新增 3 个单元或距上次 45 秒」任一满足（`CODEERRATUM_CHECKPOINT_UNITS` /
+  `_SECONDS`），review 阶段收尾强制刷一次，让账本在证伪轮花钱之前先落定。落盘顺序
+  抽成 `write_run_ledger()`：findings 先、`calls.json` 最后，守住「账本落后于结论」
+  这个不变量——崩在中间只会多审几个单元，不会把没写过的结论当成已覆盖。
+- **跨 run 单元缓存**：`cache_key` 覆盖实际发出的完整请求
+  （model+messages+schema+temperature+max_tokens），逐字节相同的 prompt 直接重放模型
+  回复；`convert_findings` 与锚点校验每次都重跑，所以复用不绕过可信度检查。
+  `Completion.cached` 记进 `calls.json` 且 usage 全 0，token 汇总不虚高；表按
+  TTL(120d)/行数(20k) 双上限淘汰；`CODEERRATUM_UNIT_CACHE=0` 关闭。
+
+### Fixed
+
+- **P1 `already_posted` 只看第 1 页评论**：活跃 PR 超过 100 条时幂等 marker 看不见，
+  同一个 commit 会把整份审查重发一遍。统一走全分页的 `list_issue_comments`。
+- **P1 tiered 复核路径整轮静默失效**：把不存在的 `cache` 变量传进 `review_unit`，
+  `NameError` 被吞成 `verify_error`，分层快审的验证结论一条都没落地。
+- **P1 预算熔断会被写成人工决定**：被取消的审查任务在 gather 处已包装成
+  `ReviewCancelled("stopped by user")`，先判异常类型就把机器的熔断记成用户停止；
+  现在先判熔断标志。
+- **P1 `_partial_collection` 死分支**：`mode == "tiered"` 永假（mode 实际取值是
+  quick/dual/committee），tiered 已付费的 verify 结论在部分报告里被丢掉。
+- **P1 `hub.remove` 的 TOCTOU**：「读状态再移除」之间启动的审查会变成孤儿——仍在跑，
+  却再也拿不到。改走 `reserve_close()`，锁 + closed 标志让移除与启动互斥。
+- **P2 config 就地改分数污染缓存**：`apply_measured_profiles` 直接改 config 里的路由
+  分数，缓存必须返回深拷贝；`save` 加进程内串行锁，两个标签页同时保存不再互吞改动。
+- **P2 provider_error 单元不进 partial sink**：停止时的 drop 计数漏掉失败单元，
+  `units_completed` 与真实覆盖不一致。
+- **P2 裁决原因取错位置**：`F-005：已修` 的冒号在裁决词之前，旧实现把「已修」当成
+  原因写进库；现在只认裁决词之后的冒号，`F-007 这条我同意，改一下` 也不会把尾部散文
+  编成理由。
+- **P2 注释 note 起点**：`F-001 reject: 误报` 里作为原因起点的裁决别名不再被吞掉。
+- **P2 已知事实头部谎报工具**：TS 仓库的诊断块写着「已由 ruff/mypy 检出」，把
+  tsc/eslint 的结论归给从没跑过的工具——提示词里的错误事实模型无法自行纠正。
+  头部现在按块内实际出现的工具命名。
+
+### Performance
+
+- `/api/review/status` 增量协议：加 `revision` / `since`，空闲标签页只拿两个字段
+  的 stub，不再每次重传整份消息日志与 live findings（项目多起来以后 Web UI 的
+  轮询开销与闪烁都出在这里）。跟踪运行中的标签页仍取全量快照——
+  `running → 终态` 的翻转正是它不能漏的东西。
+- `_body()` 加 60s socket 读超时：半开连接不再永久占用 handler 线程；超时只作用于
+  请求体，读完即恢复原值，分钟级静默的 SSE 长帧不受影响。
+- `store_for` 按仓库缓存 `ReviewStore`，config 按 `mtime_ns+size` 缓存读取：状态轮询
+  不再每请求重建 schema、重读磁盘。
+
+### Tests
+
+新增 121 个测试函数（参数化展开后 149 项），全量 **682 passed / 0 failed**
+（0.7.3 基线 533 项），`ruff check .` 与 `ruff format --check .` 均通过。
+新覆盖：`test_pr_verdicts.py`(36) / `test_evidence_ts.py`(23) / `test_eval.py`(20) /
+`test_budget.py`(17) / `test_unit_cache.py`(13) / `test_checkpoint.py`(7) /
+`test_suggest.py`(9)，以及 `test_web.py` / `test_hub.py` / `test_mcp.py` /
+`test_layout.py` 的增量协议、token 预算三入口平权与竞态用例。
+TS 证据测试用假可执行脚本，不需要本机装 Node。
+
 ## [0.7.3] — 2026-11-24
 
 ### Fixed — 续跑并发
@@ -137,11 +237,13 @@
 
 ### 待办（本轮明确不做，均已在 review.md 记录）
 
-- `review_status` 全量轮询的增量/版本号协议（P1，需前后端同步改）。
-- 运行中崩溃的可续跑（P1，账本需随审查增量落盘，属架构改动）。
-- `_body()` 读超时（P2，socket 超时会误伤分钟级静默的 SSE 帧）。
-- config 并发保存丢更新、hub remove TOCTOU、hub `restore()` 批量写盘（P2/P3）。
-- store 重建 / config 重读 / docs AST 全扫的每请求缓存（P2，性能惯性）。
+以下已在 **0.7.4** 完成，保留原文以说明当时的判断依据：`review_status` 增量协议、
+运行中崩溃的可续跑（单元级检查点）、`_body()` 读超时、config 并发保存丢更新、
+hub `remove` TOCTOU、store/config 的每请求缓存。
+
+两条刻意不做：hub `restore()` 批量写盘（P3，启动时 N 次小 JSON 写，收益低于改动风险）；
+docs AST 的每请求缓存（`docs_overview` 的注释已写明理由——几十文件的解析比让缓存与
+编辑保持一致更便宜，加了缓存反而要背失效正确性的债）。
 
 ### Tests
 
