@@ -22,6 +22,10 @@ class Completion(BaseModel):
     raw_request_hash: str
     latency_ms: int
     finish_reason: str = "stop"
+    # True when the result came from a previous run instead of a paid call. It
+    # rides on the completion so every consumer that counts tokens, latency or
+    # seats sees the same truth the caller does.
+    cached: bool = False
 
 
 class ParseFailure(BaseModel):
@@ -97,3 +101,30 @@ def to_strict_json_schema(node: Any) -> Any:
 def request_hash(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def cache_key(
+    model_id: str,
+    messages: list[dict[str, str]],
+    schema: type[BaseModel] | None = None,
+    temperature: float = 0.0,
+    max_tokens: int = 2048,
+) -> str:
+    """Identify a request exactly enough to reuse its answer across runs.
+
+    This is the whole cache: a hit means the model, the prompt, the output budget
+    and the output schema are all byte-identical, so only the reply is being
+    replayed. ``request_hash`` is not usable here — it hashes the payload *as the
+    provider assembled it*, which differs once a repair retry or a json_schema
+    fallback has mutated it, and a short 16-hex digest is a bad primary key for a
+    table that is meant to survive for months.
+    """
+    payload: dict[str, Any] = {
+        "model": model_id,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "schema": schema.model_json_schema() if schema is not None else None,
+    }
+    raw = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()

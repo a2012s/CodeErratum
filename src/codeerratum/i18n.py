@@ -369,6 +369,11 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Checkpoint written while the review is still running: if the process dies, "
         "resume continues from these artifacts without re-paying for finished units",
     ),
+    "pipeline.cache_reused": (
+        "复用历史结论：{n} 个单元的 prompt 与之前某次运行逐字节相同，直接取回上次结果，未计费",
+        "Reused {n} unit result(s) from an earlier run: the request was byte-identical, "
+        "so the previous reply was replayed instead of paid for",
+    ),
     "pipeline.stopped_partial": (
         "审查已停止：仅完成 {done}/{total} 个单元，报告只包含这些单元的结果；证伪/验证未完成",
         "Review stopped after {done}/{total} units; the report covers only those "

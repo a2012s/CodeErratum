@@ -24,7 +24,7 @@ from ..i18n import t
 from ..models import Finding, FindingCollection, ModelRegistry, ModelSpec, ReviewUnit, Verdict
 from ..providers import OpenAICompatProvider, Provider
 from .aggregator import agreement, cluster_findings, rank_findings, same_issue
-from .executor import render_callers, review_unit
+from .executor import UnitCache, render_callers, review_unit
 from .falsification import falsify_finding, should_falsify
 
 
@@ -226,6 +226,7 @@ async def _review_with(
     output_lang: str = "",
     sink: _PartialRun | None = None,
     on_unit_complete: Callable[[], None] | None = None,
+    cache: UnitCache | None = None,
 ) -> tuple[dict[str, list[Finding]], list[dict], list[dict], list[dict]]:
     """Run one model over all units, a bounded number at a time.
 
@@ -282,6 +283,7 @@ async def _review_with(
                         house_rules,
                         sources,
                         output_lang=output_lang,
+                        cache=cache,
                     )
                 except Exception as exc:  # noqa: BLE001 - one model/unit failing must not kill the run
                     rejected.append(
@@ -344,6 +346,10 @@ async def _review_with(
                     "latency_ms": completion.latency_ms,
                     "usage": completion.usage.model_dump(),
                     "raw_request_hash": completion.raw_request_hash,
+                    # A reused unit is recorded like any other so the resume ledger
+                    # still counts it as covered; the flag is what keeps the token
+                    # and latency totals honest about it.
+                    "cached": completion.cached,
                 }
                 calls.append(call)
                 if sink is not None:
@@ -530,6 +536,7 @@ async def run_review(
     output_lang: str = "",
     tiered: bool = False,
     on_checkpoint: Callable[[FindingCollection, list, list], None] | None = None,
+    unit_cache: UnitCache | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
@@ -663,6 +670,7 @@ async def run_review(
                     output_lang=output_lang,
                     sink=partial,
                     on_unit_complete=_note_unit_done,
+                    cache=unit_cache,
                 )
             )
             for m in reviewers
@@ -734,6 +742,7 @@ async def run_review(
                                     house_rules,
                                     sources,
                                     output_lang,
+                                    unit_cache,
                                 )
                             )
                             active.add(task)
@@ -806,6 +815,9 @@ async def run_review(
                             "role": "verify",
                             "latency_ms": completion.latency_ms,
                             "usage": completion.usage.model_dump(),
+                            # Same reason as the review rows: a replayed verification
+                            # costs 0 tokens, and calls.json has to say why.
+                            "cached": completion.cached,
                         }
                         all_calls.append(call)
                         partial.calls.append(call)

@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -244,6 +245,63 @@ def find_repo_root(path: Path) -> Path:
 
 
 _STORES: dict[Path, ReviewStore] = {}
+
+
+UNIT_CACHE_ENV = "CODEERRATUM_UNIT_CACHE"
+
+
+def unit_cache_enabled() -> bool:
+    """Whether a unit may reuse a byte-identical request from an earlier run.
+
+    On by default: re-running a review after two files change is the everyday
+    shape of this tool, and paying full price to re-ask 58 units about code that
+    is bit-for-bit identical is not a defensible default. Opt out with
+    ``CODEERRATUM_UNIT_CACHE=0`` (a benchmark run, or proving the cache itself
+    is not what produced a finding).
+    """
+    return os.environ.get(UNIT_CACHE_ENV, "").strip().lower() not in ("0", "false", "no", "off")
+
+
+class StoreUnitCache:
+    """Adapter from the review's two-method cache contract to the SQLite store.
+
+    Counts hits/misses so the report can say how much of it was replayed. The
+    counters are the only state: correctness rests on the request hash, which the
+    executor computes from the exact payload going out.
+    """
+
+    def __init__(self, store: ReviewStore, now: str = "") -> None:
+        self._store = store
+        self._now = now
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: str) -> dict | None:
+        try:
+            found = self._store.get_unit_cache(key)
+        except Exception as exc:  # noqa: BLE001 - an unreadable cache is a miss
+            print(
+                f"[pipeline] unit cache read failed: {type(exc).__name__}: {exc}", file=sys.stderr
+            )
+            self.misses += 1
+            return None
+        if found is None:
+            self.misses += 1
+            return None
+        self.hits += 1
+        try:
+            self._store.note_unit_cache_hit(key)
+        except Exception:  # noqa: BLE001 - reuse bookkeeping cannot fail a paid call
+            pass
+        return found
+
+    def put(self, key: str, model_id: str, review: dict) -> None:
+        self._store.put_unit_cache(
+            key, model_id, review, self._now or datetime.now(UTC).isoformat(timespec="seconds")
+        )
+
+    def summary(self) -> dict:
+        return {"hits": self.hits, "misses": self.misses, "reused": self.hits}
 
 
 def store_for(repo_root: Path) -> ReviewStore:
@@ -718,6 +776,7 @@ def execute_review(
         store.save_run(ckpt_collection, ckpt_ts)
         store.save_comparison(ckpt_collection, ckpt_ts)
 
+    cache = StoreUnitCache(store) if unit_cache_enabled() else None
     try:
         collection, calls, all_diags = asyncio.run(
             run_review(
@@ -739,6 +798,7 @@ def execute_review(
                 # seeded the language ContextVar, so it must travel as a value.
                 output_lang=get_lang(),
                 on_checkpoint=_checkpoint,
+                unit_cache=cache,
             )
         )
         # A stop request must not abort persistence: once any unit finished,
@@ -754,6 +814,14 @@ def execute_review(
         raise
     except ValueError as exc:
         raise ConfigError(str(exc)) from exc
+
+    if cache is not None:
+        # How much of this report is a replay. Kept in the comparison so the run
+        # list, the JSON artifact and the markdown all agree, rather than only
+        # living in a progress line the user has already scrolled past.
+        collection.comparison["cache"] = cache.summary()
+        if cache.hits:
+            notices.append(t("pipeline.cache_reused", n=cache.hits))
 
     if collection.stopped:
         stopped_info = collection.comparison.get("stopped") or {}

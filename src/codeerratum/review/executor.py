@@ -4,15 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 from pathlib import Path
+from typing import Protocol
 
 from pydantic import ValidationError
 
 from ..models import Anchor, Finding, ReviewUnit
 from ..models.finding import DefectCategory, Evidence, Lens, Suggestion, snippet_hash
-from ..providers import Completion, Provider
+from ..providers import Completion, Provider, Usage
+from ..providers.base import cache_key
 from ..report.markdown import _fence
 from .schema import LLMReview
+
+
+class UnitCache(Protocol):
+    """Reuse a byte-identical past request's reply instead of paying for it twice.
+
+    Deliberately two methods and no SQLite: the orchestrator stays storage-agnostic
+    and a test can hand in a dict. ``pipeline`` wires the persistent one.
+    """
+
+    def get(self, key: str) -> dict | None: ...
+
+    def put(self, key: str, model_id: str, review: dict) -> None: ...
+
 
 PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "review.correctness.md"
 
@@ -444,7 +460,15 @@ async def review_unit(
     house_rules: str = "",
     sources: dict[str, str] | None = None,
     output_lang: str = "",
+    cache: UnitCache | None = None,
 ) -> tuple[list[Finding], list[dict], Completion, list[dict]]:
+    """Review one unit on one model.
+
+    ``cache`` replays a byte-identical earlier request instead of paying for it
+    again. Every path still runs ``convert_findings``, so a hit replays the
+    *model's reply*, not a stored verdict: anchor validation and any converter fix
+    still apply to cached units.
+    """
     from ..context import build_context
     from ..evidence import collect_static, known_facts_block
 
@@ -476,26 +500,62 @@ async def review_unit(
     ranges = excerpt_ranges(unit, len(source_lines), ctx.get("enclosing_range"))
     relevant = _diags_in_ranges(diags, unit.primary_file, ranges)
 
-    completion = await provider.complete(
-        model_id=model_id,
-        messages=build_messages(
-            unit,
-            source_lines,
-            enclosing_span=ctx.get("enclosing_range"),
-            callers=ctx["callers"],
-            caller_details=ctx.get("caller_snippets"),
-            known_facts=known_facts_block(relevant),
-            house_rules=house_rules,
-            output_lang=output_lang,
-        ),
-        schema=LLMReview,
-        temperature=0.0,
-        max_tokens=review_max_tokens(),
+    messages = build_messages(
+        unit,
+        source_lines,
+        enclosing_span=ctx.get("enclosing_range"),
+        callers=ctx["callers"],
+        caller_details=ctx.get("caller_snippets"),
+        known_facts=known_facts_block(relevant),
+        house_rules=house_rules,
+        output_lang=output_lang,
     )
-    parsed = completion.parsed
-    if not isinstance(parsed, LLMReview):
-        raise ValueError(f"provider returned no parsed review for model={model_id}")
-    findings, rejected = convert_findings(parsed, unit, source_lines, run_id)
+    max_tokens = review_max_tokens()
+    # The key covers the request as it will actually go out, so a hit is the same
+    # model, the same prompt, the same output budget and the same output schema.
+    # Building the prompt first is the cost of that: the static tools still run on
+    # a hit, but they are subprocesses, not tokens.
+    key = cache_key(model_id, messages, LLMReview, 0.0, max_tokens) if cache else ""
+    review: LLMReview | None = None
+    completion: Completion
+    if key:
+        replay = cache.get(key)
+        if replay is not None:
+            try:
+                cached_review = LLMReview.model_validate(replay)
+            except ValidationError:
+                # The schema moved under us: treat it as a miss and pay for the unit.
+                pass
+            else:
+                review = cached_review
+                completion = Completion(
+                    text="",
+                    parsed=cached_review,
+                    usage=Usage(),
+                    raw_request_hash=key[:16],
+                    latency_ms=0,
+                    cached=True,
+                )
+    if review is None:
+        completion = await provider.complete(
+            model_id=model_id,
+            messages=messages,
+            schema=LLMReview,
+            temperature=0.0,
+            max_tokens=max_tokens,
+        )
+        if not isinstance(completion.parsed, LLMReview):
+            raise ValueError(f"provider returned no parsed review for model={model_id}")
+        review = completion.parsed
+        if key:
+            try:
+                cache.put(key, model_id, review.model_dump(mode="json"))
+            except Exception as exc:  # noqa: BLE001 - a cache write must never fail a paid call
+                print(
+                    f"[executor] unit cache write failed: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+    findings, rejected = convert_findings(review, unit, source_lines, run_id)
 
     # Second-phase evidence grading: attach hard static evidence to findings
     # whose anchor overlaps a static diagnostic; those become Evidence-backed.

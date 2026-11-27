@@ -10,10 +10,16 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ..models import FindingCollection
 from ..models.finding import UNIT_FAILURE_REASONS
+
+# Cache bounds for unit_cache. Rows past the TTL are dropped on write, and the
+# table never grows beyond MAX_ROWS regardless of how long the process lives.
+UNIT_CACHE_TTL_DAYS = 120
+UNIT_CACHE_MAX_ROWS = 20_000
 
 
 class ReviewStore:
@@ -101,8 +107,19 @@ class ReviewStore:
                     count INTEGER NOT NULL,
                     PRIMARY KEY (run_id, reason, model_id)
                 );
+                CREATE TABLE IF NOT EXISTS unit_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    model_id TEXT NOT NULL,
+                    review_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    hits INTEGER NOT NULL DEFAULT 0
+                );
                 CREATE INDEX IF NOT EXISTS idx_findings_status ON findings(status);
                 CREATE INDEX IF NOT EXISTS idx_findings_category ON findings(category);
+                CREATE INDEX IF NOT EXISTS idx_unit_cache_model ON unit_cache(model_id);
+                -- Eviction runs on every cache write and filters on created_at; without
+                -- this it is a full scan of a table deliberately allowed to hold 20k rows.
+                CREATE INDEX IF NOT EXISTS idx_unit_cache_created ON unit_cache(created_at);
                 """
             )
 
@@ -471,3 +488,85 @@ class ReviewStore:
             "failed_units_by_reason": [dict(r) for r in failed_units_by_reason],
             "failed_units_total": sum(int(r["n"]) for r in failed_units_by_reason),
         }
+
+    # ---- cross-run unit cache -------------------------------------------------
+
+    def get_unit_cache(self, key: str) -> dict | None:
+        """Fetch a previously parsed review for this exact request, if any.
+
+        The stored blob is the model's *parsed* reply, not converted findings, so
+        a later fix to the converter or the anchor rules still applies to a hit.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT review_json FROM unit_cache WHERE cache_key=? AND created_at>=?",
+                (key, _cache_cutoff()),
+            ).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row[0])
+        except (TypeError, ValueError):
+            # A corrupt row must read as "no cache", never as a broken review.
+            return None
+
+    def put_unit_cache(self, key: str, model_id: str, review: dict, created_at: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO unit_cache"
+                " (cache_key, model_id, review_json, created_at, hits)"
+                " VALUES (?,?,?,?,0)",
+                (key, model_id, json.dumps(review, ensure_ascii=False), created_at),
+            )
+            _evict_unit_cache(conn)
+
+    def note_unit_cache_hit(self, key: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE unit_cache SET hits=hits+1 WHERE cache_key=?", (key,))
+
+    def unit_cache_stats(self) -> dict:
+        with self._conn() as conn:
+            row = conn.execute("SELECT COUNT(*), COALESCE(SUM(hits), 0) FROM unit_cache").fetchone()
+        return {"entries": int(row[0]), "hits": int(row[1])}
+
+    def clear_unit_cache(self) -> int:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM unit_cache")
+        return cur.rowcount or 0
+
+
+def _cache_cutoff(now: datetime | None = None) -> str:
+    """The newest ``created_at`` a row may have and still be usable.
+
+    Written in the exact format ``pipeline.StoreUnitCache`` stamps —
+    ``datetime.now(UTC).isoformat(timespec="seconds")``, ``T``-separated with a
+    ``+00:00`` offset. SQLite compares TEXT byte-wise, so the bound is only
+    chronological when both sides share one format; comparing against
+    ``datetime('now')``, which uses a space where the ``T`` is, mis-orders every
+    same-day row.
+    """
+    reference = now or datetime.now(UTC)
+    return (reference - timedelta(days=UNIT_CACHE_TTL_DAYS)).isoformat(timespec="seconds")
+
+
+def _evict_unit_cache(conn: sqlite3.Connection) -> None:
+    """Bound the cache: drop stale rows first, then the least-reused ones.
+
+    An unbounded cache is the failure mode this table has: one entry per unit per
+    model per prompt revision, written by a server that never restarts. Rows older
+    than UNIT_CACHE_TTL_DAYS are gone on sight (a review conclusion about code that
+    has not been touched in months is not worth keeping), and beyond
+    UNIT_CACHE_MAX_ROWS the coldest entries by hit count make room.
+    """
+    conn.execute(
+        "DELETE FROM unit_cache WHERE created_at < ?",
+        (_cache_cutoff(),),
+    )
+    total = conn.execute("SELECT COUNT(*) FROM unit_cache").fetchone()[0]
+    overflow = int(total) - UNIT_CACHE_MAX_ROWS
+    if overflow > 0:
+        conn.execute(
+            "DELETE FROM unit_cache WHERE cache_key IN ("
+            " SELECT cache_key FROM unit_cache ORDER BY hits ASC, created_at ASC LIMIT ?)",
+            (overflow,),
+        )

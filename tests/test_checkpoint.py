@@ -89,6 +89,7 @@ def _mirroring_review_with(done: int, then: BaseException | None = None):
         output_lang="",
         sink=None,
         on_unit_complete=None,
+        cache=None,
     ):
         assert sink is not None
         per_unit: dict = {}
@@ -191,6 +192,7 @@ def test_no_checkpoint_before_the_first_unit(monkeypatch, tmp_path):
         output_lang="",
         sink=None,
         on_unit_complete=None,
+        cache=None,
     ):
         if on_unit_complete:
             on_unit_complete()  # fires before anything landed in the sink

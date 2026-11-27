@@ -1,6 +1,7 @@
 from .aggregator import agreement, cluster_findings, rank_findings
 from .executor import (
     MAX_HOUSE_RULES_CHARS,
+    UnitCache,
     convert_findings,
     load_prompt,
     review_unit,
@@ -13,6 +14,7 @@ from .schema import LLMReview
 
 __all__ = [
     "MAX_HOUSE_RULES_CHARS",
+    "UnitCache",
     "convert_findings",
     "load_prompt",
     "review_unit",
