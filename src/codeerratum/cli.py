@@ -19,6 +19,7 @@ from . import __version__
 from . import eval as _eval
 from .i18n import t
 from .pipeline import (
+    HOUSE_RULES_FILE,
     ConfigError,
     DiffFailed,
     NoChanges,
@@ -30,6 +31,7 @@ from .pipeline import (
 from .report.outcomes import apply_outcomes, parse_outcomes
 from .review import MAX_HOUSE_RULES_CHARS
 from .store import ReviewStore
+from .suggest import append_rules, build_suggestions
 
 
 def _store(repo_root: Path) -> ReviewStore:
@@ -905,3 +907,54 @@ def eval_command(
         console.print(_eval.format_eval(payload.get("seeded"), payload.get("labels")))
         for warning in warnings:
             console.print(f"[yellow]{warning}[/yellow]")
+
+
+@app.command(name="suggest-rules")
+def suggest_rules(
+    repo: Path = typer.Option(Path("."), "--repo", help="仓库路径"),
+    min_count: int = typer.Option(2, "--min", help="同一目录+分类被驳回几次才算模式"),
+    append: bool = typer.Option(False, "--append", help="追加写入 .codeerratum/rules.md"),
+) -> None:
+    """把反复被人工驳回的发现模式，提炼成候选项目规范（只追加，不覆盖）。"""
+    try:
+        root = find_repo_root(repo)
+        rows = _store(root).rejected_by_file_category()
+    except (sqlite3.Error, OSError) as exc:
+        console.print(f"[red]feedback store unavailable: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    suggestions = build_suggestions(rows, min_count=min_count)
+    if not suggestions:
+        console.print(
+            f"[yellow]暂无达到阈值（≥{min_count} 次）的驳回模式。[/yellow]\n"
+            "[dim]先多用 accept/reject 裁决工单，闭环数据攒起来后这里才有话可说。[/dim]"
+        )
+        return
+
+    console.print("[bold]候选项目规范（来自人工驳回的聚合）[/bold]\n")
+    for s in suggestions:
+        console.print(f"  {s['rule']}  [dim](驳回 {s['count']} 次)[/dim]")
+
+    path = root / HOUSE_RULES_FILE
+    if not append:
+        console.print(
+            f"\n[dim]预览模式。确认后加 --append 追加写入 {path}"
+            f"（上限 {MAX_HOUSE_RULES_CHARS} 字符，超限会拒绝写入而不是截断）[/dim]"
+        )
+        return
+
+    try:
+        added, overflow = append_rules(path, [s["rule"] for s in suggestions])
+    except OSError as exc:
+        console.print(f"[red]无法写入 {path}: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    if overflow:
+        console.print(
+            f"[red]{path} 追加后会超出 {MAX_HOUSE_RULES_CHARS} 字符上限约 {overflow} 字。"
+            "请先精简旧规范再重试（不会替你截断）。[/red]"
+        )
+        raise typer.Exit(1)
+    if added == 0:
+        console.print(f"[dim]{path} 已包含这些规则，未重复追加。[/dim]")
+    else:
+        console.print(f"[green]已追加 {added} 条到 {path}（只追加，旧内容原样保留）[/green]")

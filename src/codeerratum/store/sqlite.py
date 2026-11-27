@@ -360,6 +360,21 @@ class ReviewStore:
             ).fetchall()
         return {r["category"]: r["n"] for r in rows if r["category"]}
 
+    def rejected_by_file_category(self) -> list[dict]:
+        """Human rejections grouped by (file, category) — the raw material for rule suggestions.
+
+        Deliberately *file*, not a directory: truncating the path is a display
+        decision (``suggest.scope_of``), and baking it into SQL would freeze the
+        granularity of every future analysis to today's guess.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT category, file, COUNT(*) AS n FROM findings "
+                "WHERE status = 'rejected' AND category IS NOT NULL AND file != '' "
+                "GROUP BY category, file ORDER BY n DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def set_status(self, finding_id: str, status: str, reason: str = "") -> bool:
         with self._conn() as conn:
             cur = conn.execute(
