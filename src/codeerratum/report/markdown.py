@@ -87,6 +87,7 @@ def _stop_banner(collection: FindingCollection) -> str:
     executes this file top to bottom.
     """
     info = collection.comparison.get("stopped") or {}
+    budget = collection.comparison.get("budget") or {}
     done = info.get("units_completed", 0)
     partial = info.get("units_partial", 0)
     total = info.get("units_total", 0)
@@ -106,10 +107,20 @@ def _stop_banner(collection: FindingCollection) -> str:
         consequence = "扫描结果已保留；验证尚未跑完，未被验证的发现按“未裁决”展示。"
     else:
         consequence = "报告只包含截止停止时的发现；证伪/验证未执行。"
+    cause = ""
+    if budget:
+        # Without this line the reader cannot tell a fuse from a human stop, and
+        # would conclude the reviewer was interrupted on purpose rather than that
+        # the run still has unpaid units left.
+        cause = (
+            f"停止原因：token 预算熔断（已用 {budget.get('spent', 0)}"
+            f"/{budget.get('token_budget', 0)}），非人工中断；剩余单元可用 resume 续跑。\n"
+        )
     return (
         f"> **审查已停止（{phase}）**\n"
         f">\n"
         f"> {coverage}。{consequence}\n"
+        f"{cause}"
         f"> 停止不等于审查通过：未覆盖的单元没有结论，需重新审查。\n\n"
     )
 

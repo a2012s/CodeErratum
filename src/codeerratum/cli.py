@@ -104,6 +104,12 @@ def review(
         "--no-tiered",
         help="Disable quick-mode tiered review (fast scan + strong-model verification)",
     ),
+    token_budget: int = typer.Option(
+        0,
+        "--token-budget",
+        help="Fuse for total tokens this sitting may spend; tripping it keeps a partial, "
+        "resumable report. 0 falls back to $CODEERRATUM_TOKEN_BUDGET when set",
+    ),
 ) -> None:
     """Review a git diff and write an executable erratumReview.md work order."""
     repo_root = repo.resolve()
@@ -121,6 +127,7 @@ def review(
             paths=path,
             include_non_code=include_non_code,
             tiered=not no_tiered,
+            token_budget=token_budget or None,
         )
     except NotARepository as exc:
         console.print(f"[red]Error: {exc}[/red]")
@@ -170,6 +177,11 @@ def resume(
     out: Path | None = typer.Option(
         None, "--out", "-o", help="Also write the merged work order here"
     ),
+    token_budget: int = typer.Option(
+        0,
+        "--token-budget",
+        help="Fuse for tokens this resume batch may spend (0 = $CODEERRATUM_TOKEN_BUDGET)",
+    ),
 ) -> None:
     """Continue an interrupted or budget-truncated run without re-paying.
 
@@ -201,6 +213,7 @@ def resume(
             paths=path,
             out=out,
             progress=lambda msg: console.print(msg),
+            token_budget=token_budget or None,
         )
     except LookupError as exc:
         console.print(f"[red]{exc}[/red]")

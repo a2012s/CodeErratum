@@ -43,6 +43,7 @@ from .pipeline import (
     resolve_house_rules,
     resolve_mode,
     store_for,
+    token_budget_from_env,
 )
 from .report import render_markdown
 from .review.aggregator import rank_findings
@@ -252,6 +253,7 @@ def resume_review(
     progress=None,
     should_stop=None,
     on_findings=None,
+    token_budget: int | None = None,
 ) -> ReviewOutcome:
     """Continue an existing run: same seats, remaining units, merged report.
 
@@ -394,6 +396,7 @@ def resume_review(
                     # language must travel as a value, not leak through a
                     # ContextVar from whatever thread happens to resume.
                     output_lang=get_lang(),
+                    token_budget=token_budget or token_budget_from_env(),
                 )
             )
         except ValueError as exc:

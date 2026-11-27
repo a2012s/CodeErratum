@@ -245,6 +245,15 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "复核 {model} 失败：{file}",
         "Verification by {model} failed: {file}",
     ),
+    "orch.budget_stop": (
+        "token 预算熔断：已用 {spent}/{budget}，停止后续调用，已完成单元照常出报告",
+        "Token budget exhausted ({spent}/{budget}): stopping here; finished units "
+        "still produce the report",
+    ),
+    "orch.budget_cancelled": (
+        "token 预算熔断（{spent}/{budget}），尚无任何单元完成，本次运行没有可保留的结果",
+        "Token budget exhausted ({spent}/{budget}) before any unit finished; nothing to keep",
+    ),
     "orch.falsify_round": (
         "证伪轮：{n} 条高价值发现交叉验证",
         "Falsification round: cross-checking {n} high-value findings",
@@ -373,6 +382,21 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "复用历史结论：{n} 个单元的 prompt 与之前某次运行逐字节相同，直接取回上次结果，未计费",
         "Reused {n} unit result(s) from an earlier run: the request was byte-identical, "
         "so the previous reply was replayed instead of paid for",
+    ),
+    "pipeline.estimate": (
+        "成本预估：{units} 个单元 × {seats} 席位 ≈ {tokens} tokens"
+        "（输入侧下限，见 run 目录 estimate.json）",
+        "Cost preview: {units} units x {seats} seats ~= {tokens} tokens "
+        "(a floor for input; see estimate.json in the run dir)",
+    ),
+    "pipeline.budget_over_estimate": (
+        "预估 {est} 已超出 --token_budget {budget}：熔断可能在中途触发，报告或为部分结果",
+        "The estimate ({est}) already exceeds the token budget ({budget}): "
+        "the fuse may trip mid-run and the report will be partial",
+    ),
+    "pipeline.budget_stop_note": (
+        "本次因 token 预算熔断而停止（已用 {spent}/{budget}），非人工中断",
+        "Stopped by the token-budget fuse ({spent}/{budget} used), not by the user",
     ),
     "pipeline.stopped_partial": (
         "审查已停止：仅完成 {done}/{total} 个单元，报告只包含这些单元的结果；证伪/验证未完成",

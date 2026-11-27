@@ -249,6 +249,20 @@ _STORES: dict[Path, ReviewStore] = {}
 
 UNIT_CACHE_ENV = "CODEERRATUM_UNIT_CACHE"
 
+TOKEN_BUDGET_ENV = "CODEERRATUM_TOKEN_BUDGET"
+
+
+def token_budget_from_env() -> int | None:
+    """Whole-run token fuse from the environment (a flag on the command wins)."""
+    raw = os.environ.get(TOKEN_BUDGET_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
 
 def unit_cache_enabled() -> bool:
     """Whether a unit may reuse a byte-identical request from an earlier run.
@@ -532,6 +546,7 @@ def execute_review(
     on_findings: Callable[[object, list, str], None] | None = None,
     include_non_code: bool = False,
     tiered: bool = True,
+    token_budget: int | None = None,
 ) -> ReviewOutcome:
     """Run the whole pipeline and persist artifacts + feedback rows.
 
@@ -740,6 +755,40 @@ def execute_review(
 
     say(f"Mode: {run_mode} | models: {len(config.registry.models)}")
 
+    # Cost preview. The only hard lever today is the unit budget; a user with a
+    # token plan wants to know *before* the first paid call roughly what this
+    # sitting will burn, and wants the fuse armed if they set one. chars/4 is a
+    # heuristic floor: it excludes the system prompt and source context, so the
+    # real number lands above it, never below.
+    token_budget = token_budget or token_budget_from_env()
+    seat_count = len(config.registry.models) + (0 if run_mode == "quick" else 1)
+    input_chars = sum(len(h.content) for u in selected for h in u.hunks)
+    est_tokens = max(input_chars // 4, 1) * max(seat_count, 1)
+    (run_dir / "estimate.json").write_text(
+        json.dumps(
+            {
+                "units": len(selected),
+                "seats": seat_count,
+                "input_chars": input_chars,
+                "est_input_tokens": est_tokens,
+                "token_budget": token_budget,
+                "method": "sum(hunk content chars)/4 x seats; excludes prompt/context",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    say(t("pipeline.estimate", units=len(selected), seats=seat_count, tokens=est_tokens))
+    if token_budget and est_tokens > token_budget:
+        announce(
+            t(
+                "pipeline.budget_over_estimate",
+                est=est_tokens,
+                budget=token_budget,
+            )
+        )
+
     store = store_for(repo_root)
     profiled = apply_measured_profiles(config.registry, store)
     if profiled:
@@ -799,6 +848,7 @@ def execute_review(
                 output_lang=get_lang(),
                 on_checkpoint=_checkpoint,
                 unit_cache=cache,
+                token_budget=token_budget,
             )
         )
         # A stop request must not abort persistence: once any unit finished,
@@ -839,6 +889,19 @@ def execute_review(
             )
         else:
             notices.append(t("pipeline.stopped_partial", done=done, total=total))
+    budget_hit = collection.comparison.get("budget")
+    if budget_hit:
+        # Distinct from a user stop: the run ended because the money ran out.
+        # The report must say so, or "stopped" reads like a choice.
+        budget_note = t(
+            "pipeline.budget_stop_note",
+            spent=budget_hit.get("spent", 0),
+            budget=budget_hit.get("token_budget", 0),
+        )
+        notices.append(budget_note)
+        # Streamed as well as stored: a fuse trip is the one stop reason someone
+        # watching the live progress needs before deciding whether to resume.
+        say(budget_note)
 
     # Two failure shapes must not share one sentence: provider_error means the
     # reviewer never produced anything (unit unreviewed), verify_error means

@@ -445,6 +445,7 @@ def _partial_collection(
     stage: str,
     rejected_category_counts: dict[str, int] | None,
     all_providers: list,
+    budget_info: dict | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Build the report payload from units that finished before a stop.
 
@@ -499,6 +500,9 @@ def _partial_collection(
         "unit_reviews_total": len(units) * len(reviewers),
         "calls": len(partial.calls),
     }
+    if budget_info:
+        # "stopped" says where it stopped; "budget" says the stop was not the user's choice.
+        comparison["budget"] = budget_info
     return (
         FindingCollection(
             run_id=run_id,
@@ -537,8 +541,14 @@ async def run_review(
     tiered: bool = False,
     on_checkpoint: Callable[[FindingCollection, list, list], None] | None = None,
     unit_cache: UnitCache | None = None,
+    token_budget: int | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
+
+    ``token_budget`` is a whole-run fuse, counted in input+output tokens across
+    every model call: crossing it stops the run the same way a user stop does
+    (partial report, resumable). Replayed unit-cache calls carry zero usage, so
+    reuse does not burn the budget.
 
     Works for quick (1 model) as well as dual/committee (N pinned model versions).
     In dual/committee, findings are clustered and merged across models, then a
@@ -568,6 +578,19 @@ async def run_review(
     # does not read like "stopped with the review half done".
     stage = "routing"
     falsifier_spec: ModelSpec | None = None
+    # A budget breach is a stop the *machine* requested: same partial path,
+    # different reason in the report. The flag survives into the except handler
+    # so a user stop and a budget stop are never conflated.
+    budget_hit = False
+
+    def _spent_tokens() -> int:
+        total = 0
+        for c in partial.calls:
+            usage = c.get("usage") or {}
+            total += int(usage.get("input_tokens", 0) or 0) + int(
+                usage.get("output_tokens", 0) or 0
+            )
+        return total
 
     # ---- crash checkpoint -------------------------------------------------
     # The partial-collection builder is the same one a stop uses, so a crash and
@@ -617,9 +640,13 @@ async def run_review(
         _flush_checkpoint()
 
     async def watch_stop() -> None:
-        """Cancel every in-flight model call the moment stop is requested."""
+        """Cancel every in-flight call when the user stops or the budget burns out."""
+        nonlocal budget_hit
         while True:
-            if should_stop and should_stop():
+            if token_budget and _spent_tokens() >= token_budget:
+                budget_hit = True
+                say(t("orch.budget_stop", spent=_spent_tokens(), budget=token_budget))
+            if (should_stop and should_stop()) or budget_hit:
                 for task in list(active):
                     if not task.done():
                         task.cancel()
@@ -1047,10 +1074,20 @@ async def run_review(
         )
         return collection, all_calls, all_diags
     except (ReviewCancelled, asyncio.CancelledError) as exc:
-        stopped = isinstance(exc, ReviewCancelled) or bool(should_stop and should_stop())
+        stopped = (
+            isinstance(exc, ReviewCancelled) or bool(should_stop and should_stop()) or budget_hit
+        )
         if not stopped:
             raise
         if not partial.units_done:
+            # The fuse wins over the stop narrative: a cancelled review task
+            # surfaces as ReviewCancelled("stopped by user") from the gather, so
+            # checking the exception type first would mislabel a budget stop as a
+            # human decision and hide that the money ran out before unit one.
+            if budget_hit:
+                raise ReviewCancelled(
+                    t("orch.budget_cancelled", spent=_spent_tokens(), budget=token_budget)
+                ) from exc
             if isinstance(exc, ReviewCancelled):
                 raise
             raise ReviewCancelled(t("server.stopped_by_user")) from exc
@@ -1065,6 +1102,9 @@ async def run_review(
             stage=stage,
             rejected_category_counts=rejected_category_counts,
             all_providers=all_providers,
+            budget_info=(
+                {"token_budget": token_budget, "spent": _spent_tokens()} if budget_hit else None
+            ),
         )
     finally:
         watcher.cancel()
