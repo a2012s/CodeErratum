@@ -268,6 +268,7 @@ def pr(
         summary_body,
     )
     from .ci.github import marker_for
+    from .report import finding_labels
 
     try:
         pull = parse_pull_request(load_event(event))
@@ -297,7 +298,10 @@ def pr(
     collection = outcome.collection
     inline, rest = split_by_anchor(collection.ranked_findings(), outcome.units, max(0, max_inline))
     marker = marker_for(pull.head_sha)
-    body = summary_body(collection, inline, rest, marker)
+    # The same numbers the work order printed. Embedding them in the summary is what
+    # lets `pr-collect` turn "F-001 accept" into a verdict on the right finding.
+    labels = finding_labels(collection)
+    body = summary_body(collection, inline, rest, marker, labels)
 
     # Keep the exact payload with the run: a CI failure is easier to debug from the
     # artifact than from the Actions log.
@@ -319,6 +323,7 @@ def pr(
                     for f in inline
                 ],
                 "summary": body,
+                "labels": labels,
                 "posted": False,
             },
             ensure_ascii=False,
@@ -346,7 +351,7 @@ def pr(
         console.print("[red]--post needs a token: set GITHUB_TOKEN or pass --token[/red]")
         raise typer.Exit(1)
     try:
-        result = post_review(pull, gh_token, collection, inline, rest)
+        result = post_review(pull, gh_token, collection, inline, rest, labels=labels)
     except CIError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
@@ -360,6 +365,136 @@ def pr(
         )
     if result.get("summary_url"):
         console.print(result["summary_url"])
+
+
+@app.command(name="pr-collect")
+def pr_collect(
+    repo: Path = typer.Option(Path("."), "--repo", help="Repository root"),
+    pr_ref: str = typer.Option(
+        "", "--pr", help="owner/repo#12 (default: the PR this run was posted for)"
+    ),
+    event: Path | None = typer.Option(
+        None, "--event", help="GitHub event JSON, when running inside Actions"
+    ),
+    run_id: str = typer.Option(
+        "", "--run-id", help="Run whose work order supplies the F-xxx labels"
+    ),
+    token: str = typer.Option("", "--token", help="GitHub token (default: $GITHUB_TOKEN)"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show what would be written; change nothing"
+    ),
+    as_json: bool = typer.Option(False, "--json", help="Machine-readable result"),
+) -> None:
+    """Read maintainer accept/reject replies off a PR into the feedback store.
+
+    The closed loop, on the other side: `accept`/`reject` need the Web UI open on the
+    machine that ran the review, but a pull request is where a finding actually gets
+    judged. Collecting from the PR is what makes the adoption rate real for a team.
+    """
+    from .ci import CIError, PullRequest, collect_verdicts, load_event, parse_pull_request
+    from .report import labels_from_markdown
+
+    gh_token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    if not gh_token:
+        console.print("[red]需要 token：设置 GITHUB_TOKEN 或传 --token[/red]")
+        raise typer.Exit(1)
+
+    repo_root = _resolve_repo_or_exit(repo)
+    try:
+        if pr_ref:
+            slug, _, number = pr_ref.partition("#")
+            owner, _, name = slug.partition("/")
+            if not owner or not name or not number.isdigit():
+                raise CIError(f"--pr 需要 owner/repo#12 形式，收到 {pr_ref!r}")
+            pull = PullRequest(
+                owner=owner.strip(), repo=name.strip(), number=int(number), base_sha="", head_sha=""
+            )
+        else:
+            pull = parse_pull_request(load_event(event))
+    except CIError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    # Prefer the ids from the PR itself; the local ledger only fills in for reviews
+    # posted before the summary carried them.
+    labels: dict[str, str] = {}
+    from .pipeline import STATE_DIR
+
+    runs = repo_root / STATE_DIR / "runs"
+    target = run_id or _latest_pr_run(runs, pull)
+    if target:
+        work_order = runs / target / "review.md"
+        if work_order.is_file():
+            labels = labels_from_markdown(work_order.read_text(encoding="utf-8"))
+        else:
+            console.print(f"[yellow]找不到该 run 的工单：{work_order}[/yellow]")
+
+    store = _store(repo_root)
+    try:
+        result = collect_verdicts(pull, gh_token, store, labels, dry_run=dry_run)
+    except CIError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    if as_json:
+        typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+
+    applied = result["applied"]
+    accepted = sum(1 for a in applied if a["status"] == "accepted")
+    rejected = sum(1 for a in applied if a["status"] == "rejected")
+    verb = "（dry run，未写入）" if dry_run else ""
+    console.print(
+        f"[green]PR {pull.slug}#{pull.number}[/green] 回收裁决 {len(applied)} 条{verb}："
+        f"采纳 {accepted}，驳回 {rejected}，已是该状态 {result['unchanged']}。"
+    )
+    for item in applied:
+        colour = "green" if item["status"] == "accepted" else "yellow"
+        console.print(
+            f"  [{colour}]{item['label']}[/{colour}] {item['status']} "
+            f"@{item['author']} -> {item['finding_id'][:12]}"
+        )
+    if result["unknown"]:
+        console.print(
+            "[yellow]这些编号不在本次工单里（可能是旧 run 或拼错）："
+            + "、".join(result["unknown"])
+            + "[/yellow]"
+        )
+    if result["not_found"]:
+        console.print(
+            "[yellow]反馈库里没有对应 finding：" + "、".join(result["not_found"]) + "[/yellow]"
+        )
+    if not applied:
+        console.print(
+            "[dim]没有可回收的回复。工单里请回复一行 `F-001 accept` 或 "
+            "`F-001 reject: 原因`；标签来源：" + result["labels_source"] + "。[/dim]"
+        )
+
+
+def _latest_pr_run(runs_dir: Path, pull) -> str:
+    """The newest run that was posted to this PR, via its pr-comments.json."""
+    if not runs_dir.is_dir():
+        return ""
+    best = ""
+    best_stamp = ""
+    for candidate in runs_dir.iterdir():
+        meta = candidate / "pr-comments.json"
+        if not meta.is_file():
+            continue
+        try:
+            data = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        linked = (
+            (data.get("pull_request") or {}).get("slug"),
+            (data.get("pull_request") or {}).get("number"),
+        )
+        if linked != (pull.slug, pull.number):
+            continue
+        stamp = candidate.name
+        if stamp > best_stamp:
+            best, best_stamp = stamp, stamp
+    return best
 
 
 @app.command()

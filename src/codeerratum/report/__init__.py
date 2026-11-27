@@ -1,4 +1,4 @@
-from .markdown import render_markdown
+from .markdown import finding_labels, labels_from_markdown, render_markdown
 from .outcomes import (
     OutcomeRow,
     ParseResult,
@@ -14,6 +14,8 @@ __all__ = [
     "apply_outcomes",
     "classify_status",
     "finding_ids",
+    "finding_labels",
+    "labels_from_markdown",
     "parse_outcomes",
     "render_markdown",
 ]

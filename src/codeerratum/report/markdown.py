@@ -244,6 +244,43 @@ def _render_zone(name: str, items: list[Finding], start_index: int) -> tuple[str
     return "".join(parts), idx
 
 
+def render_sections(collection: FindingCollection) -> list[tuple[str, list[Finding]]]:
+    """The groups the work order renders, in the order it numbers them.
+
+    Quick mode is one flat, unnamed group; dual/committee splits the same capped
+    list into zones. Everything that has to agree with the printed ``F-001``
+    numbers — the body here, the label map a PR carries — reads this instead of
+    re-deriving the order, because a verdict applied to the wrong finding is worse
+    than no verdict.
+    """
+    display = collection.ranked_findings()[:MAX_RENDER]
+    if collection.mode == "quick":
+        return [("", display)]
+    grouped: dict[str, list[Finding]] = {"unique": [], "conflict": [], "consensus": []}
+    for f in display:
+        grouped[_zone_of(f)].append(f)
+    return [(name, grouped[name]) for name in ("unique", "conflict", "consensus") if grouped[name]]
+
+
+_LABEL_COMMENT_RE = re.compile(r"<!--\s*finding:(F-\d{1,4})=(\S+)\s*-->")
+
+
+def labels_from_markdown(text: str) -> dict[str, str]:
+    """Read a work order back into its ``F-001`` -> finding id map.
+
+    Parsing the file that was actually rendered beats recomputing the ranking: a
+    verdict collected days later must resolve to the number the reviewer read, even
+    if routing or profiles changed since.
+    """
+    return {match.group(1): match.group(2) for match in _LABEL_COMMENT_RE.finditer(text)}
+
+
+def finding_labels(collection: FindingCollection) -> dict[str, str]:
+    """``F-001`` -> finding id, exactly as this run's work order numbers them."""
+    ordered = [f for _name, items in render_sections(collection) for f in items]
+    return {f"F-{index:03d}": f.id for index, f in enumerate(ordered, 1)}
+
+
 def render_markdown(collection: FindingCollection, timestamp: str) -> str:
     ordered = collection.ranked_findings()
     display = ordered[:MAX_RENDER]
@@ -275,17 +312,19 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
             )
         else:
             parts.append("## 结论\n\n本次变更未发现明确问题。\n\n")
-    elif collection.mode == "quick":
-        for i, f in enumerate(display, 1):
-            parts.append(_render_finding(f, i))
     else:
-        grouped: dict[str, list[Finding]] = {"unique": [], "conflict": [], "consensus": []}
-        for f in display:
-            grouped[_zone_of(f)].append(f)
+        # Numbering comes from render_sections, the same list finding_labels reads,
+        # so a label in the PR comment cannot point at a different finding than the
+        # heading the maintainer is replying to.
         idx = 1
-        for name in ("unique", "conflict", "consensus"):
-            block, idx = _render_zone(name, grouped[name], idx)
-            parts.append(block)
+        for name, items in render_sections(collection):
+            if name:
+                block, idx = _render_zone(name, items, idx)
+                parts.append(block)
+            else:
+                for f in items:
+                    parts.append(_render_finding(f, idx))
+                    idx += 1
 
     if omitted > 0:
         parts.append(

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -158,15 +159,31 @@ def marker_for(head_sha: str) -> str:
     return f"<!-- codeerratum:review:{head_sha} -->"
 
 
+def labels_comment(labels: dict[str, str]) -> str:
+    """A machine-readable map from the work order's ``F-001`` labels to finding ids.
+
+    The PR is the only artifact guaranteed to reach whoever does the adjudicating,
+    so it carries the ids with it: collection then works from any machine, including
+    one that never ran the review. It is an HTML comment, so it stays invisible to a
+    human reading the page.
+    """
+    if not labels:
+        return ""
+    pairs = ",".join(f"{label}={fid}" for label, fid in sorted(labels.items()))
+    return f"<!-- codeerratum:labels:{pairs} -->"
+
+
 def summary_body(
     collection: FindingCollection,
     inline: list[Finding],
     rest: list[Finding],
     marker: str,
+    labels: dict[str, str] | None = None,
 ) -> str:
     mode = collection.mode
     lines = [
         marker,
+        labels_comment(labels or {}),
         f"## CodeErratum · {len(collection.findings)} 条发现",
         "",
         f"模式 `{mode}` · 模型 {', '.join(collection.reviewer_models) or '—'}"
@@ -196,6 +213,16 @@ def summary_body(
             lines += ["", f"_另有 {hidden} 条未列出，见运行产物 `findings.json`。_"]
     else:
         lines += ["本次变更未发现明确问题。"]
+
+    if rows and labels:
+        # The reply syntax has to be written down where the verdict is given, or the
+        # loop never closes: a maintainer who agrees in prose says "对，改一下", which
+        # no parser can turn into an adoption rate.
+        lines += [
+            "",
+            "<sub>裁决回收：回复一行 `F-001 accept` 或 `F-001 reject: 原因`，"
+            "`codeerratum pr-collect` 会写回反馈库并回灌模型路由。</sub>",
+        ]
 
     if collection.rejected:
         lines += ["", f"<sub>{len(collection.rejected)} 条发现因定位校验未通过被丢弃。</sub>"]
@@ -232,25 +259,30 @@ def _request(
         raise CIError(f"{method} {url} failed: {exc.reason}") from exc
 
 
-def already_posted(pr: PullRequest, token: str, marker: str, api: str = API_ROOT) -> bool:
-    """Scan every comment page for this commit's marker.
+def list_issue_comments(pr: PullRequest, token: str, api: str = API_ROOT) -> list[dict]:
+    """Every conversation comment on the PR, newest page first not assumed.
 
-    One page of 100 was the whole scan: an active PR with more comments than
-    that made the idempotency check miss the marker and re-post the entire
-    review on the same commit. GitHub paginates via the Link header, which
-    ``_request`` does not surface, so walk the implicit ``page`` param until a
-    short page arrives.
+    GitHub paginates via the Link header, which ``_request`` does not surface, so
+    walk the implicit ``page`` param until a short page arrives. The caller needs
+    the *whole* thread twice over: an idempotency check that misses a marker on
+    page 2 re-posts the entire review, and a verdict that lives one page down is
+    silently dropped from the adoption rate.
     """
     base = f"{api}/repos/{pr.slug}/issues/{pr.number}/comments?per_page=100"
+    out: list[dict] = []
     page = 1
     while True:
         url = base if page == 1 else f"{base}&page={page}"
         comments = _request("GET", url, token)
-        if any(marker in (c.get("body") or "") for c in comments):
-            return True
+        out.extend(comments)
         if len(comments) < 100:
-            return False
+            return out
         page += 1
+
+
+def already_posted(pr: PullRequest, token: str, marker: str, api: str = API_ROOT) -> bool:
+    """True when this commit's review marker is already on the PR."""
+    return any(marker in (c.get("body") or "") for c in list_issue_comments(pr, token, api))
 
 
 def _inline_payloads(pr: PullRequest, inline: list[Finding]) -> list[dict]:
@@ -276,8 +308,14 @@ def post_review(
     rest: list[Finding],
     api: str = API_ROOT,
     force: bool = False,
+    labels: dict[str, str] | None = None,
 ) -> dict:
-    """Post one review (inline comments) plus one summary comment. Idempotent per commit."""
+    """Post one review (inline comments) plus one summary comment. Idempotent per commit.
+
+    ``labels`` is the ``F-001`` -> finding id map from the work order. It rides along
+    inside the summary comment so a verdict collected later resolves to the finding the
+    maintainer actually read, from any machine.
+    """
     marker = marker_for(pr.head_sha)
     if not force and already_posted(pr, token, marker, api):
         return {"skipped": "already posted for this commit", "marker": marker}
@@ -307,7 +345,7 @@ def post_review(
                 except CIError as exc:
                     result.setdefault("inline_failed", []).append(str(exc))
 
-    body = summary_body(collection, inline, rest, marker)
+    body = summary_body(collection, inline, rest, marker, labels)
     comments_url = f"{api}/repos/{pr.slug}/issues/{pr.number}/comments"
     try:
         comment = _request("POST", comments_url, token, {"body": body})
@@ -327,4 +365,183 @@ def post_review(
                 pass  # best effort; the original failure is the one to report
         raise
     result["summary_url"] = comment.get("html_url", "")
+    return result
+
+
+# ---- verdict collection -------------------------------------------------
+#
+# The adoption rate is the number this whole system is built on, and until now it
+# could only be written on the machine that ran the review. A pull request is where
+# a finding actually gets judged, so the judgement is read back from there: the
+# summary comment carries the label -> finding id map, a maintainer replies one
+# directive line, and `pr-collect` turns it into the same status the Web UI writes.
+
+
+_LABEL_RE = re.compile(r"\bF-(\d{1,4})\b", re.IGNORECASE)
+# Anything we posted. Our own summary contains the literal words "accept" and
+# "reject" (it teaches the syntax), so parsing it back would manufacture verdicts.
+_OURS_RE = re.compile(r"<!--\s*codeerratum:")
+_LABELS_MAP_RE = re.compile(r"<!--\s*codeerratum:labels:([^\s>]+)\s*-->")
+
+_ACCEPT_WORDS = {"accept", "accepted", "approve", "approved", "agree", "confirm", "confirmed"}
+_REJECT_WORDS = {"reject", "rejected", "refuse", "refused", "decline", "declined", "wontfix"}
+_ACCEPT_CJK = ("采纳", "确认", "同意", "已修", "认可")
+_REJECT_CJK = ("驳回", "误报", "不修", "不采纳", "拒绝")
+
+
+def parse_verdict_line(line: str) -> tuple[str, str, str] | None:
+    """``(label, status, note)`` when one line is a verdict directive, else None.
+
+    Deliberately narrow: a label token plus a verdict word. "对，改一下" is not a
+    verdict, and guessing at it would put words in the maintainer's mouth.
+    """
+    label_match = _LABEL_RE.search(line)
+    if not label_match:
+        return None
+    label = f"F-{int(label_match.group(1)):03d}"
+    status = ""
+    tail = ""
+    for match in re.finditer(r"[A-Za-z]+|[\u4e00-\u9fff]+", line):
+        word = match.group(0)
+        key = word.lower()
+        if key in _ACCEPT_WORDS:
+            status = "accepted"
+            tail = line[match.end() :]
+            break
+        if key in _REJECT_WORDS:
+            status = "rejected"
+            tail = line[match.end() :]
+            break
+        if any(alias in word for alias in _ACCEPT_CJK):
+            status = "accepted"
+            tail = line[match.end() :]
+            break
+        if any(alias in word for alias in _REJECT_CJK):
+            status = "rejected"
+            tail = line[match.end() :]
+            break
+    if not status:
+        return None
+    # The reason a rejected finding is useful to model routing rather than just a
+    # lost point is the note, and only an explicit colon after the verdict word
+    # introduces one: "F-005：已修" explains nothing, while "F-007 这条我同意，改一下"
+    # would otherwise turn trailing prose into a justification nobody wrote.
+    note_match = re.search(r"[:：]\s*(.+)$", tail)
+    note = note_match.group(1).strip() if note_match else ""
+    return label, status, note
+
+
+def extract_verdicts(comments: list[dict]) -> list[dict]:
+    """Verdict directives in posting order, our own comments excluded.
+
+    A comment can carry several lines ("F-001 accept / F-002 reject: 误报"), and one
+    finding can be revisited later in the thread; the caller applies last-write-wins
+    per label, in chronological order.
+    """
+    out: list[dict] = []
+    for comment in sorted(comments, key=lambda c: c.get("created_at") or ""):
+        body = comment.get("body") or ""
+        # The whole comment, not just the marker line: the summary *teaches* the
+        # syntax with a literal "F-001 accept", and reading our own instructions
+        # back as a maintainer's verdict would fabricate an adoption rate.
+        if _OURS_RE.search(body):
+            continue
+        author = ((comment.get("user") or {}).get("login")) or "unknown"
+        for line in body.splitlines():
+            parsed = parse_verdict_line(line)
+            if parsed is None:
+                continue
+            label, status, note = parsed
+            out.append(
+                {
+                    "label": label,
+                    "status": status,
+                    "note": note,
+                    "author": author,
+                    "created_at": comment.get("created_at") or "",
+                }
+            )
+    return out
+
+
+def labels_from_comments(comments: list[dict]) -> dict[str, str]:
+    """The label map from the newest summary comment that carries one.
+
+    Older comments stay in the thread: two runs on one PR both use ``F-001``, so
+    taking the union would map a label to two ids and adjudicate the wrong finding.
+    """
+    for comment in sorted(comments, key=lambda c: c.get("created_at") or "", reverse=True):
+        match = _LABELS_MAP_RE.search(comment.get("body") or "")
+        if not match:
+            continue
+        labels: dict[str, str] = {}
+        for pair in match.group(1).split(","):
+            if "=" not in pair:
+                continue
+            label, fid = pair.split("=", 1)
+            if _LABEL_RE.fullmatch(label.strip()):
+                labels[label.strip()] = fid.strip()
+        if labels:
+            return labels
+    return {}
+
+
+def collect_verdicts(
+    pr: PullRequest,
+    token: str,
+    store: Any,
+    labels: dict[str, str] | None = None,
+    api: str = API_ROOT,
+    dry_run: bool = False,
+) -> dict:
+    """Read maintainer verdicts off the PR and write them into the feedback store.
+
+    ``store`` is duck-typed on purpose (``statuses_for`` / ``set_status``) so a test
+    can hand in a fake. Idempotent: a verdict already recorded stays put.
+    """
+    comments = list_issue_comments(pr, token, api)
+    embedded = labels_from_comments(comments)
+    # The PR is what the maintainer was replying to, so its map wins; the local run
+    # ledger only fills gaps left by reviews posted before the map existed.
+    resolved = dict(labels or {})
+    resolved.update(embedded)
+
+    latest: dict[str, dict] = {}
+    for verdict in extract_verdicts(comments):
+        latest[verdict["label"]] = verdict
+
+    previous = store.statuses_for(sorted(set(resolved.values()))) if resolved else {}
+    result: dict[str, Any] = {
+        "applied": [],
+        "unchanged": 0,
+        "unknown": [],
+        "not_found": [],
+        "labels_source": "pr" if embedded else ("local" if resolved else "none"),
+    }
+    for label in sorted(latest):
+        verdict = latest[label]
+        fid = resolved.get(label)
+        if not fid:
+            result["unknown"].append(label)
+            continue
+        reason = f"github:@{verdict['author']}"
+        if verdict["note"]:
+            reason = f"{reason}：{verdict['note']}"
+        current = previous.get(fid) or {}
+        if current.get("status") == verdict["status"]:
+            result["unchanged"] += 1
+            continue
+        if not dry_run and not store.set_status(fid, verdict["status"], reason):
+            result["not_found"].append(label)
+            continue
+        result["applied"].append(
+            {
+                "label": label,
+                "finding_id": fid,
+                "status": verdict["status"],
+                "author": verdict["author"],
+                "reason": reason,
+                "dry_run": dry_run,
+            }
+        )
     return result
