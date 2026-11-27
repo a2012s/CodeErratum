@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+from dataclasses import replace
 from pathlib import Path
 
 from .config import Config
@@ -30,6 +32,19 @@ KEEP_SECRET = "__KEEP__"  # client sends this to retain an existing api_key
 MODES = ("quick", "dual", "committee")
 MAX_MODELS = 20
 _URL_RE = re.compile(r"^https?://", re.I)
+
+# save() is a read-modify-write (masked keys and measured stats are carried
+# over from the old file). Two tabs saving at once used to interleave and the
+# later writer silently dropped the other's edits; one process-wide serialises
+# them. Cross-process config editing remains last-writer-wins by design.
+_SAVE_LOCK = threading.Lock()
+
+# Parsed-file cache keyed by (path, mtime_ns, size). /api/config and the
+# pipeline's effective() both hit this on every status tick; re-parsing and
+# re-validating a pydantic model per request is pure waste when the bytes on
+# disk have not changed.
+_READ_CACHE: dict[Path, tuple[int, int, Config]] = {}
+_READ_CACHE_SIZE = 32
 
 
 def config_path(repo_root: Path) -> Path:
@@ -64,6 +79,15 @@ def _read(path: Path, label: str) -> Config | None:
     """
     if not path.exists():
         return None
+    stat = path.stat()
+    cached = _READ_CACHE.get(path)
+    if cached and cached[0] == stat.st_mtime_ns and cached[1] == stat.st_size:
+        # A copy, not the cached object: callers like apply_measured_profiles
+        # mutate spec scores in place, and that must not poison the next read.
+        # Config is a frozen dataclass holding a mutable pydantic registry: a new
+        # instance plus a deep copy of that registry is the whole story.
+        cached_cfg = cached[2]
+        return replace(cached_cfg, registry=cached_cfg.registry.model_copy(deep=True))
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{label} must be a JSON object")
@@ -75,13 +99,17 @@ def _read(path: Path, label: str) -> Config | None:
         raise ValueError(f"{label}: models must be a non-empty array")
     registry = ModelRegistry.model_validate({"models": models})
     primary = registry.models[0]
-    return Config(
+    config = Config(
         base_url=primary.base_url,
         api_key=primary.api_key,
         model=primary.model_id,
         registry=registry,
         mode=mode,  # type: ignore[arg-type]
     )
+    if len(_READ_CACHE) >= _READ_CACHE_SIZE:
+        _READ_CACHE.clear()
+    _READ_CACHE[path] = (stat.st_mtime_ns, stat.st_size, config)
+    return config
 
 
 def effective(repo_root: Path) -> tuple[Config | None, str]:
@@ -161,6 +189,12 @@ def public(repo_root: Path) -> dict:
 
 
 def save(repo_root: Path, payload: dict) -> dict:
+    """Serialised wrapper: save is a read-modify-write, never two at once."""
+    with _SAVE_LOCK:
+        return _save_unlocked(repo_root, payload)
+
+
+def _save_unlocked(repo_root: Path, payload: dict) -> dict:
     """Validate and persist a config posted by the UI; return ``public()``.
 
     The project file is always written. ``save_as_default`` (default true) also
@@ -269,3 +303,5 @@ def _write_config(path: Path, payload: dict, private_dir: bool = False) -> None:
         raise
     os.replace(tmp, path)
     os.chmod(path, 0o600)
+    # An identical mtime would keep serving the pre-save parse otherwise.
+    _READ_CACHE.pop(path, None)

@@ -81,6 +81,38 @@ def test_remove_keeps_disk_data(tmp_path):
     assert (repo / ".git").exists()
 
 
+def test_remove_refuses_a_running_review(tmp_path):
+    """The busy gate is the review lock, not a status read.
+
+    Reading review_status() and then removing orphaned a run that started in
+    between: still spending tokens, no longer reachable through the hub.
+    """
+    hub = ProjectHub(state_file=tmp_path / "projects.json")
+    entry = hub.add(str(make_repo(tmp_path / "alpha")))
+    app = hub.get(entry["slug"])
+
+    app.acquire_review_lock({})
+    try:
+        with pytest.raises(RuntimeError, match="先停止再移除"):
+            hub.remove(entry["slug"])
+        assert [p["slug"] for p in hub.snapshot()["projects"]] == [entry["slug"]]
+    finally:
+        app.release_review_lock()
+
+    assert hub.remove(entry["slug"]) == {"removed": entry["slug"]}
+
+
+def test_remove_then_start_is_refused(tmp_path):
+    """A removed app must not accept a review from an in-flight request."""
+    hub = ProjectHub(state_file=tmp_path / "projects.json")
+    entry = hub.add(str(make_repo(tmp_path / "alpha")))
+    app = hub.get(entry["slug"])
+    hub.remove(entry["slug"])
+
+    with pytest.raises(RuntimeError, match="已从面板移除"):
+        app.acquire_review_lock({})
+
+
 @pytest.fixture
 def hub_client(tmp_path):
     alpha = make_repo(tmp_path / "alpha")

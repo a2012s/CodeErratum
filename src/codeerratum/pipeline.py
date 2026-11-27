@@ -199,11 +199,26 @@ def find_repo_root(path: Path) -> Path:
     return current
 
 
+_STORES: dict[Path, ReviewStore] = {}
+
+
 def store_for(repo_root: Path) -> ReviewStore:
     # Review history and run artefacts land in the reviewed repository, so the
     # exclude rule is set up here too — not only when the UI saves a config.
-    ensure_state_dir_ignored(repo_root)
-    return ReviewStore(repo_root / STATE_DIR / "feedback.db")
+    # The object is cheap to share: every operation opens its own short-lived,
+    # WAL-coordinated connection. Status polling rebuilt the schema per request
+    # before; one cache entry per database fixes that.
+    key = repo_root.resolve()
+    store = _STORES.get(key)
+    # If the database file vanished (test teardown, manual cleanup) the cached
+    # object would recreate it WITHOUT the schema; rebuild instead.
+    if store is not None and not store.db_path.exists():
+        store = None
+    if store is None:
+        ensure_state_dir_ignored(key)
+        store = ReviewStore(key / STATE_DIR / "feedback.db")
+        _STORES[key] = store
+    return store
 
 
 def prioritize(units: list[ReviewUnit]) -> list[ReviewUnit]:

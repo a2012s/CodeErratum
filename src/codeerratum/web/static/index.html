@@ -950,6 +950,8 @@ const ZONE_HINT = {
   all: "quick 单模型模式"
 };
 let STATE = { run: null, zone: null, meta: null };
+// Last /api/review/status revision this tab rendered (null = never fetched).
+let statusRev = null;
 
 async function api(path, opts = {}) {
   const res = await fetch(BASE + path, {
@@ -1458,8 +1460,16 @@ $("stopBtn").onclick = async () => {
 
 async function pollReviewStatus() {
   if (reviewStreaming) return;  // SSE is this tab's source of truth
+  // Incremental protocol: an idle tab sends back the revision it last saw and
+  // gets a two-field stub when nothing changed. A tab that is *tracking* a run
+  // always asks for the full snapshot — the running-to-terminal transition is
+  // exactly what it must not miss, and the server never answers `unchanged`
+  // while a review is in flight.
+  const since = reviewTracking || statusRev == null ? "" : `?since=${statusRev}`;
   let st;
-  try { st = await api("/api/review/status"); } catch { return; }
+  try { st = await api("/api/review/status" + since); } catch { return; }
+  if (Number.isInteger(st.revision)) statusRev = st.revision;
+  if (st.unchanged) return;
   if (st.running) {
     reviewTracking = true;
     setRunBusy(true);

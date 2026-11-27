@@ -72,7 +72,12 @@ class ProjectHub:
             app = self._apps.get(slug)
             if app is None:
                 raise LookupError(t("hub.project_missing"))
-            if app.review_status()["running"]:
+            # The old check read review_status and then removed — a review
+            # starting between the two lines was orphaned: still running, but
+            # no longer reachable through the hub. Gating on the review lock
+            # (held for the whole run) plus the closed flag makes reserve/remove
+            # mutually exclusive: whoever loses the race fails loudly.
+            if not app.reserve_close():
                 raise RuntimeError(t("hub.project_busy"))
             del self._apps[slug]
             self._order.remove(slug)

@@ -1339,3 +1339,93 @@ def test_live_findings_are_deduped_per_model(client):
     app._note_finding(dict(brief))
     app._note_finding({"id": "f1", "model": "m2", "claim": "c"})
     assert len(app.review_status()["findings"]) == 2
+
+
+# ---- incremental status protocol (0.7.4) ------------------------------------
+
+
+def test_idle_status_answers_unchanged(client):
+    """Idle tabs must stop re-fetching the whole message + finding log per tick."""
+    app = client.app
+    first = app.review_status()
+    rev = first["revision"]
+    assert "unchanged" not in first
+    stub = app.review_status(since=rev)
+    assert stub == {"revision": rev, "unchanged": True, "running": False}
+
+
+def test_status_over_http_honours_since(client):
+    full = client.get("/api/review/status").json()
+    assert "unchanged" not in full and "messages" in full
+    stub = client.get(f"/api/review/status?since={full['revision']}").json()
+    assert stub["unchanged"] is True and stub["running"] is False
+    # A garbage revision degrades to a full snapshot rather than an error.
+    loose = client.get("/api/review/status?since=notanumber").json()
+    assert "unchanged" not in loose and "revision" in loose
+
+
+def test_mutation_bumps_revision(client):
+    app = client.app
+    base = app.review_status()["revision"]
+    app._note_progress("a line nobody on SSE saw")
+    assert app.review_status(since=base).get("unchanged") is None
+    after = app.review_status()["revision"]
+    assert after > base
+    app._note_finding({"id": "f1", "model": "m", "claim": "c"})
+    assert app.review_status()["revision"] > after
+    app._set_status("done")
+    assert app.review_status()["revision"] > after + 1
+
+
+def test_running_review_is_never_reported_unchanged(client):
+    """A tracking tab must see the running -> terminal flip, not a stub."""
+    app = client.app
+    app.acquire_review_lock({})
+    try:
+        rev = app.review_status()["revision"]
+        assert app.review_status(since=rev)["running"] is True
+        assert app.review_status(since=rev).get("unchanged") is not True
+    finally:
+        app.release_review_lock()
+
+
+def test_release_lock_bumps_revision(client):
+    app = client.app
+    app.acquire_review_lock({})
+    rev = app.review_status()["revision"]
+    app.release_review_lock(status="done", run_id="abc123")
+    assert app.review_status(since=rev).get("unchanged") is None
+    assert app.review_status()["run_id"] == "abc123"
+
+
+def test_body_read_timeout_is_restored_for_sse(client):
+    """The POST-body deadline must not leak into the long SSE frames after it."""
+    import inspect
+
+    from codeerratum.web import server as web_server
+
+    Handler = web_server.make_handler(client.app)
+    body_src = inspect.getsource(Handler._body)
+    assert "settimeout(BODY_READ_TIMEOUT_S)" in body_src
+    assert "finally:" in body_src and "settimeout(previous_timeout)" in body_src
+    assert web_server.BODY_READ_TIMEOUT_S > 0
+
+
+def test_removed_project_refuses_a_new_review(client):
+    """reserve_close + the closed flag close the remove-vs-start race."""
+    app = client.app
+    assert app.reserve_close() is True
+    with pytest.raises(RuntimeError):
+        app.acquire_review_lock({})
+    # The lock must not stay held by the refused attempt.
+    assert app._review_lock.acquire(blocking=False)
+    app._review_lock.release()
+
+
+def test_reserve_close_loses_against_a_running_review(client):
+    app = client.app
+    app.acquire_review_lock({})
+    try:
+        assert app.reserve_close() is False
+    finally:
+        app.release_review_lock()

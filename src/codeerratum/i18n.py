@@ -182,6 +182,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "该项目正在审查，先停止再移除",
         "This project is reviewing; stop it before removing",
     ),
+    "hub.project_removed": (
+        "该项目已从面板移除，无法再启动审查",
+        "This project was removed from the board; cannot start a review",
+    ),
     "hub.no_projects": (
         "还没有项目，请先添加一个本地仓库",
         "No projects yet; add a local repository first",

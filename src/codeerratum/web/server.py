@@ -26,7 +26,7 @@ import webbrowser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from .. import HOMEPAGE, __version__
 from ..config_store import KEEP_SECRET
@@ -86,6 +86,9 @@ RUN_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 FINDING_ID_RE = re.compile(r"^[0-9a-f]{6,32}$")
 LOOPBACK_HOST_RE = re.compile(r"^(?:127\.0\.0\.1|localhost|\[::1\]|::1)(?::\d+)?$", re.I)
 MAX_BODY = 2 * 1024 * 1024
+# Cap for reading a POST body off the wire. Local callers send one small JSON
+# document; anything slower than this is a half-open connection, not a user.
+BODY_READ_TIMEOUT_S = 60
 # Cost guard for the web UI. The CLI trusts --max-units as given; the UI is a
 # click-away surface (and reachable by any local page script), so an absurd value
 # is clamped here — and the clamp is announced instead of applied silently.
@@ -239,6 +242,11 @@ class WebApp:
         # Shared progress state: any client can see the one running review, so a
         # second tab (or a stale request) knows the button must read "审查中".
         self._state_lock = threading.Lock()
+        # True once the hub removed this project. reserve_close() and
+        # acquire_review_lock() both gate on _review_lock, which spans a whole
+        # run, so remove and start are mutually exclusive. A bare
+        # review_status()["running"] check leaves that race open.
+        self._closed = False
         self._review_state: dict = {
             "running": False,
             "status": "idle",
@@ -253,6 +261,10 @@ class WebApp:
             # tab, run started elsewhere) can draw them too — the SSE connection
             # only reaches the request that opened it.
             "findings": [],
+            # Bumped on every state mutation. Pollers pass it back as ``since``;
+            # an unchanged revision lets review_status return a two-field stub
+            # instead of re-serialising the whole message + finding log per tab.
+            "revision": 0,
         }
 
     @property
@@ -640,18 +652,27 @@ class WebApp:
     def stats(self) -> dict:
         return self.store.stats()
 
-    def review_status(self) -> dict:
+    def review_status(self, since: int | None = None) -> dict:
         """Snapshot of the single in-flight review (or the last finished one).
 
         Polled by every open tab so the run button and progress panel reflect a
         review started elsewhere — including a request whose SSE connection was
         dropped but whose server-side work is still going.
+
+        ``since`` carries the revision the poller last saw. When nothing has
+        changed, the reply is a two-field stub instead of a full copy of the
+        message log and live findings — the incremental protocol the old
+        whole-state polling always lacked.
         """
         with self._state_lock:
+            revision = self._review_state.get("revision", 0)
+            if since is not None and since == revision and not self._review_state["running"]:
+                return {"revision": revision, "unchanged": True, "running": False}
             state = dict(self._review_state)
             state["messages"] = list(state["messages"])
             state["findings"] = list(state.get("findings") or [])
             state["params"] = dict(state["params"])
+            state["revision"] = revision
             if state["started_at"] is not None and state["finished_at"] is None:
                 state["elapsed_s"] = round(time.monotonic() - state["started_at"], 1)
             else:
@@ -678,6 +699,7 @@ class WebApp:
             # Bound memory for long dual/committee runs with many units.
             if len(msgs) > 400:
                 del msgs[:-400]
+            self._review_state["revision"] = self._review_state.get("revision", 0) + 1
 
     def _note_finding(self, brief: dict) -> None:
         """Remember a live finding for everyone who is not on the SSE connection.
@@ -695,6 +717,7 @@ class WebApp:
             # Bound it like the message log: a committee run can produce hundreds.
             if len(items) > 500:
                 del items[:-500]
+            self._review_state["revision"] = self._review_state.get("revision", 0) + 1
 
     # ---- writes ----------------------------------------------------------
 
@@ -787,6 +810,10 @@ class WebApp:
     def acquire_review_lock(self, params: dict | None = None) -> None:
         if not self._review_lock.acquire(blocking=False):
             raise RuntimeError(t("server.review_busy"))
+        if self._closed:
+            # The hub removed this project between the route lookup and here.
+            self._review_lock.release()
+            raise RuntimeError(t("hub.project_removed"))
         self._stop_event.clear()
         with self._state_lock:
             self._review_state.update(
@@ -813,6 +840,19 @@ class WebApp:
                     "findings": [],
                 }
             )
+            self._review_state["revision"] = self._review_state.get("revision", 0) + 1
+
+    def reserve_close(self) -> bool:
+        """Atomically mark the project removed when no review holds the lock.
+
+        The lock spans the whole run, so winning it means a start cannot slip
+        in between the busy check and the closed flag.
+        """
+        if self._review_lock.acquire(blocking=False):
+            self._closed = True
+            self._review_lock.release()
+            return True
+        return False
 
     def release_review_lock(
         self,
@@ -831,6 +871,7 @@ class WebApp:
                 self._review_state["run_id"] = run_id
             if tokens is not None:
                 self._review_state["tokens"] = tokens
+            self._review_state["revision"] = self._review_state.get("revision", 0) + 1
         self._review_lock.release()
 
     def stop_review(self) -> dict:
@@ -842,6 +883,7 @@ class WebApp:
             if self._review_state["status"] != "stopping":
                 self._review_state["status"] = "stopping"
                 self._review_state["messages"].append(t("server.stop_requested_log"))
+                self._review_state["revision"] = self._review_state.get("revision", 0) + 1
         return {"ok": True, "message": t("server.stop_requested")}
 
     def _set_status(self, status: str, message: str = "") -> None:
@@ -849,6 +891,7 @@ class WebApp:
             self._review_state["status"] = status
             if message:
                 self._review_state["messages"].append(message)
+            self._review_state["revision"] = self._review_state.get("revision", 0) + 1
 
     def _wait_for_slot(self) -> None:
         """Block until the hub grants an execution slot (other projects may run).
@@ -1242,7 +1285,20 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                 raise ValueError("request body too large")
             if not length:
                 return {}
-            raw = self.rfile.read(length)
+            # A stalled upload used to hold a handler thread forever: no socket
+            # timeout here means one half-open connection can occupy a slot of
+            # the thread pool. The timeout is scoped to the body read and the
+            # previous setting is restored afterwards, because the same
+            # connection goes on to stream SSE frames for minutes and must not
+            # inherit a short read deadline.
+            previous_timeout = self.connection.gettimeout()
+            self.connection.settimeout(BODY_READ_TIMEOUT_S)
+            try:
+                raw = self.rfile.read(length)
+            except (TimeoutError, OSError) as exc:
+                raise ValueError(f"body read failed: {exc}") from exc
+            finally:
+                self.connection.settimeout(previous_timeout)
             data = json.loads(raw.decode("utf-8"))
             if not isinstance(data, dict):
                 raise ValueError("body must be a JSON object")
@@ -1334,7 +1390,16 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                 elif path == "/api/stats":
                     self._json(HTTPStatus.OK, app.stats())
                 elif path == "/api/review/status":
-                    self._json(HTTPStatus.OK, app.review_status())
+                    # Incremental protocol: ?since=<revision> answers with a stub
+                    # when nothing changed, so N idle tabs stop re-fetching the
+                    # whole message + finding log every tick.
+                    since: int | None = None
+                    raw_since = (parse_qs(urlsplit(self.path).query).get("since") or [""])[0]
+                    try:
+                        since = int(raw_since) if raw_since else None
+                    except ValueError:
+                        since = None
+                    self._json(HTTPStatus.OK, app.review_status(since=since))
                 elif path == "/api/docs":
                     self._json(HTTPStatus.OK, app.docs_overview())
                 elif m := re.fullmatch(r"/api/runs/([0-9a-f]+)", path):
