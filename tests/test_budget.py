@@ -376,6 +376,13 @@ def test_env_budget_is_the_fallback_not_the_override(monkeypatch, tmp_path):
     pipeline.execute_review(repo, diff_spec="HEAD", token_budget=5)
     assert seen["kwargs"]["token_budget"] == 5
 
+    # An explicit 0 is the documented "no cap" from MCP/Web. With `or` it was
+    # collapsed into the env fallback and silently re-armed a disabled budget.
+    seen = {}
+    _stub_run_review(monkeypatch, seen)
+    pipeline.execute_review(repo, diff_spec="HEAD", token_budget=0)
+    assert seen["kwargs"]["token_budget"] == 0
+
 
 def test_a_fused_run_records_the_reason_in_the_work_order(monkeypatch, tmp_path):
     """The report is the handoff: it must not read like the reviewer quit on its own."""
@@ -409,6 +416,10 @@ def test_a_fused_run_records_the_reason_in_the_work_order(monkeypatch, tmp_path)
     assert any("42/10" in n for n in notes)
     text = (repo / "report.md").read_text(encoding="utf-8")
     assert "token 预算熔断" in text
+    # The fuse line must stay inside the stopped-run quote block. A bare line
+    # closed the block, so the execution AI read the cause as outside the banner.
+    cause_line = next(line for line in text.splitlines() if "token 预算熔断" in line)
+    assert cause_line.startswith("> "), f"cause escaped the quote block: {cause_line!r}"
     assert outcome.out_path is not None
 
 

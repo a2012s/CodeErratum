@@ -760,7 +760,11 @@ def execute_review(
     # sitting will burn, and wants the fuse armed if they set one. chars/4 is a
     # heuristic floor: it excludes the system prompt and source context, so the
     # real number lands above it, never below.
-    token_budget = token_budget or token_budget_from_env()
+    # Only None means "not set here" — fall back to the environment. An explicit
+    # 0 is the documented "no cap" from the MCP/Web entry points; `or` collapsed
+    # it into the fallback and silently resurrected a budget the caller disabled.
+    if token_budget is None:
+        token_budget = token_budget_from_env()
     seat_count = len(config.registry.models) + (0 if run_mode == "quick" else 1)
     input_chars = sum(len(h.content) for u in selected for h in u.hunks)
     est_tokens = max(input_chars // 4, 1) * max(seat_count, 1)

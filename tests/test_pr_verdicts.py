@@ -88,6 +88,15 @@ class _Store:
         ("F-005：已修", ("F-005", "accepted", "")),
         ("F-006 wontfix", ("F-006", "rejected", "")),
         ("F-007 这条我同意，改一下", ("F-007", "accepted", "")),
+        # A negation inverts the verdict. Before the fix these were all recorded
+        # as acceptances, silently inverting the adoption rate and routing scores.
+        ("F-001 不采纳", ("F-001", "rejected", "")),
+        ("F-002 不认可", ("F-002", "rejected", "")),
+        ("F-003 不确认", ("F-003", "rejected", "")),
+        ("F-004 不同意", ("F-004", "rejected", "")),
+        ("F-005 not accepted", ("F-005", "rejected", "")),
+        ("F-006 do not approve", ("F-006", "rejected", "")),
+        ("F-007 这条我不同意，别改", ("F-007", "rejected", "")),
     ],
 )
 def test_verdict_lines_parse(line, expected):
@@ -103,6 +112,8 @@ def test_verdict_lines_parse(line, expected):
         "已修 F-",  # not a label at all
         "reject",  # a verdict with no label
         "acceptance 测试要补",  # 'accept' must not match inside a longer word
+        "F-003 这个同意吗",  # asking is not deciding
+        "F-004 你觉得呢",
     ],
 )
 def test_prose_is_not_a_verdict(line):

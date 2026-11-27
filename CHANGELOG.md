@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.7.5] — 2026-11-28
+
+复核 0.7.4 后修掉的六个问题，全部有可复现证据（先证明测试在旧代码上失败）：
+
+- **P1 PR 裁决否定反向**：`parse_verdict_line` 先匹配 accept 词再找否定，导致
+  `不采纳`/`不认可`/`不同意`/`not accepted`/`do not approve` 全被记成 accepted，
+  直接反转采纳率并污染模型路由。改为拒绝词优先、接受词检测中英文否定前缀；
+  疑问句（`这个同意吗`）不再被当成裁决。
+- **P1 `eval --run-id` 直接崩溃**：`adjudication_rows(run_id=...)` 把 findings
+  查询的绑定参数传给一条没有占位符的 events 查询，抛 `ProgrammingError`。
+  events 改用自身的 `run_id` 谓词；补跨 run 隔离测试。
+- **P1 tsc 缓存绕过项目级失效**：`_collect_ts` 把 tsc 和 eslint 一起按
+  (path, mtime, size) 缓存，改一个被 import 的 types.ts 时，字节未变的 a.ts
+  直接命中旧结果，把上一轮的类型错误喂给模型。tsc 改为每次走项目级指纹缓存，
+  只缓存真正 per-file 的 eslint；项目指纹从 (count, newest mtime) 升级为
+  含相对路径与 size 的摘要，捕捉等量替换/改名。
+- **P2 显式 token 预算 0 被环境变量覆盖**：pipeline 与 resume 用
+  `token_budget or env`，把 MCP/Web 明示的「0 = 不设上限」折叠成回退值，
+  悄悄重新启用用户关掉的预算。改为仅 `None` 回退环境。
+- **P2 熔断横幅跳出引用块**：预算熔断说明行缺少 `> ` 前缀，Markdown 关闭了
+  停止横幅的引用块，执行方 AI 会把熔断原因读成正文而非停止协议的一部分。
+
+全量测试与静态检查见本轮提交说明。
+
 ## [0.7.4] — 2026-11-28
 
 把 0.7.2 挂在文末的五个待办全部做掉，再把闭环从「本机 Web UI」推到两个此前够不着

@@ -13,6 +13,7 @@ first (node_modules/.bin), then PATH, gracefully degraded when missing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -168,7 +169,7 @@ def _normalize_tool_path(raw: str, repo: Path) -> str:
 
 
 def _source_stamp(repo: Path) -> tuple:
-    """Fingerprint the project's TS/JS sources: (file count, newest mtime).
+    """Fingerprint the project's TS/JS sources.
 
     ``tsconfig.json`` alone is not enough. In the desktop app and the Web server
     the process outlives a single review, so an *edit to a source file* between
@@ -176,24 +177,34 @@ def _source_stamp(repo: Path) -> tuple:
     feed the model the previous run's errors. The walk skips vendored/build
     directories and is capped, because it replaces a subprocess that costs
     minutes; a few thousand ``stat`` calls is noise next to that.
+
+    A (count, newest mtime) pair is not enough either: swapping one old file for
+    another old file keeps both numbers identical while changing what tsc sees.
+    The digest over every (relative path, mtime, size) triple catches renames and
+    equal-count replacements as well as ordinary edits.
     """
     count = 0
     newest = 0
     visited = 0
+    digests: list[str] = []
     for dirpath, dirnames, filenames in os.walk(repo):
         dirnames[:] = [d for d in dirnames if d not in _TSC_SKIP_DIRS]
         for name in filenames:
             visited += 1
             if visited > _TSC_STAMP_FILE_CAP:
-                return (-1, -1)
+                return (-1, -1, "")
             if Path(name).suffix in _TS_EXTENSIONS:
                 count += 1
+                full = Path(dirpath) / name
                 try:
-                    mtime = (Path(dirpath) / name).stat().st_mtime_ns
+                    stat_info = full.stat()
                 except OSError:
                     continue
-                newest = max(newest, mtime)
-    return (count, newest)
+                newest = max(newest, stat_info.st_mtime_ns)
+                rel = full.relative_to(repo).as_posix()
+                digests.append(f"{rel}|{stat_info.st_mtime_ns}|{stat_info.st_size}")
+    digest = hashlib.sha256("\n".join(sorted(digests)).encode("utf-8")).hexdigest()
+    return (count, newest, digest)
 
 
 def _run_tsc_project(repo: Path) -> list[StaticDiag]:
@@ -366,7 +377,14 @@ def _collect_py(path: str, repo_root) -> list[StaticDiag]:
 
 
 def _collect_ts(path: str, repo_root) -> list[StaticDiag]:
-    """TypeScript / JavaScript path: tsc + eslint."""
+    """TypeScript / JavaScript path: tsc + eslint.
+
+    tsc must go through ``run_tsc`` on *every* call: its result is project-wide, so
+    changing an imported types.ts changes a.ts's diagnostics while a.ts itself is
+    byte-identical. Caching it per file on (path, mtime, size) skipped the
+    project-level fingerprint entirely and fed the model last run's type errors.
+    eslint is genuinely per-file, so only that half is memoised here.
+    """
     file_path = Path(repo_root) / path
     try:
         stat_info = file_path.stat()
@@ -376,14 +394,16 @@ def _collect_ts(path: str, repo_root) -> list[StaticDiag]:
     # Only proceed when the project declares itself as a JS/TS project.
     if not (repo / "package.json").exists():
         return []
-    key = (str(file_path), "tsc+eslint", stat_info.st_mtime_ns, stat_info.st_size)
+    tsc_diags = run_tsc(str(path), repo)
+    key = (str(file_path), "eslint", stat_info.st_mtime_ns, stat_info.st_size)
     cached = _CACHE.get(key)
     if cached is not None:
-        return list(cached)
-    diags = run_tsc(str(path), repo) + run_eslint(str(path), repo)
-    _cache_prune()
-    _CACHE[key] = diags
-    return list(diags)
+        eslint_diags = list(cached)
+    else:
+        eslint_diags = run_eslint(str(path), repo)
+        _cache_prune()
+        _CACHE[key] = eslint_diags
+    return tsc_diags + eslint_diags
 
 
 # ── Prompt rendering ─────────────────────────────────────────────────────────

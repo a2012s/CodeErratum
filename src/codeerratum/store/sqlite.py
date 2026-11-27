@@ -408,10 +408,17 @@ class ReviewStore:
         sql += " ORDER BY created_at DESC"
         with self._conn() as conn:
             findings = [dict(r) for r in conn.execute(sql, args).fetchall()]
+            # The findings query's WHERE belongs to *its* statement, not this one:
+            # passing the run_id binding to a query with no placeholder raises
+            # ProgrammingError. Filter verdict events on their own column.
             event_sql = (
                 "SELECT run_id, finding_id, model_id FROM verdict_events WHERE role='assert'"
             )
-            events = conn.execute(event_sql, args if run_id else ()).fetchall()
+            event_args: tuple = ()
+            if run_id:
+                event_sql += " AND run_id=?"
+                event_args = (run_id,)
+            events = conn.execute(event_sql, event_args).fetchall()
         asserted: dict[tuple[str, str], list[str]] = {}
         for e in events:
             asserted.setdefault((e["run_id"], e["finding_id"]), []).append(e["model_id"])

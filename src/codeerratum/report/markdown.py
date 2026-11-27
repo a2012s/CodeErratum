@@ -112,8 +112,10 @@ def _stop_banner(collection: FindingCollection) -> str:
         # Without this line the reader cannot tell a fuse from a human stop, and
         # would conclude the reviewer was interrupted on purpose rather than that
         # the run still has unpaid units left.
+        # Every line in a quote block must carry the marker or Markdown closes the
+        # block at the bare line, leaving the fuse explanation outside the banner.
         cause = (
-            f"停止原因：token 预算熔断（已用 {budget.get('spent', 0)}"
+            f"> 停止原因：token 预算熔断（已用 {budget.get('spent', 0)}"
             f"/{budget.get('token_budget', 0)}），非人工中断；剩余单元可用 resume 续跑。\n"
         )
     return (

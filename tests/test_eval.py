@@ -369,6 +369,30 @@ def test_cli_eval_seeded_reads_ledgers(tmp_path: Path, monkeypatch):
     assert payload["seeded"]["recall"] == 1.0
 
 
+def test_export_labels_scoped_to_one_run(tmp_path: Path):
+    """--run-id must not pass the findings WHERE binding to the events query.
+
+    adjudication_rows used to reuse the findings query's `(run_id,)` tuple for a
+    statement with no placeholder, raising ProgrammingError and breaking every
+    scoped eval/export. The events need their own run_id predicate.
+    """
+    store = _store_with(tmp_path)
+    col = _collection(
+        "r2",
+        mode="dual",
+        findings=[_finding("c" * 16, "c.py", 4, 4, ["m3"])],
+    )
+    store.save_run(col, "2026-01-02T00:00:00+00:00")
+    store.set_status("c" * 16, "accepted")
+
+    rows = store.adjudication_rows(run_id="r1")
+    assert {r["id"] for r in rows} == {"a" * 16, "b" * 16}
+    assert any(r["models"] for r in rows), "assert events must still be joined"
+
+    rows_exported = export_labels(store, run_id="r1")
+    assert {row["id"] for row in rows_exported} == {"a" * 16, "b" * 16}
+
+
 def test_cli_eval_bad_manifest_fails_loudly(tmp_path: Path):
     bugs = tmp_path / "bugs.json"
     bugs.write_text("[]", encoding="utf-8")

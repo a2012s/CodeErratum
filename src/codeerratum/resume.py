@@ -396,7 +396,10 @@ def resume_review(
                     # language must travel as a value, not leak through a
                     # ContextVar from whatever thread happens to resume.
                     output_lang=get_lang(),
-                    token_budget=token_budget or token_budget_from_env(),
+                    # None asks the environment; an explicit 0 means uncapped.
+                    token_budget=(
+                        token_budget_from_env() if token_budget is None else token_budget
+                    ),
                 )
             )
         except ValueError as exc:

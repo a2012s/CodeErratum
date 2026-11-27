@@ -284,7 +284,9 @@ def test_cache_key_separates_py_from_ts(tmp_path):
     _CACHE.clear()
     collect_static("src/a.ts", repo)
     keys = list(_CACHE.keys())
-    assert any("tsc+eslint" in str(k) for k in keys), f"keys: {keys}"
+    # tsc is project-wide and must NOT be in the per-file cache — only eslint is.
+    assert any("eslint" in str(k) for k in keys), f"keys: {keys}"
+    assert not any("tsc" in str(k) for k in keys), f"keys: {keys}"
     assert not any("ruff+mypy" in str(k) for k in keys)
     _CACHE.clear()
 
@@ -306,7 +308,8 @@ def test_all_ts_extensions_trigger_ts_path(tmp_path):
         result = collect_static(fname, repo)
         assert isinstance(result, list), f"failed for {ext}"
         keys = list(_CACHE.keys())
-        assert any("tsc+eslint" in str(k) for k in keys), f"no tsc+eslint key for {ext}: {keys}"
+        assert any("eslint" in str(k) for k in keys), f"no eslint key for {ext}: {keys}"
+        assert not any("tsc" in str(k) for k in keys), f"tsc must not be per-file cached: {keys}"
 
 
 def test_collect_static_unknown_extension(tmp_path):
@@ -349,6 +352,55 @@ def test_collect_static_caches_and_reuses(tmp_path):
     # Must return the cached result, not re-run.
     assert r2 == r1
     _CACHE.clear()
+
+
+def test_ts_diagnostics_refresh_when_a_sibling_file_changes(tmp_path, monkeypatch):
+    """A change to types.ts must refresh diagnostics on an unchanged a.ts.
+
+    tsc compiles the whole project. The old per-file cache returned a.ts's last
+    result on (path, mtime, size) alone, so a type change in an imported file
+    never reached the model — exactly the stale-fact failure the cache was
+    supposed to avoid.
+    """
+    repo = _ts_repo(tmp_path)
+    (repo / "types.ts").write_text("export type T = number\n")
+    bin_dir = repo / "node_modules" / ".bin"
+    bin_dir.mkdir(parents=True)
+    tsc = bin_dir / "tsc"
+    # The fake tool's output depends on the *project*, not on a.ts.
+    tsc.write_text(
+        "#!/bin/sh\n"
+        'if grep -q BAD "$REPO_DIR/types.ts"; then '
+        'echo "src/a.ts(1,1): error TS2322: bad type"; fi\n'
+    )
+    tsc.chmod(tsc.stat().st_mode | stat.S_IEXEC)
+    _make_fake_tool(bin_dir, "eslint", '#!/bin/sh\necho "[]"\n')
+    monkeypatch.setenv("REPO_DIR", str(repo))
+
+    first = collect_static("src/a.ts", repo)
+    assert first == []
+    (repo / "types.ts").write_text("export type T = BAD\n")
+    second = collect_static("src/a.ts", repo)
+    assert any(d.tool == "tsc" for d in second), "tsc must rerun on a sibling change"
+
+
+def test_source_stamp_detects_equal_count_file_swaps(tmp_path):
+    """Same file count and newest mtime must not mean 'unchanged'."""
+    from codeerratum.evidence.static import _source_stamp
+
+    repo = _ts_repo(tmp_path)
+    (repo / "old.ts").write_text("export const x = 1\n")
+    os.utime(repo / "old.ts", (1_000_000_000, 1_000_000_000))
+    before = _source_stamp(repo)
+
+    (repo / "old.ts").unlink()
+    (repo / "new.ts").write_text("export const y = 1\n")
+    os.utime(repo / "new.ts", (1_000_000_000, 1_000_000_000))
+    after = _source_stamp(repo)
+
+    assert before[0] == after[0], "file count is unchanged by an equal swap"
+    assert before[1] == after[1], "newest mtime is unchanged by an old-timestamp swap"
+    assert before[2] != after[2], "the digest must still detect the rename"
 
 
 def test_cache_prune_evicts_oldest(tmp_path):

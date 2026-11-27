@@ -387,39 +387,63 @@ _ACCEPT_WORDS = {"accept", "accepted", "approve", "approved", "agree", "confirm"
 _REJECT_WORDS = {"reject", "rejected", "refuse", "refused", "decline", "declined", "wontfix"}
 _ACCEPT_CJK = ("采纳", "确认", "同意", "已修", "认可")
 _REJECT_CJK = ("驳回", "误报", "不修", "不采纳", "拒绝")
+# A negation is the difference between adopting and refusing a finding — writing
+# "不采纳" into the adoption rate as an acceptance inverts the one number this whole
+# loop exists to measure. English negation sits in the *previous* token ("not
+# accepted"); Chinese sticks to the verdict token itself ("不认可", "这条我不同意").
+_NEGATION_EN = {
+    "not",
+    "no",
+    "never",
+    "none",
+    "cannot",
+    "dont",
+    "doesnt",
+    "didnt",
+    "isnt",
+    "wasnt",
+    "arent",
+    "werent",
+    "wont",
+    "cant",
+}
+_NEGATION_CJK = ("不", "没", "未", "无", "非", "别")
 
 
 def parse_verdict_line(line: str) -> tuple[str, str, str] | None:
     """``(label, status, note)`` when one line is a verdict directive, else None.
 
     Deliberately narrow: a label token plus a verdict word. "对，改一下" is not a
-    verdict, and guessing at it would put words in the maintainer's mouth.
+    verdict, and guessing at it would put words in the maintainer's mouth. A
+    question ("这个同意吗") is not a verdict either — asking is not deciding.
     """
     label_match = _LABEL_RE.search(line)
     if not label_match:
         return None
     label = f"F-{int(label_match.group(1)):03d}"
+    # A trailing question mark turns any verdict word into a question. The parse
+    # below cannot tell "我同意" from "同意吗" by the word alone.
+    if line.rstrip().endswith(("?", "？", "吗", "呢")):
+        return None
     status = ""
     tail = ""
+    previous = ""
     for match in re.finditer(r"[A-Za-z]+|[\u4e00-\u9fff]+", line):
         word = match.group(0)
         key = word.lower()
-        if key in _ACCEPT_WORDS:
-            status = "accepted"
-            tail = line[match.end() :]
-            break
-        if key in _REJECT_WORDS:
+        # Rejection words already carry their own negation ("不修", "不采纳",
+        # "wontfix"). Test them first so a generic negation check cannot flip a
+        # refusal back into an acceptance.
+        if key in _REJECT_WORDS or any(alias in word for alias in _REJECT_CJK):
             status = "rejected"
             tail = line[match.end() :]
             break
-        if any(alias in word for alias in _ACCEPT_CJK):
-            status = "accepted"
+        if key in _ACCEPT_WORDS or any(alias in word for alias in _ACCEPT_CJK):
+            negated = previous in _NEGATION_EN or any(p in word for p in _NEGATION_CJK)
+            status = "rejected" if negated else "accepted"
             tail = line[match.end() :]
             break
-        if any(alias in word for alias in _REJECT_CJK):
-            status = "rejected"
-            tail = line[match.end() :]
-            break
+        previous = key
     if not status:
         return None
     # The reason a rejected finding is useful to model routing rather than just a
