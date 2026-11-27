@@ -28,6 +28,7 @@ from .pipeline import (
     find_repo_root,
     store_for,
 )
+from .report import gate_sections
 from .report.outcomes import apply_outcomes, parse_outcomes
 from .review import MAX_HOUSE_RULES_CHARS
 from .store import ReviewStore
@@ -50,6 +51,30 @@ def _read_rules_file(path: Path | None) -> str:
         console.print(f"[red]Error: rules file not found: {path}[/red]")
         raise typer.Exit(1)
     return path.read_text(encoding="utf-8", errors="replace")
+
+
+GATE_EXIT_CODE = 2
+
+
+def _enforce_gate(collection, fail_on_blocking: bool) -> None:
+    """Turn the work order's blocking section into an exit code for PR checks.
+
+    The reviewer does not block a merge by itself: it emits a signal that the
+    caller (CI job, coding agent, human) chooses to enforce. Exit 2 is distinct
+    from exit 1 (setup/diff/provider failure) so a gate hit is not mistaken for a
+    broken run.
+    """
+    if not fail_on_blocking:
+        return
+    blocking, _advisory = gate_sections(collection)
+    if blocking:
+        labels = ", ".join(label for label, _ in blocking[:8])
+        console.print(
+            f"[red]门禁未通过：{len(blocking)} 条阻断项（{labels}）[/red]\n"
+            "[dim]退出码 2 表示阻断段非空，不是审查失败。[/dim]"
+        )
+        raise typer.Exit(GATE_EXIT_CODE)
+    console.print("[green]门禁通过：阻断段为空。[/green]")
 
 
 def _version_callback(value: bool) -> None:
@@ -110,6 +135,12 @@ def review(
         help="Fuse for total tokens this sitting may spend; tripping it keeps a partial, "
         "resumable report. 0 falls back to $CODEERRATUM_TOKEN_BUDGET when set",
     ),
+    fail_on_blocking: bool = typer.Option(
+        False,
+        "--fail-on-blocking",
+        help="Exit 2 when the work order has a blocking finding (hard static evidence "
+        "plus an acceptance command). Off by default; PR checks opt in",
+    ),
 ) -> None:
     """Review a git diff and write an executable erratumReview.md work order."""
     repo_root = repo.resolve()
@@ -162,6 +193,7 @@ def review(
     if outcome.collection.comparison:
         console.print(f"Comparison: {outcome.collection.comparison}")
     console.print(f"Artifacts: {outcome.run_dir}")
+    _enforce_gate(outcome.collection, fail_on_blocking)
 
 
 @app.command()
@@ -256,6 +288,12 @@ def pr(
     mode: str = typer.Option("", "--mode", help="quick|dual|committee"),
     rules: Path | None = typer.Option(None, "--rules", help="Project rules file"),
     path: str = typer.Option("", "--path", help="Limit the diff to a git pathspec, e.g. src/api"),
+    fail_on_blocking: bool = typer.Option(
+        False,
+        "--fail-on-blocking",
+        help="Exit 2 when a blocking finding exists, after comments are posted. "
+        "Enable in the PR check that should enforce the gate",
+    ),
 ) -> None:
     """Review a pull request and post the result as PR comments."""
     from .ci import (
@@ -344,6 +382,7 @@ def pr(
             typer.echo(inline_body(f))
         console.print("\n[bold]=== Summary ===[/bold]")
         typer.echo(body)
+        _enforce_gate(collection, fail_on_blocking)
         return
 
     gh_token = token or os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
@@ -363,6 +402,7 @@ def pr(
             f"[green]Posted[/green] {result['inline_posted']} inline + 1 summary"
             + (" [yellow](降级为逐条发送)[/yellow]" if result.get("degraded") else "")
         )
+    _enforce_gate(collection, fail_on_blocking)
     if result.get("summary_url"):
         console.print(result["summary_url"])
 
@@ -987,6 +1027,14 @@ def eval_command(
     labels: Path | None = typer.Option(
         None, "--labels", help="用人工标注好的 JSONL 代替库内裁决来算模型精度"
     ),
+    missed_export: Path | None = typer.Option(
+        None,
+        "--missed-export",
+        help="把 accepted 裁决回流成漏报样本 JSONL（未报出的席位算漏报）",
+    ),
+    missed: Path | None = typer.Option(
+        None, "--missed", help="用漏报样本 JSONL 评分：这些缺陷现在是否被覆盖"
+    ),
     run_id: list[str] = typer.Option(None, "--run-id", help="只评指定 run（可重复）"),
     limit: int = typer.Option(20, "--limit", help="未指定 run 时最多评最近的几个"),
     as_json: bool = typer.Option(False, "--json", help="输出机器可读 JSON"),
@@ -997,6 +1045,23 @@ def eval_command(
     warnings: list[str] = []
     ids = [str(r) for r in (run_id or [])]
     one_run = ids[0] if len(ids) == 1 else None
+
+    if missed_export:
+        # Corpus extraction needs the whole history, not the scoring --limit: a
+        # five-run window would silently drop most of the accepted verdicts.
+        history, history_warns = _eval.run_collections(root, ids or None, limit=5000)
+        warnings.extend(history_warns)
+        rows = _eval.export_missed_corpus(_store(root), history)
+        try:
+            with missed_export.open("w", encoding="utf-8") as fh:
+                for row in rows:
+                    fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            console.print(f"[red]cannot write {missed_export}: {exc}[/red]")
+            raise typer.Exit(1) from exc
+        console.print(f"[green]已写出 {len(rows)} 行漏报样本到 {missed_export}[/green]")
+        console.print("[dim]样本来自 accepted 裁决，不是 seeded 真值；score 时只算覆盖率。[/dim]")
+        return
 
     if export:
         try:
@@ -1017,15 +1082,22 @@ def eval_command(
         )
         return
 
+    loaded: list | None = None
+
+    def _scored_runs() -> list:
+        nonlocal loaded
+        if loaded is None:
+            loaded, warns = _eval.run_collections(root, ids or None, limit)
+            warnings.extend(warns)
+        return loaded
+
     if seeded:
         try:
             bugs = _eval.load_seeded_bugs(seeded)
         except (OSError, ValueError) as exc:
             console.print(f"[red]种 bug 清单不可用：{exc}[/red]")
             raise typer.Exit(1) from exc
-        wanted = ids or None
-        collections, warns = _eval.run_collections(root, wanted, limit)
-        warnings.extend(warns)
+        collections = _scored_runs()
         if not collections:
             console.print(
                 f"[yellow]没有可评分的 run 账本（{root}/.codeerratum/runs 为空或均已清理）[/yellow]"
@@ -1047,12 +1119,26 @@ def eval_command(
         raise typer.Exit(1) from exc
     payload["labels"] = _eval.score_labels(rows)
 
+    if missed:
+        try:
+            samples = [
+                json.loads(line)
+                for line in missed.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except (OSError, ValueError) as exc:
+            console.print(f"[red]漏报样本不可用：{exc}[/red]")
+            raise typer.Exit(1) from exc
+        payload["missed"] = _eval.score_missed(_scored_runs(), samples)
+
     if warnings:
         payload["warnings"] = warnings
     if as_json:
         console.print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        console.print(_eval.format_eval(payload.get("seeded"), payload.get("labels")))
+        console.print(
+            _eval.format_eval(payload.get("seeded"), payload.get("labels"), payload.get("missed"))
+        )
         for warning in warnings:
             console.print(f"[yellow]{warning}[/yellow]")
 

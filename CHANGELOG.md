@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.7.6] — 2026-11-28
+
+按《AI-Coding-Review-策略.md》v2 的三件事落地：
+
+- **seeded 定时回归曲线**：新增 `.github/workflows/seeded.yml`（nightly +
+  手动触发），用 `scripts/seeded_regression.py` 在一次性 fixture 仓库上跑固定
+  dual 审查，再把 recall / precision / false_kill_rate 追加到
+  `metrics/seeded.jsonl`。模型集由 `SEEDED_MODEL_CONFIG` secret 钉死，曲线只记
+  model id、不记密钥；同一 (date, commit, roster) 重跑不重复画点。**不放进
+  per-PR CI**：seeded 分数来自真实付费审查，PR 没有密钥也不该烧钱。
+- **证据分层进工单与退出码**：`Finding.is_blocking()` 要求 P0/P1 + `static_diag`
+  硬证据 + 可执行验收命令三者同时成立（severity ×10 的排序权重压不过这条，
+  所以门禁按证据而非严重级别判定）。工单新增《门禁摘要》阻断段/建议段，每条
+  finding 标『处置』；`review` / `pr` 增加 `--fail-on-blocking`，命中退出码 2
+  （区别于失败的 1）。门禁执行者是下游 PR check / 编码 agent，审查器只发信号。
+- **裁决回流漏报样本**：`eval --missed-export` 把 accepted finding 中未报出的
+  席位导出为漏报样本（按 lens/category/目录聚类），`eval --missed` 对新 run
+  计算覆盖率与 per-model recall。样本不是 seeded 真值，只用于扩大 recall 分母。
+- 新增 3 组回归测试，覆盖门禁判定与编号一致性、漏报样本归因、曲线去重与密钥不外泄。
+
 ## [0.7.5] — 2026-11-28
 
 复核 0.7.4 后修掉的六个问题，全部有可复现证据（先证明测试在旧代码上失败）：

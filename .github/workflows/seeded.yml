@@ -1,0 +1,60 @@
+name: Seeded regression
+
+# Nightly, not per-PR. eval --seeded scores a real review run: it needs model
+# credentials and costs money. A PR check must never burn a full review just to
+# draw a metric; the curve exists so prompt/threshold changes can be compared
+# against a fixed fixture with a pinned model set.
+#
+# Required repository secret: SEEDED_MODEL_CONFIG — the complete config JSON
+# (mode + models with base_url/api_key). Only model ids are written to the curve.
+# The roster file is created outside the checkout and dies with the runner.
+on:
+  schedule:
+    - cron: "17 16 * * *" # 00:17 Asia/Shanghai
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  seeded:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --extra dev
+
+      - name: Install pinned model roster
+        env:
+          SEEDED_MODEL_CONFIG: ${{ secrets.SEEDED_MODEL_CONFIG }}
+        run: |
+          if [ -z "$SEEDED_MODEL_CONFIG" ]; then
+            echo "::error::SEEDED_MODEL_CONFIG secret is missing"
+            exit 1
+          fi
+          printf '%s' "$SEEDED_MODEL_CONFIG" > "$RUNNER_TEMP/seeded-config.json"
+          chmod 600 "$RUNNER_TEMP/seeded-config.json"
+
+      - name: Run fixture review and append metric
+        run: |
+          uv run python scripts/seeded_regression.py \
+            --config "$RUNNER_TEMP/seeded-config.json" \
+            --curve metrics/seeded.jsonl
+
+      - name: Commit curve point
+        run: |
+          git config user.name "codeerratum-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add metrics/seeded.jsonl
+          if git diff --cached --quiet; then
+            echo "no new curve point (same date/commit/roster)"
+            exit 0
+          fi
+          git commit -m "chore(metrics): nightly seeded regression point"
+          git push

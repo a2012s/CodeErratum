@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 
-from ..models.finding import Finding, FindingCollection, is_unit_failure
+from ..models.finding import Finding, FindingCollection, is_blocking, is_unit_failure
 
 MAX_RENDER = 10
 
@@ -48,6 +48,7 @@ HEADER = """# Code Review 工单
 > 本次共 {total} 条发现，本工单渲染前 {shown} 条（按严重度 / 证据 / 一致性排序）。
 >
 > **执行协议**（交给执行方 AI）：
+> 0. 先读《门禁摘要》：阻断段必须先处理并跑通验收，建议段后处理。
 > 1. 按 F-001 起顺序逐条处理，不要跳条。
 > 2. 每条先核对【现状】与代码是否一致；不一致则跳过，不要猜测。
 > 3. 按【修改建议】改动，然后运行【验收】中的命令。
@@ -164,6 +165,7 @@ def _render_finding(f, index: int) -> str:
         f"- 视角：{f.lens.value}",
         f"- 分类：{f.category.value}",
         f"- 证据等级：**{verdict_label}**",
+        f"- 处置：**{'必须处理（阻断段）' if is_blocking(f) else '建议处理（建议段）'}**",
     ]
     if getattr(f, "agreement", "unverified") != "unverified":
         lines.append(f"- 一致性：**{AGREEMENT_LABEL.get(f.agreement, f.agreement)}**")
@@ -283,6 +285,55 @@ def finding_labels(collection: FindingCollection) -> dict[str, str]:
     return {f"F-{index:03d}": f.id for index, f in enumerate(ordered, 1)}
 
 
+def gate_sections(
+    collection: FindingCollection,
+) -> tuple[list[tuple[str, Finding]], list[tuple[str, Finding]]]:
+    """Split the rendered findings into (blocking, advisory) with their F-numbers.
+
+    Reuses ``render_sections`` and ``finding_labels`` rather than re-deriving the
+    ranking: a gate list whose F-001 points at a different finding than the body
+    would be worse than no gate at all. Zone headings stay intact for the same
+    reason — this is a gate *index*, not a second numbering scheme.
+    """
+    number = {fid: label for label, fid in finding_labels(collection).items()}
+    blocking: list[tuple[str, Finding]] = []
+    advisory: list[tuple[str, Finding]] = []
+    for _zone, items in render_sections(collection):
+        for f in items:
+            label = number.get(f.id, "F-???")
+            (blocking if is_blocking(f) else advisory).append((label, f))
+    return blocking, advisory
+
+
+def render_gate_block(collection: FindingCollection) -> str:
+    """The two disposition sections a downstream agent or PR check reads first."""
+    blocking, advisory = gate_sections(collection)
+    lines = [
+        "## 门禁摘要",
+        "",
+        "> 阻断段 = P0/P1 + static_diag 硬证据 + 可执行验收命令；下游 agent / PR check",
+        "> 应以阻断段为门禁。建议段仍需处理，但不阻断。详细内容见后文对应编号。",
+        "",
+        "### 必须处理（阻断段）",
+        "",
+    ]
+    if blocking:
+        for label, f in blocking:
+            acceptance = f.suggestion.acceptance if f.suggestion else ""
+            suffix = f" — 验收：`{acceptance}`" if acceptance.strip() else ""
+            lines.append(f"- {label} [{f.severity}] {_one_line(f.claim)}{suffix}")
+    else:
+        lines.append("本次没有阻断项。")
+    lines.extend(["", "### 建议处理（建议段）", ""])
+    if advisory:
+        for label, f in advisory:
+            lines.append(f"- {label} [{f.severity}] {_one_line(f.claim)}")
+    else:
+        lines.append("本次没有建议项。")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def render_markdown(collection: FindingCollection, timestamp: str) -> str:
     ordered = collection.ranked_findings()
     display = ordered[:MAX_RENDER]
@@ -306,6 +357,8 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
     ]
     if collection.stopped:
         parts.append(_stop_banner(collection))
+    if display:
+        parts.append(render_gate_block(collection))
 
     if not display:
         if collection.stopped:

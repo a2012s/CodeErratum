@@ -22,6 +22,7 @@ Nothing here calls a model. It reads artifacts a review already produced.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -355,7 +356,106 @@ def score_labels(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def format_eval(seeded: dict[str, Any] | None = None, labels: dict[str, Any] | None = None) -> str:
+def _sample_cluster(f: Finding) -> str:
+    """Bucket similar defects by (lens, category, directory), not by exact line.
+
+    A missed bug never has an anchor in the run that missed it, so file+line
+    matching would make the corpus impossible to score. The bucket is coarse on
+    purpose: it measures whether a model covers this *kind* of problem in this
+    area, which is the signal routing profiles can use.
+    """
+    parent = ""
+    if f.anchors:
+        parent = str(Path(f.anchors[0].file).parent).replace("\\", "/")
+    raw = f"{f.lens.value}|{f.category.value}|{parent}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def export_missed_corpus(store: Any, collections: list[FindingCollection]) -> list[dict[str, Any]]:
+    """Turn accepted verdicts into missed-bug samples for models that stayed silent.
+
+    An accepted finding is a human-confirmed real defect. If a run seated models
+    A and B but only A reported it, B has a miss in that cluster. This is weaker
+    evidence than a seeded manifest — an accepted finding may still be a false
+    positive the maintainer waved through — so the output is a *sample corpus*,
+    never ground truth. It exists to grow recall's denominator beyond two seeded
+    bugs, and to give a future red-team agent something to work on.
+    """
+    verdicts = {str(r["id"]): str(r.get("status") or "") for r in store.adjudication_rows()}
+    by_id: dict[str, tuple[FindingCollection, Finding]] = {
+        f.id: (c, f) for c in collections for f in c.findings
+    }
+    samples: dict[str, dict[str, Any]] = {}
+    for fid, status in verdicts.items():
+        if status != "accepted":
+            continue
+        found = by_id.get(fid)
+        if found is None:
+            continue  # the verdict outlived its ledger; nothing to attribute
+        collection, finding = found
+        reporters = set(finding.source_models)
+        if not reporters and collection.model_id:
+            reporters = {m.strip() for m in collection.model_id.split(",") if m.strip()}
+        roster = set(collection.reviewer_models) or reporters
+        for model in sorted(roster - reporters):
+            sample_id = hashlib.sha256(f"{fid}|{model}".encode()).hexdigest()[:16]
+            samples[sample_id] = {
+                "sample_id": sample_id,
+                "run_id": collection.run_id,
+                "finding_id": fid,
+                "model": model,
+                "lens": finding.lens.value,
+                "category": finding.category.value,
+                "file": finding.anchors[0].file if finding.anchors else "",
+                "cluster": _sample_cluster(finding),
+                "claim": finding.claim,
+            }
+    return [samples[key] for key in sorted(samples, key=lambda k: (samples[k]["cluster"], k))]
+
+
+def score_missed(
+    collections: list[FindingCollection], samples: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Score a new batch of runs against the adjudicated miss corpus."""
+    covered: set[tuple[str, str]] = set()
+    for collection in collections:
+        for finding in collection.findings:
+            cluster = _sample_cluster(finding)
+            models = set(finding.source_models)
+            if not models and collection.model_id:
+                models = {m.strip() for m in collection.model_id.split(",") if m.strip()}
+            for model in models:
+                covered.add((cluster, model))
+
+    rows: list[dict[str, Any]] = []
+    per_model: dict[str, dict[str, int | float | None]] = {}
+    for sample in samples:
+        caught = (str(sample.get("cluster") or ""), str(sample.get("model") or "")) in covered
+        rows.append({**sample, "caught": caught})
+        bucket = per_model.setdefault(
+            str(sample.get("model") or ""), {"samples": 0, "caught": 0, "recall": None}
+        )
+        bucket["samples"] += 1
+        bucket["caught"] += int(caught)
+    for bucket in per_model.values():
+        n = bucket["samples"]
+        bucket["recall"] = round(bucket["caught"] / n, 3) if n else None
+    caught_total = sum(1 for r in rows if r["caught"])
+    return {
+        "kind": "missed",
+        "samples_total": len(samples),
+        "samples_caught": caught_total,
+        "sample_recall": round(caught_total / len(samples), 3) if samples else None,
+        "per_model": per_model,
+        "samples": rows,
+    }
+
+
+def format_eval(
+    seeded: dict[str, Any] | None = None,
+    labels: dict[str, Any] | None = None,
+    missed: dict[str, Any] | None = None,
+) -> str:
     """Human-readable report. Same numbers as ``--json``, so the two cannot drift."""
     out: list[str] = []
     if seeded:
@@ -414,4 +514,17 @@ def format_eval(seeded: dict[str, Any] | None = None, labels: dict[str, Any] | N
                 key=lambda kv: -kv[1]["false"],
             ):
                 out.append(f"    {category:<28} {row['false']} rejected / {row['true']} accepted")
+    if missed:
+        out.append("Adjudicated miss corpus")
+        rate = missed["sample_recall"]
+        out.append(
+            f"  samples     {missed['samples_caught']}/{missed['samples_total']} now covered"
+            + (f" = {rate:.1%}" if rate is not None else "")
+        )
+        for model, row in sorted(missed["per_model"].items()):
+            r = row["recall"]
+            out.append(
+                f"  {model:<28} {row['caught']}/{row['samples']} covered"
+                + (f" = {r:.1%}" if r is not None else "")
+            )
     return "\n".join(out) if out else "nothing to score yet"

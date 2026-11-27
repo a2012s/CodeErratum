@@ -217,6 +217,22 @@ class Finding(BaseModel):
         return f"{anchor.file}:{bucket}-{bucket + 4}:{category.value}"
 
 
+def is_blocking(finding: Finding) -> bool:
+    """Whether a finding is a gate item for a downstream agent or PR check.
+
+    Evidence strength already existed and already influenced *ranking*, but never
+    changed disposition. A gate item needs all three of: a high severity, a hard
+    static diagnostic (a real tool said so), and an executable acceptance command.
+    Severity alone is not enough — a model's P1 hunch must stay advisory — and a
+    hard diagnostic without an acceptance command cannot be closed by the reader.
+    """
+    if finding.severity not in ("P0", "P1"):
+        return False
+    if not any(ev.kind == "static_diag" and ev.strength == "hard" for ev in finding.evidence):
+        return False
+    return bool(finding.suggestion and finding.suggestion.acceptance.strip())
+
+
 class FindingCollection(BaseModel):
     """The full report payload, serialized to runs/<run_id>/findings.json."""
 

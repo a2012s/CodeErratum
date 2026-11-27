@@ -1,4 +1,11 @@
-from .markdown import finding_labels, labels_from_markdown, render_markdown
+from ..models.finding import is_blocking
+from .markdown import (
+    finding_labels,
+    gate_sections,
+    labels_from_markdown,
+    render_gate_block,
+    render_markdown,
+)
 from .outcomes import (
     OutcomeRow,
     ParseResult,
@@ -15,7 +22,10 @@ __all__ = [
     "classify_status",
     "finding_ids",
     "finding_labels",
+    "gate_sections",
+    "is_blocking",
     "labels_from_markdown",
     "parse_outcomes",
+    "render_gate_block",
     "render_markdown",
 ]

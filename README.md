@@ -305,6 +305,41 @@ In Actions, use the bundled [`action.yml`](action.yml); the example workflow is
 is required (a shallow clone cannot see the merge base), and fork PRs have no secrets — the
 sample skips them explicitly rather than failing red on every outside contribution.
 
+#### Evidence gate (opt-in)
+
+The work order opens with a **门禁摘要**: a *blocking* section and an *advisory* section.
+A finding is blocking only when it is P0/P1 **and** carries a `static_diag` hard evidence
+item **and** has an executable acceptance command. Evidence strength already influenced
+ranking; this is the step that turns it into disposition.
+
+```bash
+codeerratum review --fail-on-blocking   # exit 2 when the blocking section is non-empty
+codeerratum pr --fail-on-blocking       # comment first, then exit 2 on a gate hit
+```
+
+Exit 2 means "a blocking item exists", never "the review broke" (that is exit 1).
+**The reviewer does not block a merge by itself** — it emits a signal for a PR check or a
+downstream coding agent to enforce. Turn the flag on in the job that should own that
+decision; leave it off when you only want the report.
+
+### Offline scoring and the nightly curve
+
+```bash
+codeerratum eval --seeded demo/seeded-bugs/bugs.json --json
+codeerratum eval --missed-export missed.jsonl     # accepted verdicts → miss samples
+codeerratum eval --missed missed.jsonl --json      # are those defects covered now?
+```
+
+`--seeded` scores recall/precision against known defects. `--missed-export` turns an
+accepted finding reported by only one seated model into a miss sample for every other
+seat; `--missed` scores a later batch against that corpus. These samples are weaker than
+a seeded manifest — use them to grow the denominator, not as ground truth.
+
+[`.github/workflows/seeded.yml`](.github/workflows/seeded.yml) runs the fixture **nightly**,
+not per PR: a seeded score requires a real (paid) review with model credentials. It needs
+one repository secret, `SEEDED_MODEL_CONFIG`, holding the pinned roster JSON. Only model
+*ids* reach the append-only curve at `metrics/seeded.jsonl`; keys stay on the runner.
+
 ### Module docs and signature drift
 
 ```bash
