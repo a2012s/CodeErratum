@@ -318,9 +318,11 @@ codeerratum pr --fail-on-blocking       # comment first, then exit 2 on a gate h
 ```
 
 Exit 2 means "a blocking item exists", never "the review broke" (that is exit 1).
-**The reviewer does not block a merge by itself** — it emits a signal for a PR check or a
-downstream coding agent to enforce. Turn the flag on in the job that should own that
-decision; leave it off when you only want the report.
+The blocking section is never truncated: the render cap that limits advisory findings to ten
+does not apply to gate items, because a gate that depends on how many rows we printed would
+pass a run with a hard static diagnostic. **The reviewer does not block a merge by itself** —
+it emits a signal for a PR check or a downstream coding agent to enforce. Turn the flag on in
+the job that should own that decision; leave it off when you only want the report.
 
 ### Offline scoring and the nightly curve
 

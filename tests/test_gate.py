@@ -31,6 +31,7 @@ def _finding(
     severity: str = "P1",
     evidence: list[Evidence] | None = None,
     acceptance: str = "pytest -q",
+    agreement: str = "unverified",
 ) -> Finding:
     return Finding(
         id=fid,
@@ -44,6 +45,7 @@ def _finding(
         evidence=evidence if evidence is not None else [],
         suggestion=Suggestion(explanation="改一下", acceptance=acceptance),
         source_models=["m1"],
+        agreement=agreement,
     )
 
 
@@ -60,6 +62,9 @@ def _collection(*findings: Finding, mode: str = "quick") -> FindingCollection:
 
 
 _HARD_STATIC = [Evidence(kind="static_diag", summary="a.py:1 TS2322", strength="hard")]
+_HARD_TEST = [
+    Evidence(kind="test_failure", summary="pytest tests/test_a.py:2 失败", strength="hard")
+]
 
 
 def test_blocking_needs_all_three_conditions():
@@ -163,3 +168,51 @@ def test_review_gate_passes_when_only_advisory_findings_exist(
     )
     assert result.exit_code == 0, result.output
     assert "门禁通过" in result.output
+
+
+def test_gate_never_truncates_blocking_items():
+    findings = [_finding(f"{i:016d}", evidence=_HARD_STATIC) for i in range(12)]
+    collection = _collection(*findings)
+
+    blocking, advisory = gate_sections(collection)
+    assert len(blocking) == 12
+    assert advisory == []
+    # Every gate item must have a body entry with its own F-number, otherwise the
+    # reader is told to fix something the work order never describes.
+    labels = labels_from_markdown(render_markdown(collection, "ts"))
+    assert {fid for fid in labels.values()} == {f.id for f in findings}
+    assert sorted(labels) == [f"F-{i:03d}" for i in range(1, 13)]
+
+
+def test_advisory_tail_is_still_capped():
+    findings = [_finding(f"{i:016d}", severity="P2") for i in range(12)]
+    collection = _collection(*findings)
+
+    blocking, advisory = gate_sections(collection)
+    assert blocking == []
+    assert len(advisory) == 10
+    assert "还有 2 条建议项未在本工单展开" in render_markdown(collection, "ts")
+
+
+def test_blocking_item_ranked_below_the_cap_still_blocks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    # Ten hard-but-soft-kind findings outrank the one real gate item: severity ties,
+    # both carry hard evidence, and agreement decides. Before the fix the render cap
+    # dropped the gate item and `--fail-on-blocking` exited 0 on a P1 tsc error.
+    higher = [_finding(f"{i:016d}", evidence=_HARD_TEST, agreement="unanimous") for i in range(10)]
+    gate_item = _finding("f" * 16, evidence=_HARD_STATIC, agreement="unique")
+    collection = _collection(*higher, gate_item)
+
+    blocking, _advisory = gate_sections(collection)
+    assert [f.id for _label, f in blocking] == [gate_item.id]
+    text = render_markdown(collection, "ts")
+    assert "F-011 [P1] 核对边界条件" in text
+
+    outcome = _Outcome(collection, tmp_path)
+    monkeypatch.setattr(cli, "execute_review", lambda *_args, **_kwargs: outcome)
+    result = CliRunner().invoke(
+        cli.app,
+        ["review", "--repo", str(tmp_path), "--out", str(tmp_path / "r.md"), "--fail-on-blocking"],
+    )
+    assert result.exit_code == cli.GATE_EXIT_CODE, result.output

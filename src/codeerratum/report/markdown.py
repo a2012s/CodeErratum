@@ -45,7 +45,7 @@ HEADER = """# Code Review 工单
 > 生成信息：commit={commit} | 模式={mode} | 规格等级={spec_level}
 > 审查者={reviewers} | 时间={ts}
 > 项目规范={rules}
-> 本次共 {total} 条发现，本工单渲染前 {shown} 条（按严重度 / 证据 / 一致性排序）。
+> 本次共 {total} 条发现，本工单渲染 {shown} 条（阻断项全部展开，其余按严重度 / 证据 / 一致性排序）。
 >
 > **执行协议**（交给执行方 AI）：
 > 0. 先读《门禁摘要》：阻断段必须先处理并跑通验收，建议段后处理。
@@ -248,6 +248,25 @@ def _render_zone(name: str, items: list[Finding], start_index: int) -> tuple[str
     return "".join(parts), idx
 
 
+def render_selection(collection: FindingCollection) -> list[Finding]:
+    """The findings the work order actually renders: the top ``MAX_RENDER`` plus every gate item.
+
+    ``MAX_RENDER`` is an attention budget for *advisory* findings. A blocking
+    finding is a gate item, so truncating it would make ``--fail-on-blocking``
+    depend on how many rows we chose to print: ten higher-ranked soft findings
+    used to push a hard static diagnostic out of the rendered list, and the gate
+    then reported "no blocking items" for a run that had one. A gate whose verdict
+    changes with the render cap is not a gate, so blocking items past the cap are
+    appended in rank order.
+    """
+    ordered = collection.ranked_findings()
+    display = ordered[:MAX_RENDER]
+    if len(ordered) <= MAX_RENDER:
+        return display
+    seen = {f.id for f in display}
+    return display + [f for f in ordered[MAX_RENDER:] if f.id not in seen and is_blocking(f)]
+
+
 def render_sections(collection: FindingCollection) -> list[tuple[str, list[Finding]]]:
     """The groups the work order renders, in the order it numbers them.
 
@@ -257,7 +276,7 @@ def render_sections(collection: FindingCollection) -> list[tuple[str, list[Findi
     re-deriving the order, because a verdict applied to the wrong finding is worse
     than no verdict.
     """
-    display = collection.ranked_findings()[:MAX_RENDER]
+    display = render_selection(collection)
     if collection.mode == "quick":
         return [("", display)]
     grouped: dict[str, list[Finding]] = {"unique": [], "conflict": [], "consensus": []}
@@ -336,7 +355,7 @@ def render_gate_block(collection: FindingCollection) -> str:
 
 def render_markdown(collection: FindingCollection, timestamp: str) -> str:
     ordered = collection.ranked_findings()
-    display = ordered[:MAX_RENDER]
+    display = render_selection(collection)
     omitted = len(ordered) - len(display)
     counts = _severity_counts(display)
     reviewers = ", ".join(collection.reviewer_models or [collection.model_id])
@@ -383,7 +402,7 @@ def render_markdown(collection: FindingCollection, timestamp: str) -> str:
 
     if omitted > 0:
         parts.append(
-            f"> 还有 {omitted} 条发现未在本工单展开（已写入 `findings.json`）。"
+            f"> 还有 {omitted} 条建议项未在本工单展开（均非阻断项，已写入 `findings.json`）。"
             "如需全部展开，提高渲染上限后重新生成。\n\n"
         )
 

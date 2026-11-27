@@ -5,6 +5,7 @@ from .markdown import (
     labels_from_markdown,
     render_gate_block,
     render_markdown,
+    render_selection,
 )
 from .outcomes import (
     OutcomeRow,
@@ -28,4 +29,5 @@ __all__ = [
     "parse_outcomes",
     "render_gate_block",
     "render_markdown",
+    "render_selection",
 ]

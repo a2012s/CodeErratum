@@ -62,7 +62,8 @@ def _enforce_gate(collection, fail_on_blocking: bool) -> None:
     The reviewer does not block a merge by itself: it emits a signal that the
     caller (CI job, coding agent, human) chooses to enforce. Exit 2 is distinct
     from exit 1 (setup/diff/provider failure) so a gate hit is not mistaken for a
-    broken run.
+    broken run. Click also uses 2 for usage errors, so the printed message — not
+    the code alone — says which one happened.
     """
     if not fail_on_blocking:
         return
@@ -402,9 +403,11 @@ def pr(
             f"[green]Posted[/green] {result['inline_posted']} inline + 1 summary"
             + (" [yellow](降级为逐条发送)[/yellow]" if result.get("degraded") else "")
         )
-    _enforce_gate(collection, fail_on_blocking)
+    # The comment URL is printed before the gate decides the exit code: a blocking
+    # PR still needs its discussion link in the log, and exit 2 unwinds the command.
     if result.get("summary_url"):
         console.print(result["summary_url"])
+    _enforce_gate(collection, fail_on_blocking)
 
 
 @app.command(name="pr-collect")
@@ -1059,6 +1062,11 @@ def eval_command(
         except OSError as exc:
             console.print(f"[red]cannot write {missed_export}: {exc}[/red]")
             raise typer.Exit(1) from exc
+        if as_json:
+            typer.echo(
+                json.dumps({"exported": len(rows), "path": str(missed_export)}, ensure_ascii=False)
+            )
+            return
         console.print(f"[green]已写出 {len(rows)} 行漏报样本到 {missed_export}[/green]")
         console.print("[dim]样本来自 accepted 裁决，不是 seeded 真值；score 时只算覆盖率。[/dim]")
         return
@@ -1134,7 +1142,10 @@ def eval_command(
     if warnings:
         payload["warnings"] = warnings
     if as_json:
-        console.print(json.dumps(payload, ensure_ascii=False, indent=2))
+        # typer.echo, not console.print: Rich soft-wraps at terminal width, which
+        # injected newlines into a long claim and made the payload unparseable —
+        # a nightly job reading this stdout would fail on a wide diff, not on a bug.
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         console.print(
             _eval.format_eval(payload.get("seeded"), payload.get("labels"), payload.get("missed"))

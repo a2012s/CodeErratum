@@ -11,9 +11,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
-from codeerratum import pipeline
+from codeerratum import cli, pipeline
 from codeerratum.cli import app
 from codeerratum.eval import export_missed_corpus, score_missed
 from codeerratum.models.finding import (
@@ -124,3 +126,30 @@ def test_empty_corpus_reports_null_not_zero(tmp_path: Path):
     scored = score_missed([], [])
     assert scored["sample_recall"] is None
     assert scored["samples_total"] == 0
+
+
+def test_json_output_is_parseable_with_long_values(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    # A CJK claim counts two columns per character, so this row is far wider than
+    # the console. Rich used to soft-wrap it, injecting a newline inside the JSON
+    # string; the nightly curve parses this stdout, so that broke the job. The
+    # console is pinned narrow because a captured pipe otherwise decides the width.
+    monkeypatch.setattr(cli, "console", Console(width=40))
+    sample = {
+        "sample_id": "s1",
+        "run_id": "r",
+        "finding_id": "f" * 16,
+        "model": "m2",
+        "lens": "correctness",
+        "category": "boundary",
+        "file": "src/a.py",
+        "cluster": "c" * 12,
+        "claim": "退款金额在并发重试下会被重复写入并且审计记录丢失" * 2,
+    }
+    corpus = tmp_path / "missed.jsonl"
+    corpus.write_text(json.dumps(sample, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app, ["eval", "--repo", str(tmp_path), "--missed", str(corpus), "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["missed"]["samples_total"] == 1

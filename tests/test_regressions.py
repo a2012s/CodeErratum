@@ -797,7 +797,7 @@ def test_report_counts_match_rendered_items():
     rendered = md.count("## F-")
     assert rendered == 10
     assert md.count("| 待处理 |") == rendered
-    assert "还有 3 条发现未在本工单展开" in md
+    assert "还有 3 条建议项未在本工单展开" in md
     assert "| 合计（本工单） | 10 |" in md
 
 

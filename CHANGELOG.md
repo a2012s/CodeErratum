@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.7] — 2026-11-28
+
+自查 0.7.6 未推送代码，修掉两个会让门禁/曲线给出错误结论的问题：
+
+- **阻断项被渲染上限截断**：`gate_sections` / `--fail-on-blocking` 都从
+  `render_sections` 取数，而它只取 `ranked_findings()[:10]`。构造出的复现：10 条
+  带 `test_failure` 硬证据的 P1 排在前，1 条带 `static_diag` 硬证据的 P1 排第 11，
+  门禁返回「本次没有阻断项」、退出码 0 —— 一条模型已报出、tsc 也确认的 P1 直接放行。
+  新增 `render_selection()`：`MAX_RENDER` 只约束建议项，阻断项一律渲染（排在其后，
+  按排名顺序）。工单正文、F 编号、门禁摘要、PR 标签四处仍读同一个列表。
+- **`eval --json` 可能不是合法 JSON**：输出走 `console.print`，Rich 按终端宽度软换行，
+  会在 JSON 字符串中间插入换行。用 40 列终端 + 一条中文 claim 复现
+  `JSONDecodeError: Invalid control character`。夜间曲线脚本正是靠
+  `json.loads(stdout)` 解析，宽 diff 就会让 job 挂掉而不是暴露 bug。改用
+  `typer.echo`（与 `pr --json` 一致）。
+- `eval --missed-export --json` 现在也输出 JSON（此前忽略该 flag，只打绿色提示）。
+- `pr --fail-on-blocking` 先打 summary URL 再判门禁：退出码 2 会中断命令，
+  原来夹在中间的评论链接永远看不到。
+- 措辞修正：`MAX_RENDER` 之外的条目全部是建议项，未展开提示改为「N 条建议项」。
+- 新增 4 条回归测试（截断、建议项仍受上限、排名靠后的阻断项、JSON 宽值可解析），
+  均先在旧实现上确认失败。测试基线 713 passed。
+
 ## [0.7.6] — 2026-11-28
 
 按《AI-Coding-Review-策略.md》v2 的三件事落地：
