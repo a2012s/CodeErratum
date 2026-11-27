@@ -18,6 +18,7 @@ from codeerratum.evidence.static import (
     StaticDiag,
     _cache_prune,
     collect_static,
+    known_facts_block,
     reset_tsc_cache,
     run_eslint,
     run_tsc,
@@ -452,3 +453,24 @@ def test_staticdiag_to_dict(tmp_path):
         "code": "TS1234",
         "message": "bad",
     }
+
+
+def test_known_facts_header_names_the_tools_that_ran():
+    """The header used to hard-code ruff/mypy, which lied to a TS reviewer.
+
+    A block that says "already reported by ruff/mypy" above tsc/eslint findings
+    attributes the diagnostics to tools that were never run, and the model cannot
+    correct a wrong fact stated inside its own instructions.
+    """
+    diags = [
+        StaticDiag(tool="tsc", file="a.ts", line=3, code="TS2345", message="type"),
+        StaticDiag(tool="eslint", file="a.ts", line=9, code="no-unused-vars", message="unused"),
+    ]
+    block = known_facts_block(diags)
+    assert "eslint, tsc" in block
+    assert "ruff" not in block
+    assert "mypy" not in block
+
+    py = [StaticDiag(tool="ruff", file="m.py", line=1, code="E501", message="long")]
+    assert "ruff" in known_facts_block(py)
+    assert "mypy" not in known_facts_block(py)

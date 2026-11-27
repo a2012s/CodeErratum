@@ -581,10 +581,10 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     # ---- evidence / prompts ----
     "evidence.known_facts": (
-        "# 已知静态工具诊断（已由 ruff/mypy 检出，禁止重复报告为你的发现）\n"
+        "# 已知静态工具诊断（已由 {tools} 检出，禁止重复报告为你的发现）\n"
         "以下问题是已知事实。除非你能指出静态工具漏掉的更深层的语义 bug，\n"
         "否则不要把它们列为 finding。你可以引用它们作为证据。",
-        "# Known static-tool diagnostics (already reported by ruff/mypy; do not "
+        "# Known static-tool diagnostics (already reported by {tools}; do not "
         "re-report them as your findings)\n"
         "The issues below are known facts. Unless you can point to a deeper semantic "
         "bug the static tools missed,\n"

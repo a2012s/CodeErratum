@@ -88,6 +88,15 @@ TOOLS: list[dict] = [
                         "small, else the 60 highest-risk). Pass 0 for every unit."
                     ),
                 },
+                "token_budget": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": (
+                        "Fuse the run once this many tokens are spent; the work order "
+                        "then covers what finished. Omit for $CODEERRATUM_TOKEN_BUDGET, "
+                        "pass 0 for no cap. max_units caps breadth, this caps spend."
+                    ),
+                },
                 "house_rules": {
                     "type": "string",
                     "description": (
@@ -280,6 +289,13 @@ def _tool_review_diff(args: dict) -> dict:
             max_units=(
                 _as_int(args["max_units"], 0, minimum=0, maximum=500)
                 if args.get("max_units") is not None
+                else None
+            ),
+            # Omission stays omission so the pipeline can fall back to the env var;
+            # 0 means "no cap", which is not the same thing as unset.
+            token_budget=(
+                _as_int(args["token_budget"], 0, minimum=0)
+                if args.get("token_budget") is not None
                 else None
             ),
             house_rules=str(args.get("house_rules") or ""),

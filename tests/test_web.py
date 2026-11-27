@@ -20,6 +20,7 @@ import pytest
 
 import codeerratum.review.orchestrator as orchestrator
 from codeerratum.models import FindingCollection
+from codeerratum.pipeline import PipelineError
 from codeerratum.providers.base import Completion, Usage
 from codeerratum.review.schema import LLMAnchor, LLMFinding, LLMReview, LLMSuggestion
 from codeerratum.store import ReviewStore
@@ -1188,6 +1189,62 @@ def test_in_range_max_units_carries_no_notice(client):
     assert params["notices"] == []
     summary = client.post("/api/review", json={"diff": "HEAD", "max_units": 10}).json()
     assert "notices" not in summary
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, None),
+        ("", None),
+        (0, None),
+        ("0", None),
+        (-5, None),
+        (50000, 50000),
+        ("120000", 120000),
+        (1500.7, 1500),
+    ],
+)
+def test_token_budget_blank_is_unset_not_zero(client, raw, expected):
+    """Blank means "ask the environment"; 0 means "uncapped".
+
+    The CLI keeps those apart (`--token-budget 0` vs not passing it), and the same
+    distinction has to survive the web entry point or a tab silently overrides a
+    budget the user set for their shell.
+    """
+    payload = {"diff": "HEAD"}
+    if raw is not None:
+        payload["token_budget"] = raw
+    assert client.app.prepare_review(payload)["token_budget"] == expected
+
+
+def test_token_budget_must_be_a_number(client):
+    with pytest.raises(PipelineError):
+        client.app.prepare_review({"diff": "HEAD", "token_budget": "a lot"})
+
+
+def test_prepared_token_budget_reaches_the_pipeline(client, monkeypatch):
+    import codeerratum.web.server as web_server
+
+    seen: dict = {}
+
+    class _Outcome:
+        out_path = None
+
+        def summary(self):
+            return {"tokens": 1}
+
+    def fake_execute(root, **kwargs):
+        seen.update(kwargs)
+        return _Outcome()
+
+    monkeypatch.setattr(web_server, "execute_review", fake_execute)
+    params = client.app.prepare_review({"diff": "HEAD", "token_budget": 40000})
+    client.app.acquire_review_lock(params)
+    try:
+        client.app.execute_prepared(params)
+    finally:
+        client.app.release_review_lock()
+    assert seen["token_budget"] == 40000
 
 
 def test_clamp_notice_reaches_progress_log(client):

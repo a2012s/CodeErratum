@@ -168,6 +168,18 @@ def test_budget_select_sends_all_and_auto_as_the_server_expects():
     assert 'if (mode === "auto") return "auto";' in html
 
 
+def test_token_budget_field_sends_null_not_zero_when_blank():
+    """A blank field has to stay *unset*, not become an explicit "uncapped".
+
+    The server reads 0 as "ignore $CODEERRATUM_TOKEN_BUDGET", so sending 0 for
+    every review would silently strip the budget a user set for their shell.
+    """
+    html = read("index.html")
+    assert 'id="tokenBudget"' in html
+    assert "if (!raw) return null;" in html
+    assert "token_budget: tokenBudgetValue()," in html
+
+
 def test_tab_hides_the_language_switch_the_shell_already_has():
     """Two identical selects, two rows apart: the shell's is the only one.
 

@@ -501,6 +501,15 @@
     </div>
     <div class="hint" id="maxUnitsHint">自动：按风险排序，小改动全审，大改动最多 60 个单元。</div>
     <div class="field">
+      <label for="tokenBudget" data-en="Token budget (optional)">token 预算（可选）</label>
+      <input id="tokenBudget" type="number" min="1000" step="1000"
+        placeholder="留空 = 不限（读 $CODEERRATUM_TOKEN_BUDGET）"
+        data-en-ph="blank = uncapped; falls back to $CODEERRATUM_TOKEN_BUDGET">
+    </div>
+    <div class="hint" id="tokenBudgetHint"
+      data-en="Past the budget the run stops and still writes a partial work order, which the run panel can continue.">
+      超出预算即熔断：已审部分照样出工单，运行详情里可继续跑剩下的单元。</div>
+    <div class="field">
       <label data-en="Review models">审查模型</label>
       <div class="chips" id="modelPicker"></div>
       <div class="hint" id="modelHint">读取模型配置中…</div>
@@ -1560,6 +1569,17 @@ function unitsValue() {
   return raw && Number.isFinite(n) && n > 0 ? Math.trunc(n) : "auto";
 }
 
+// An unset budget is *omitted*, not 0: the server reads 0 as "explicitly uncapped",
+// while blank means "use $CODEERRATUM_TOKEN_BUDGET if it is set". Same distinction the
+// CLI keeps between --token-budget 0 and not passing it.
+function tokenBudgetValue() {
+  const el = $("tokenBudget");
+  const raw = el ? el.value.trim() : "";
+  if (!raw) return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : null;
+}
+
 function syncUnitsHint() {
   const hint = $("maxUnitsHint");
   const mode = budgetMode();
@@ -1668,6 +1688,7 @@ async function startReview(overrides = {}, allowEmptyPrompt = true) {
     paths: $("paths").value.trim(),
     mode: $("mode").value,
     max_units: unitsValue(),
+    token_budget: tokenBudgetValue(),
     models: [...PICKED],
     author_model: $("authorModel").value.trim(),
     write_markdown: $("writeMd").checked,

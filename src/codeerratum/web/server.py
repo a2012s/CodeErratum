@@ -793,10 +793,22 @@ class WebApp:
             if "/" in raw_out or "\\" in raw_out or raw_out in (".", "..", ""):
                 raise PipelineError("out must be a plain filename in the repository root")
             out = Path(raw_out)
+        # Same policy as the CLI: blank/0 means "not set here", and the pipeline then
+        # falls back to $CODEERRATUM_TOKEN_BUDGET. Only a positive number is a budget.
+        token_budget: int | None = None
+        raw_budget = payload.get("token_budget")
+        if raw_budget not in (None, "", 0, "0"):
+            try:
+                requested_budget = int(raw_budget)
+            except (TypeError, ValueError) as exc:
+                raise PipelineError("token_budget must be a positive integer") from exc
+            if requested_budget > 0:
+                token_budget = requested_budget
         return {
             "diff_spec": diff_spec,
             "mode": mode,
             "max_units": max_units,
+            "token_budget": token_budget,
             "models": models,
             "author": author,
             "out": out,
@@ -924,6 +936,7 @@ class WebApp:
                 diff_spec=params["diff_spec"],
                 mode=params["mode"],
                 max_units=params["max_units"],
+                token_budget=params.get("token_budget"),
                 models=params.get("models") or None,
                 author_model=params["author"],
                 out=params["out"],
@@ -1184,6 +1197,15 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                 return
             from ..resume import plan_resume, resume_review
 
+            budget: int | None = None
+            raw_budget = body.get("token_budget")
+            if raw_budget not in (None, "", 0, "0"):
+                try:
+                    budget = max(0, int(raw_budget)) or None
+                except (TypeError, ValueError):
+                    self._error(HTTPStatus.BAD_REQUEST, "token_budget must be an integer")
+                    return
+
             try:
                 plan = plan_resume(app.repo_root, run_id, paths=paths)
             except LookupError as exc:
@@ -1215,6 +1237,7 @@ def make_handler(app: WebApp | None, hub=None) -> type[BaseHTTPRequestHandler]:
                     run_id,
                     more=more,
                     paths=paths,
+                    token_budget=budget,
                     registry=app.registry,
                     progress=lambda msg: self._sse_event("log", {"message": msg}),
                     should_stop=app._stop_event.is_set,

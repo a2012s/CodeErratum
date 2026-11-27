@@ -227,6 +227,45 @@ def test_review_diff_forwards_the_exposed_cli_parameters(repo, monkeypatch):
     assert seen["include_non_code"] is True
 
 
+def test_token_budget_matches_the_cli_unset_zero_split(repo, monkeypatch):
+    """Omitted, 0 and a number are three different answers on every entry point.
+
+    The pipeline reads unset as "consult $CODEERRATUM_TOKEN_BUDGET" and 0 as
+    "explicitly uncapped". An MCP client that collapses them would let a tool
+    call override the budget the user exported in their shell.
+    """
+    import codeerratum.mcp.server as mcp_server
+    from codeerratum.pipeline import ConfigError
+
+    seen: dict = {}
+
+    def fake_execute(root, **kwargs):
+        seen.update(kwargs)
+        raise ConfigError("captured")
+
+    monkeypatch.setattr(mcp_server, "execute_review", fake_execute)
+    call("tools/call", {"name": "review_diff", "arguments": {"repo": str(repo)}})
+    assert seen["token_budget"] is None
+
+    call(
+        "tools/call",
+        {"name": "review_diff", "arguments": {"repo": str(repo), "token_budget": 50000}},
+    )
+    assert seen["token_budget"] == 50000
+
+    call(
+        "tools/call",
+        {"name": "review_diff", "arguments": {"repo": str(repo), "token_budget": 0}},
+    )
+    assert seen["token_budget"] == 0
+
+
+def test_review_diff_advertises_token_budget_in_its_schema():
+    """The control has to be visible where clients discover capabilities."""
+    tool = next(t for t in call("tools/list")["result"]["tools"] if t["name"] == "review_diff")
+    assert "token_budget" in tool["inputSchema"]["properties"]
+
+
 def _finding_for(repo, claim="空列表取首元素崩溃", finding_id=""):
     source_lines = (repo / "m.py").read_text(encoding="utf-8").splitlines(keepends=True)
     line = next(i for i, text in enumerate(source_lines, 1) if "return x[0]" in text)

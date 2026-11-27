@@ -396,7 +396,13 @@ def known_facts_block(diags: list[StaticDiag]) -> str:
     # The header follows the run's output language: a block of Chinese
     # instructions inside an English prompt contradicts the language directive
     # and nudges the model to answer in the wrong language.
-    lines = [t("evidence.known_facts"), ""]
-    for d in sorted(diags, key=lambda d: d.line)[:20]:
+    shown = sorted(diags, key=lambda d: d.line)[:20]
+    # The tools are named from what is actually in the block. Hard-coding
+    # "ruff/mypy" told a TypeScript reviewer that tsc/eslint findings were
+    # somebody else's work, which is exactly the kind of wrong fact a prompt
+    # cannot be corrected from inside.
+    tools = ", ".join(sorted({d.tool for d in shown}))
+    lines = [t("evidence.known_facts", tools=tools), ""]
+    for d in shown:
         lines.append(f"- {d.file}:{d.line} [{d.tool}:{d.code}] {d.message}")
     return "\n".join(lines)
