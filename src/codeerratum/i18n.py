@@ -364,6 +364,11 @@ MESSAGES: dict[str, tuple[str, str]] = {
     ),
     "pipeline.report_writing": ("生成报告并写入存储", "Writing the report and storing findings"),
     "pipeline.stopped": ("审查已被停止", "Review stopped"),
+    "pipeline.checkpoint_note": (
+        "这是运行中的检查点：进程被中断时可从这些产物续跑（resume），已完成的单元不会重复计费",
+        "Checkpoint written while the review is still running: if the process dies, "
+        "resume continues from these artifacts without re-paying for finished units",
+    ),
     "pipeline.stopped_partial": (
         "审查已停止：仅完成 {done}/{total} 个单元，报告只包含这些单元的结果；证伪/验证未完成",
         "Review stopped after {done}/{total} units; the report covers only those "

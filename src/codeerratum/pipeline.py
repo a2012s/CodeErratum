@@ -79,6 +79,50 @@ class PipelineError(Exception):
     """Base class for user-facing failures the CLI/UI can report without a traceback."""
 
 
+def write_run_ledger(
+    run_dir: Path,
+    collection: FindingCollection,
+    calls: list[dict],
+    diags: list[dict],
+    ts: str,
+    out_path: Path | None = None,
+) -> str:
+    """Persist the run artifacts in the order ``resume`` depends on.
+
+    ``calls.json`` is the coverage ledger: plan_resume derives "already done"
+    from it. It goes LAST so a crash between files leaves the ledger behind the
+    findings — the next resume then re-reviews (costs tokens) rather than treating
+    units as covered whose findings were never written (loses data).
+
+    Shared by the final write and the per-unit crash checkpoint so the two cannot
+    drift into two different definitions of "a durable run".
+    """
+    atomic_write_text(
+        run_dir / "findings.json",
+        json.dumps(collection.model_dump(mode="json"), ensure_ascii=False, indent=2),
+    )
+    atomic_write_text(
+        run_dir / "static_diags.json",
+        json.dumps(diags, ensure_ascii=False, indent=2),
+    )
+    # A "parse success rate is a hard gate" claim that only exists in memory
+    # cannot be audited. Persist both the counters and a bounded failure sample.
+    atomic_write_text(
+        run_dir / "parse_stats.json",
+        json.dumps(collection.comparison.get("parse", {}), ensure_ascii=False, indent=2),
+    )
+    atomic_write_text(
+        run_dir / "parse_failures.json",
+        json.dumps(collection.comparison.get("parse_failures", []), ensure_ascii=False, indent=2),
+    )
+    markdown = render_markdown(collection, ts)
+    atomic_write_text(run_dir / "review.md", markdown)
+    if out_path is not None:
+        atomic_write_text(out_path, markdown)
+    atomic_write_text(run_dir / "calls.json", json.dumps(calls, ensure_ascii=False, indent=2))
+    return markdown
+
+
 class NotARepository(PipelineError):
     pass
 
@@ -650,6 +694,30 @@ def execute_review(
     spec_level, spec_reason = detect_spec_level(repo_root, scan=scan)
     say(f"Spec level: {spec_level} ({spec_reason})")
 
+    # Crash checkpoint. A review is hours of paid generation and, until now, the
+    # only durable copy appeared after the last unit: a process killed at 95% lost
+    # 95%. The orchestrator hands back the same partial shape a stop produces, so
+    # the ledger keeps one definition of "durable but incomplete" and resume finds
+    # it exactly where a user-stopped run would have left it.
+    run_commit = get_commit(repo_root)
+
+    def _checkpoint(
+        ckpt_collection: FindingCollection, ckpt_calls: list[dict], ckpt_diags: list[dict]
+    ) -> None:
+        ckpt_collection.commit = run_commit
+        ckpt_collection.spec_level = spec_level
+        ckpt_collection.spec_level_reason = spec_reason
+        ckpt_collection.house_rules_sha = rules.sha
+        ckpt_collection.house_rules_chars = rules.chars
+        ckpt_collection.house_rules_source = rules.source
+        ckpt_collection.notes = [t("pipeline.checkpoint_note")]
+        ckpt_ts = datetime.now(UTC).isoformat(timespec="seconds")
+        # out_path stays None: the user's report file is a finished deliverable,
+        # the run directory is the working ledger.
+        write_run_ledger(run_dir, ckpt_collection, ckpt_calls, ckpt_diags, ckpt_ts)
+        store.save_run(ckpt_collection, ckpt_ts)
+        store.save_comparison(ckpt_collection, ckpt_ts)
+
     try:
         collection, calls, all_diags = asyncio.run(
             run_review(
@@ -670,6 +738,7 @@ def execute_review(
                 # Pinned at run start: the review outlives the request thread that
                 # seeded the language ContextVar, so it must travel as a value.
                 output_lang=get_lang(),
+                on_checkpoint=_checkpoint,
             )
         )
         # A stop request must not abort persistence: once any unit finished,
@@ -776,38 +845,12 @@ def execute_review(
     collection.house_rules_chars = rules.chars
     collection.house_rules_source = rules.source
 
-    atomic_write_text(
-        run_dir / "findings.json",
-        json.dumps(collection.model_dump(mode="json"), ensure_ascii=False, indent=2),
-    )
-    atomic_write_text(
-        run_dir / "static_diags.json",
-        json.dumps(all_diags, ensure_ascii=False, indent=2),
-    )
-    # A "parse success rate is a hard gate" claim that only exists in memory
-    # cannot be audited. Persist both the counters and a bounded failure sample.
-    atomic_write_text(
-        run_dir / "parse_stats.json",
-        json.dumps(collection.comparison.get("parse", {}), ensure_ascii=False, indent=2),
-    )
-    atomic_write_text(
-        run_dir / "parse_failures.json",
-        json.dumps(collection.comparison.get("parse_failures", []), ensure_ascii=False, indent=2),
-    )
-
-    ts = datetime.now(UTC).isoformat(timespec="seconds")
-    markdown = render_markdown(collection, ts)
-    atomic_write_text(run_dir / "review.md", markdown)
     out_path: Path | None = None
     if out is not None:
         out_path = out if out.is_absolute() else repo_root / out
-        atomic_write_text(out_path, markdown)
 
-    # calls.json is the coverage ledger: plan_resume derives "already done"
-    # from it. Write it LAST so a crash between files leaves the ledger behind
-    # the findings — the next resume then re-reviews (costs tokens) instead of
-    # treating units as covered whose findings were never written (loses data).
-    atomic_write_text(run_dir / "calls.json", json.dumps(calls, ensure_ascii=False, indent=2))
+    ts = datetime.now(UTC).isoformat(timespec="seconds")
+    markdown = write_run_ledger(run_dir, collection, calls, all_diags, ts, out_path)
 
     store.save_run(collection, ts)
     store.save_comparison(collection, ts)

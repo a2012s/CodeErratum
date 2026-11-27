@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -59,6 +60,24 @@ class _PartialRun:
 def _one_line(text: str) -> str:
     """Keep a full claim intact but flatten embedded newlines into one log frame."""
     return " ".join(text.split())
+
+
+def _notify(callback: Callable[[], None] | None) -> None:
+    """Fire a presentation/durability hook without ever failing the run.
+
+    Both per-unit hooks run inside a paid model call's completion path. A broken
+    listener (disk full, dead pipe) looks identical to "the run vanished", so the
+    only safe contract is to swallow it loudly on stderr.
+    """
+    if callback is None:
+        return
+    try:
+        callback()
+    except Exception as exc:  # noqa: BLE001 - a failed checkpoint must not kill a paid run
+        print(
+            f"[orchestrator] unit hook failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _parse_snapshot(providers: list) -> tuple[dict[str, int | float | None], list[dict]]:
@@ -126,6 +145,30 @@ UNIT_CONCURRENCY_ENV = "CODEERRATUM_UNIT_CONCURRENCY"
 DEFAULT_UNIT_CONCURRENCY = 4
 
 
+# Crash checkpoint tuning. A unit is 60-120 s of paid generation, so writing the
+# ledger after every single unit would reserialise the whole collection far more
+# often than the state actually changes, while writing only at the end throws all
+# of it away when the process dies. Either bound fires first.
+CHECKPOINT_UNITS = 3
+CHECKPOINT_INTERVAL_S = 45.0
+
+
+def _checkpoint_gate() -> tuple[int, float]:
+    """Read the checkpoint thresholds, tolerating a bad environment override."""
+    units, interval = CHECKPOINT_UNITS, CHECKPOINT_INTERVAL_S
+    raw_units = os.environ.get("CODEERRATUM_CHECKPOINT_UNITS", "").strip()
+    if raw_units.isdigit() and int(raw_units) > 0:
+        units = int(raw_units)
+    raw_interval = os.environ.get("CODEERRATUM_CHECKPOINT_SECONDS", "").strip()
+    try:
+        value = float(raw_interval)
+    except ValueError:
+        value = 0.0
+    if value > 0:
+        interval = value
+    return units, interval
+
+
 def unit_concurrency() -> int:
     """How many model calls may be in flight at once, per model.
 
@@ -182,6 +225,7 @@ async def _review_with(
     on_findings: Callable[[ReviewUnit, list[Finding], str], None] | None = None,
     output_lang: str = "",
     sink: _PartialRun | None = None,
+    on_unit_complete: Callable[[], None] | None = None,
 ) -> tuple[dict[str, list[Finding]], list[dict], list[dict], list[dict]]:
     """Run one model over all units, a bounded number at a time.
 
@@ -193,6 +237,10 @@ async def _review_with(
     parsed — the UI streams them while the run is still going instead of staring
     at "unit 12/53" for minutes. It is presentation, so a listener that throws
     is swallowed: a broken log must never abandon a run someone is paying for.
+
+    ``on_unit_complete`` is the crash checkpoint. It is a notification only — the
+    caller reads the sink, which is why the mirror above must happen first. Like
+    ``on_findings`` it is swallowed: a full disk must not abandon a paid run.
     """
     say = progress or (lambda _msg: None)
     per_unit: dict[str, list[Finding]] = {}
@@ -247,6 +295,13 @@ async def _review_with(
                             "error_hint": _failure_text(exc, provider),
                         }
                     )
+                    # Mirror the drop too. Without it a run stopped after some
+                    # units failed reported zero failures in its partial ledger,
+                    # so `dropped_by_reason` and the run list under-counted the
+                    # exact units the next resume is about to re-pay for.
+                    if sink is not None:
+                        sink.rejected.append(rejected[-1])
+                        _notify(on_unit_complete)
                     say(
                         t(
                             "orch.unit_failed",
@@ -297,6 +352,10 @@ async def _review_with(
                     # what observes the stop request.
                     sink.calls.append(call)
                     sink.units_done.add(unit.unit_id)
+                # The ledger mirror above is what a checkpoint reads, so this fires
+                # after it. With no sink there is nothing durable to flush.
+                if sink is not None:
+                    _notify(on_unit_complete)
                 async with counter:
                     finished += 1
                     done = finished
@@ -415,8 +474,11 @@ def _partial_collection(
         }
     # Verdicts from verify calls that finished before the stop were paid for:
     # fold them in exactly as the normal path does, or the partial report
-    # silently reverts those findings to the scanner-only state.
-    if mode == "tiered" and partial.verified:
+    # silently reverts those findings to the scanner-only state. The guard is the
+    # data, not the mode string: tiered quick runs record mode="quick", so
+    # comparing against "tiered" made this branch dead code and discarded a
+    # verification round the user had already bought.
+    if partial.verified:
         merged, _ = _merge_verification(
             merged, partial.verified, partial.verify_scanner, partial.verify_verifier
         )
@@ -467,12 +529,20 @@ async def run_review(
     on_findings: Callable[[ReviewUnit, list[Finding], str], None] | None = None,
     output_lang: str = "",
     tiered: bool = False,
+    on_checkpoint: Callable[[FindingCollection, list, list], None] | None = None,
 ) -> tuple[FindingCollection, list[dict], list[dict]]:
     """Orchestrate a full run. Returns (collection, call stats, all static diags).
 
     Works for quick (1 model) as well as dual/committee (N pinned model versions).
     In dual/committee, findings are clustered and merged across models, then a
     model that did not assert a finding tries to falsify each high-value one.
+
+    ``on_checkpoint`` turns the run artifacts into a live ledger. Without it the
+    only durable copy of a 200-unit run is written after the last unit returns,
+    so a process killed at 95% loses 95% of the tokens; with it the caller can
+    persist the same partial shape a stop would produce, every few units. It is
+    called on the event loop with a collection, the call ledger and the static
+    diags, and must not raise (the pipeline's writer is wrapped anyway).
 
     ``house_rules`` only reaches the reviewers. The falsifier is deliberately left
     with the stock prompt: a falsifier that has absorbed the project's conventions
@@ -491,6 +561,53 @@ async def run_review(
     # does not read like "stopped with the review half done".
     stage = "routing"
     falsifier_spec: ModelSpec | None = None
+
+    # ---- crash checkpoint -------------------------------------------------
+    # The partial-collection builder is the same one a stop uses, so a crash and
+    # a stop leave the ledger in one shape rather than two. Cluster/rank work is
+    # milliseconds against the 60-120 s of generation it is protecting, but it
+    # still runs on the event loop, hence the throttle.
+    ckpt_units, ckpt_seconds = _checkpoint_gate()
+    ckpt = {"since": 0, "at": time.monotonic()}
+
+    def _flush_checkpoint(force: bool = False) -> None:
+        if on_checkpoint is None or not partial.units_done:
+            return
+        now = time.monotonic()
+        if not force and (ckpt["since"] < ckpt_units and now - ckpt["at"] < ckpt_seconds):
+            return
+        ckpt["since"] = 0
+        ckpt["at"] = now
+        try:
+            payload = _partial_collection(
+                partial=partial,
+                mode=mode,
+                reviewers=reviewers,
+                falsifier_spec=falsifier_spec,
+                units=units,
+                run_id=run_id,
+                repo_root=repo_root,
+                stage=stage,
+                rejected_category_counts=rejected_category_counts,
+                all_providers=all_providers,
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed checkpoint must not kill a paid run
+            print(
+                f"[orchestrator] checkpoint build failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            return
+        try:
+            on_checkpoint(*payload)
+        except Exception as exc:  # noqa: BLE001 - same contract
+            print(
+                f"[orchestrator] checkpoint write failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+
+    def _note_unit_done() -> None:
+        ckpt["since"] += 1
+        _flush_checkpoint()
 
     async def watch_stop() -> None:
         """Cancel every in-flight model call the moment stop is requested."""
@@ -545,6 +662,7 @@ async def run_review(
                     on_findings=on_findings,
                     output_lang=output_lang,
                     sink=partial,
+                    on_unit_complete=_note_unit_done,
                 )
             )
             for m in reviewers
@@ -556,6 +674,11 @@ async def run_review(
                 if isinstance(result, asyncio.CancelledError):
                     raise ReviewCancelled(t("server.stopped_by_user")) from result
                 raise result
+        # The review phase is paid and complete: make it durable before
+        # falsification/verification spends anything more. If the process dies in
+        # that later window, resume finds every review call in the ledger and
+        # reports "nothing left" instead of re-billing the whole run.
+        _flush_checkpoint(force=True)
         say(t("orch.merged"))
         stage = "cluster"
 

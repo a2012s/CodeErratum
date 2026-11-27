@@ -696,6 +696,7 @@ def test_pipeline_reads_the_diff_revisions_blobs(tmp_path, monkeypatch):
         on_findings=None,
         output_lang="",
         tiered=False,
+        on_checkpoint=None,
     ):
         captured["sources"] = sources
         return (
@@ -757,6 +758,7 @@ def test_rejected_history_reaches_the_ranker(tmp_path, monkeypatch):
         on_findings=None,
         output_lang="",
         tiered=False,
+        on_checkpoint=None,
     ):
         captured["counts"] = rejected_category_counts
         return (
@@ -1028,6 +1030,7 @@ def test_run_review_returns_partial_collection_when_one_unit_finished(monkeypatc
         on_findings=None,
         output_lang="",
         sink=None,
+        on_unit_complete=None,
     ):
         assert sink is not None
         sink.per_unit.setdefault(spec.model_id, {}).setdefault(units[0].unit_id, []).append(finding)
