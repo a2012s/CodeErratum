@@ -32,6 +32,7 @@ from .ingest import (
     is_git_repo,
     is_head_family,
     new_side_sources,
+    normalize_whitespace,
     snapshot_diff,
     split_diff,
     wants_full_worktree,
@@ -47,6 +48,7 @@ from .review import (
     sanitize_house_rules,
     truncate_house_rules,
 )
+from .review.static_findings import synthesize_static_findings
 from .spec import detect as detect_spec_level
 from .store import ReviewStore
 
@@ -547,6 +549,7 @@ def execute_review(
     include_non_code: bool = False,
     tiered: bool = True,
     token_budget: int | None = None,
+    whitespace: str = "keep",
 ) -> ReviewOutcome:
     """Run the whole pipeline and persist artifacts + feedback rows.
 
@@ -575,6 +578,10 @@ def execute_review(
     a normal single-model quick run when no second model is configured.
     """
     emit = progress or (lambda _msg: None)
+    # Validate before any git call: a typo must be a clear error, not a run that
+    # silently reviews the unfiltered diff. The value also travels in run_meta
+    # so a later resume reads back the same scope it was planned with.
+    whitespace_mode = normalize_whitespace(whitespace)
 
     def say(message: str) -> None:
         # Check at every lifecycle message too, not just inside model calls —
@@ -624,9 +631,9 @@ def execute_review(
     # changes" — the user asked to review the code, not to see git's opinion.
     try:
         diff_text = (
-            snapshot_diff(repo_root, paths=paths)
+            snapshot_diff(repo_root, paths=paths, whitespace=whitespace_mode)
             if snapshot
-            else get_diff(run_spec, repo_root, paths=paths)
+            else get_diff(run_spec, repo_root, paths=paths, whitespace=whitespace_mode)
         )
     except DiffError as exc:
         raise DiffFailed(str(exc)) from exc
@@ -639,7 +646,7 @@ def execute_review(
     scope_fallback = False
     if not diff_text.strip() and not snapshot and is_head_family(run_spec):
         try:
-            whole_tree = snapshot_diff(repo_root, paths=paths)
+            whole_tree = snapshot_diff(repo_root, paths=paths, whitespace=whitespace_mode)
         except DiffError:
             whole_tree = ""
         if whole_tree.strip():
@@ -671,6 +678,7 @@ def execute_review(
                 "paths": paths,
                 "include_non_code": include_non_code,
                 "max_units": max_units,
+                "whitespace": whitespace_mode,
             },
             ensure_ascii=False,
             indent=2,
@@ -855,6 +863,16 @@ def execute_review(
                 token_budget=token_budget,
             )
         )
+        # A compiler error on a changed line is a finding even when no model
+        # mentioned it. Synthesize it here, after all units have finished, so
+        # the gate and the work order see the same list. Zero extra model calls.
+        synthesized = synthesize_static_findings(
+            all_diags, selected, collection.findings, repo_root
+        )
+        if synthesized:
+            collection.findings.extend(synthesized)
+            collection.comparison["static_synthesized"] = len(synthesized)
+            notices.append(t("pipeline.static_synthesized", n=len(synthesized)))
         # A stop request must not abort persistence: once any unit finished,
         # the partial result is the only thing the user paid for. The stop flag
         # still shortens the run inside review, but report writing always

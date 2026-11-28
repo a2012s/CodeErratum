@@ -26,6 +26,56 @@ EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 GIT_TIMEOUT_S = 120
 
 DIFF_HEADER = re.compile(r"^diff --git a/(?P<a>.+?) b/(?P<b>.+)$")
+
+# Whitespace filtering is a graded opt-in, not a single `-w` switch. `-w` and
+# even `-b` erase leading indentation, which is syntax in Python/YAML/Ruby;
+# for those files the strongest mode degrades to end-of-line only.
+WHITESPACE_MODES = ("keep", "eol", "change", "all")
+_INDENT_SENSITIVE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".yaml",
+        ".yml",
+        ".rb",
+        ".coffee",
+        ".hs",
+        ".elm",
+        ".purs",
+        ".haml",
+        ".slim",
+        ".ex",
+        ".exs",
+    }
+)
+_INDENT_SENSITIVE_NAMES = frozenset({"makefile", "gemfile", "rakefile", "podfile"})
+
+
+def normalize_whitespace(value: str | None) -> str:
+    # Strict lowercase: the CLI enum, MCP schema and Web select all advertise
+    # these exact spellings, so accepting "ALL" in one path only would drift.
+    mode = (value or "keep").strip() or "keep"
+    if mode not in WHITESPACE_MODES:
+        raise ValueError(f"whitespace must be one of {', '.join(WHITESPACE_MODES)}")
+    return mode
+
+
+def _indent_sensitive(path: str) -> bool:
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name in _INDENT_SENSITIVE_NAMES or Path(name).suffix in _INDENT_SENSITIVE_SUFFIXES
+
+
+def _whitespace_flags(mode: str, diff_text: str) -> list[str]:
+    if mode == "keep":
+        return []
+    if mode == "eol":
+        return ["--ignore-space-at-eol"]
+    changed = [m.group("b") for line in diff_text.splitlines() if (m := DIFF_HEADER.match(line))]
+    if any(_indent_sensitive(path) for path in changed):
+        # `-b` also collapses leading whitespace, so it is not safe here.
+        return ["--ignore-space-at-eol"]
+    return ["--ignore-space-change"] if mode == "change" else ["--ignore-all-space"]
+
+
 HUNK_HEADER = re.compile(
     r"^@@ -(?P<old>\d+)(?:,(?P<old_n>\d+))? \+(?P<new>\d+)(?:,(?P<new_n>\d+))? @@"
 )
@@ -72,7 +122,7 @@ def normalize_pathspec(paths: str) -> str:
     return paths.strip()
 
 
-def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
+def get_diff(spec: str, repo_root: Path, paths: str = "", whitespace: str = "keep") -> str:
     """Resolve a diff spec through git. Supports ranges and optional pathspecs.
 
     ``paths`` is split on whitespace and appended after ``--`` as separate git
@@ -89,28 +139,42 @@ def get_diff(spec: str, repo_root: Path, paths: str = "") -> str:
         raise DiffError("diff spec must not be empty")
     if spec.startswith("-"):
         raise DiffError("diff spec must not start with '-': git would parse it as an option")
+    mode = normalize_whitespace(whitespace)
     pathspec = normalize_pathspec(paths)
     cmd = ["git", "diff", "--no-color", "--unified=3", "--end-of-options", spec]
     if pathspec:
         cmd += ["--", *pathspec.split()]
-    result = _run_git(cmd, repo_root)
-    if result is None:
-        raise DiffError(t("git.timeout", seconds=GIT_TIMEOUT_S, cmd=" ".join(cmd)))
-    if result.returncode != 0:
-        detail = result.stderr.strip() or f"git diff {spec} failed"
-        if "ambiguous argument" in detail:
-            if not has_commits(repo_root):
-                # A copied-in codebase that was `git init`ed but never committed:
-                # HEAD does not exist at all, so both the fix and the vocabulary
-                # of "one commit" are wrong. Name the empty-tree recipe instead.
-                detail = t("git.no_commits", tree=EMPTY_TREE_SHA1, spec=spec, detail=detail)
-            elif spec.startswith("HEAD~"):
-                # A repo with one commit has no HEAD~1. The raw git message is
-                # English and suggests an unrelated fix (--), which leaves users
-                # stuck; say what to type instead and keep the original for copying.
-                detail = t("git.diff_unresolvable", spec=spec, detail=detail)
-        raise DiffError(detail)
-    return result.stdout
+
+    def checked(parts: list[str]) -> str:
+        result = _run_git(parts, repo_root)
+        if result is None:
+            raise DiffError(t("git.timeout", seconds=GIT_TIMEOUT_S, cmd=" ".join(parts)))
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f"git diff {spec} failed"
+            if "ambiguous argument" in detail:
+                if not has_commits(repo_root):
+                    # A copied-in codebase that was `git init`ed but never committed:
+                    # HEAD does not exist at all, so both the fix and the vocabulary
+                    # of "one commit" are wrong. Name the empty-tree recipe instead.
+                    detail = t("git.no_commits", tree=EMPTY_TREE_SHA1, spec=spec, detail=detail)
+                elif spec.startswith("HEAD~"):
+                    # A repo with one commit has no HEAD~1. The raw git message is
+                    # English and suggests an unrelated fix (--), which leaves users
+                    # stuck; say what to type instead and keep the original for copying.
+                    detail = t("git.diff_unresolvable", spec=spec, detail=detail)
+            raise DiffError(detail)
+        return result.stdout
+
+    raw = checked(cmd)
+    if mode == "keep":
+        return raw
+    flags = _whitespace_flags(mode, raw)
+    if not flags:
+        return raw
+    # Re-run with the ignore flags, but only after inspecting the real diff:
+    # `all` has to step down for indentation-sensitive files.
+    at = cmd.index("--end-of-options")
+    return checked([*cmd[:at], *flags, *cmd[at:]])
 
 
 def has_commits(repo_root: Path) -> bool:
@@ -175,7 +239,7 @@ def is_head_family(spec: str) -> bool:
 SNAPSHOT_TIMEOUT_S = 180
 
 
-def snapshot_diff(repo_root: Path, paths: str = "") -> str:
+def snapshot_diff(repo_root: Path, paths: str = "", whitespace: str = "keep") -> str:
     """Every file that would be committed, as an addition diff.
 
     Built inside a throwaway git directory (``GIT_DIR`` in a temp dir, work tree
@@ -251,10 +315,20 @@ def snapshot_diff(repo_root: Path, paths: str = "") -> str:
         if added.returncode != 0:
             raise DiffError(added.stderr.strip() or "git add failed for the snapshot")
 
-        diff = git("diff", "--cached", "--no-color", "--unified=3", EMPTY_TREE_SHA1)
-        if diff.returncode != 0:
-            raise DiffError(diff.stderr.strip() or "git diff failed for the snapshot")
-        return diff.stdout
+        args = ["diff", "--cached", "--no-color", "--unified=3", EMPTY_TREE_SHA1]
+        first = git(*args)
+        if first.returncode != 0:
+            raise DiffError(first.stderr.strip() or "git diff failed for the snapshot")
+        mode = normalize_whitespace(whitespace)
+        if mode == "keep":
+            return first.stdout
+        flags = _whitespace_flags(mode, first.stdout)
+        if not flags:
+            return first.stdout
+        second = git(*args[:4], *flags, *args[4:])
+        if second.returncode != 0:
+            raise DiffError(second.stderr.strip() or "git diff failed for the snapshot")
+        return second.stdout
 
 
 def get_commit(repo_root: Path) -> str:

@@ -97,6 +97,16 @@ TOOLS: list[dict] = [
                         "pass 0 for no cap. max_units caps breadth, this caps spend."
                     ),
                 },
+                "whitespace": {
+                    "type": "string",
+                    "enum": ["keep", "eol", "change", "all"],
+                    "default": "keep",
+                    "description": (
+                        "Ignore whitespace in the diff. keep is the default; eol ignores "
+                        "trailing spaces; change/all ignore more, but step down to eol for "
+                        "indentation-sensitive files."
+                    ),
+                },
                 "house_rules": {
                     "type": "string",
                     "description": (
@@ -298,6 +308,7 @@ def _tool_review_diff(args: dict) -> dict:
                 if args.get("token_budget") is not None
                 else None
             ),
+            whitespace=str(args.get("whitespace") or "keep"),
             house_rules=str(args.get("house_rules") or ""),
             author_model=str(args.get("author_model") or "") or None,
             paths=str(args.get("paths") or ""),

@@ -149,7 +149,12 @@ Feedback after a review: `codeerratum accept <finding_id>`, `codeerratum reject 
 ### Cost, checkpoints and reuse
 
 `max_units` caps how many units get reviewed; `--token-budget` caps how many tokens are
-spent (or `CODEERRATUM_TOKEN_BUDGET`). Before the first paid call the run writes
+spent (or `CODEERRATUM_TOKEN_BUDGET`). `--whitespace keep|eol|change|all` drops
+formatting-only noise from the diff before units are built (`keep` by default; CLI, Web and
+MCP all accept it). `eol` ignores trailing spaces, `change` and `all` ignore more — but every
+mode steps down to `eol` for indentation-sensitive files (Python, YAML, Ruby, Makefile, …),
+because `-w` and even `-b` erase leading indentation, which is syntax there. Before the first
+paid call the run writes
 `runs/<id>/estimate.json` — unit count, seats, input characters, projected tokens — and a
 projection that already exceeds the budget is said out loud rather than discovered when the
 report turns out to be half a report. Crossing the budget mid-run fuses the review through
@@ -320,7 +325,15 @@ codeerratum pr --fail-on-blocking       # comment first, then exit 2 on a gate h
 Exit 2 means "a blocking item exists", never "the review broke" (that is exit 1).
 The blocking section is never truncated: the render cap that limits advisory findings to ten
 does not apply to gate items, because a gate that depends on how many rows we printed would
-pass a run with a hard static diagnostic. **The reviewer does not block a merge by itself** —
+pass a run with a hard static diagnostic.
+
+A compiler error on a changed line becomes a work order even when no model mentioned it:
+`tsc`/`eslint` **errors** that no finding covers are synthesized into a `origin="static"`
+finding with the tool's message as evidence and the tool command as acceptance. Only errors
+on lines added by this diff qualify, so pre-existing repo errors do not flood the report;
+warnings stay advisory (P2). Tool-synthesized findings carry no `source_models` and are
+excluded from model precision/recall in `eval`, reported separately as `static_findings`.
+**The reviewer does not block a merge by itself** —
 it emits a signal for a PR check or a downstream coding agent to enforce. Turn the flag on in
 the job that should own that decision; leave it off when you only want the report.
 

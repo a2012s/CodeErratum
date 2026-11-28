@@ -10,6 +10,7 @@ import sys
 import threading
 import webbrowser
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 
 import typer
@@ -33,6 +34,13 @@ from .report.outcomes import apply_outcomes, parse_outcomes
 from .review import MAX_HOUSE_RULES_CHARS
 from .store import ReviewStore
 from .suggest import append_rules, build_suggestions
+
+
+class WhitespaceMode(StrEnum):
+    KEEP = "keep"
+    EOL = "eol"
+    CHANGE = "change"
+    ALL = "all"
 
 
 def _store(repo_root: Path) -> ReviewStore:
@@ -142,6 +150,12 @@ def review(
         help="Exit 2 when the work order has a blocking finding (hard static evidence "
         "plus an acceptance command). Off by default; PR checks opt in",
     ),
+    whitespace: WhitespaceMode = typer.Option(
+        WhitespaceMode.KEEP,
+        "--whitespace",
+        help="Ignore whitespace in the diff: keep (default), eol, change, all. "
+        "Indentation-sensitive files (Python/YAML/Ruby/...) always use eol",
+    ),
 ) -> None:
     """Review a git diff and write an executable erratumReview.md work order."""
     repo_root = repo.resolve()
@@ -160,6 +174,7 @@ def review(
             include_non_code=include_non_code,
             tiered=not no_tiered,
             token_budget=token_budget or None,
+            whitespace=whitespace.value,
         )
     except NotARepository as exc:
         console.print(f"[red]Error: {exc}[/red]")

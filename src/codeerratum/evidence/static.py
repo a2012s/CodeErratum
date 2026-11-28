@@ -49,6 +49,9 @@ class StaticDiag:
     line: int
     code: str
     message: str
+    # tsc and eslint distinguish errors from warnings; a warning must not become
+    # a merge-blocking work order when diagnostics are synthesized.
+    severity: str = "error"
 
     def to_dict(self) -> dict:
         return {
@@ -57,6 +60,7 @@ class StaticDiag:
             "line": self.line,
             "code": self.code,
             "message": self.message,
+            "severity": self.severity,
         }
 
 
@@ -135,6 +139,7 @@ def run_mypy(path: str, cwd) -> list[StaticDiag]:
                     line=int(parts[1]),
                     code=parts[2].strip(),
                     message=parts[3].strip(),
+                    severity=parts[2].strip() or "error",
                 )
             )
     return diags
@@ -228,6 +233,7 @@ def _run_tsc_project(repo: Path) -> list[StaticDiag]:
                     line=int(m.group(2)),
                     code=m.group(5),
                     message=m.group(6),
+                    severity=m.group(4),
                 )
             )
     return diags
@@ -319,6 +325,8 @@ def run_eslint(path: str, repo_root: Path) -> list[StaticDiag]:
                     line=msg.get("line", 0),
                     code=msg.get("ruleId") or "eslint",
                     message=msg.get("message", ""),
+                    # eslint's JSON uses 1 = warning, 2 = error.
+                    severity="error" if msg.get("severity") == 2 else "warning",
                 )
             )
     return diags

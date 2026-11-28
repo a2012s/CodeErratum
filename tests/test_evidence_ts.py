@@ -504,6 +504,7 @@ def test_staticdiag_to_dict(tmp_path):
         "line": 3,
         "code": "TS1234",
         "message": "bad",
+        "severity": "error",
     }
 
 

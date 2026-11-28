@@ -35,7 +35,7 @@ from ..config_store import load_user as load_user_config
 from ..config_store import public as public_config
 from ..config_store import save as save_config_file
 from ..i18n import set_lang, t
-from ..ingest import DiffError, normalize_pathspec
+from ..ingest import DiffError, normalize_pathspec, normalize_whitespace
 from ..model_check import probe_model
 from ..models import ModelRegistry
 from ..models.finding import is_unit_failure
@@ -754,6 +754,10 @@ class WebApp:
                         else "server.units_clamped_high"
                     )
                     notices.append(t(key, asked=requested_units, used=max_units, cap=MAX_UNITS_CAP))
+        try:
+            whitespace = normalize_whitespace(payload.get("whitespace"))
+        except ValueError as exc:
+            raise PipelineError(str(exc)) from exc
         author = str(payload.get("author_model") or "").strip() or None
         # Validate here so a bad path is a 400 with a clear message, not a
         # git failure buried in a 500 after the review has started.
@@ -817,6 +821,7 @@ class WebApp:
             "notices": notices,
             "include_non_code": include_non_code,
             "tiered": tiered,
+            "whitespace": whitespace,
         }
 
     def acquire_review_lock(self, params: dict | None = None) -> None:
@@ -948,6 +953,7 @@ class WebApp:
                 on_findings=on_findings,
                 include_non_code=params.get("include_non_code", False),
                 tiered=params.get("tiered", True),
+                whitespace=params.get("whitespace", "keep"),
             )
         finally:
             if self._gate is not None:

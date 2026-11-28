@@ -383,6 +383,11 @@ MESSAGES: dict[str, tuple[str, str]] = {
         "Reused {n} unit result(s) from an earlier run: the request was byte-identical, "
         "so the previous reply was replayed instead of paid for",
     ),
+    "pipeline.static_synthesized": (
+        "静态工具补出 {n} 条工单：变更行上的编译/类型错误未被模型提及，已按证据进入门禁",
+        "{n} work order(s) synthesized from static tools: compiler/type errors on "
+        "changed lines that no model mentioned, gated on hard evidence",
+    ),
     "pipeline.estimate": (
         "成本预估：{units} 个单元 × {seats} 席位 ≈ {tokens} tokens"
         "（输入侧下限，见 run 目录 estimate.json）",

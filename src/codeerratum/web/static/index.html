@@ -510,6 +510,18 @@
       data-en="Past the budget the run stops and still writes a partial work order, which the run panel can continue.">
       超出预算即熔断：已审部分照样出工单，运行详情里可继续跑剩下的单元。</div>
     <div class="field">
+      <label for="whitespace" data-en="Whitespace in diff">diff 空白处理</label>
+      <select id="whitespace">
+        <option value="keep" data-en="keep · exact diff">保留（默认）</option>
+        <option value="eol" data-en="ignore trailing spaces">忽略行尾空格</option>
+        <option value="change" data-en="ignore whitespace changes">忽略空格变化</option>
+        <option value="all" data-en="ignore all whitespace">忽略所有空白</option>
+      </select>
+    </div>
+    <div class="hint" id="whitespaceHint"
+      data-en="Indentation-sensitive files (Python/YAML/Ruby) always use the trailing-spaces mode, even under 'all'.">
+      缩进敏感文件（Python/YAML/Ruby）始终只忽略行尾空格，即使选了「忽略所有空白」。</div>
+    <div class="field">
       <label data-en="Review models">审查模型</label>
       <div class="chips" id="modelPicker"></div>
       <div class="hint" id="modelHint">读取模型配置中…</div>
@@ -1689,6 +1701,7 @@ async function startReview(overrides = {}, allowEmptyPrompt = true) {
     mode: $("mode").value,
     max_units: unitsValue(),
     token_budget: tokenBudgetValue(),
+    whitespace: $("whitespace") ? $("whitespace").value : "keep",
     models: [...PICKED],
     author_model: $("authorModel").value.trim(),
     write_markdown: $("writeMd").checked,

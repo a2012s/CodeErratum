@@ -188,6 +188,13 @@ class Finding(BaseModel):
     source_models: list[str] = Field(
         default_factory=list, description="Models whose first-round review produced this finding"
     )
+    origin: Literal["model", "static"] = Field(
+        default="model",
+        description=(
+            "Who produced the finding. Tool-synthesized work orders have no model "
+            "behind them, so eval must not charge them to any model's precision."
+        ),
+    )
     agreement: Agreement = "unverified"
     verification: Verification = "unverified"
     spec_level: SpecLevel = "L1"

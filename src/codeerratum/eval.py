@@ -121,7 +121,18 @@ def _hits(finding: Finding, bug: SeededBug) -> bool:
 
 
 def _all_findings(collections: list[FindingCollection]) -> list[Finding]:
-    return [f for c in collections for f in c.findings]
+    """Findings a *model* produced.
+
+    Tool-synthesized findings are real work orders but they carry no model
+    behind them. Counting them in a model's precision (or in the recall
+    denominator a model is credited for) would make the curve measure the
+    compiler instead of the reviewer.
+    """
+    return [f for c in collections for f in c.findings if f.origin == "model"]
+
+
+def _static_findings(collections: list[FindingCollection]) -> list[Finding]:
+    return [f for c in collections for f in c.findings if f.origin == "static"]
 
 
 def _all_refuted(collections: list[FindingCollection]) -> list[Finding]:
@@ -186,6 +197,9 @@ def score_seeded(collections: list[FindingCollection], bugs: list[SeededBug]) ->
         "bugs_found": found,
         "recall": round(found / len(bugs), 3) if bugs else None,
         "findings_reported": len(reported),
+        # Reported separately: these are work orders, not model output, and are
+        # deliberately excluded from precision above.
+        "static_findings": len(_static_findings(collections)),
         "findings_matched": hits,
         "precision": round(hits / len(reported), 3) if reported else None,
         # A seeded bug the only sighting of which the falsifier talked out of the
@@ -383,7 +397,7 @@ def export_missed_corpus(store: Any, collections: list[FindingCollection]) -> li
     """
     verdicts = {str(r["id"]): str(r.get("status") or "") for r in store.adjudication_rows()}
     by_id: dict[str, tuple[FindingCollection, Finding]] = {
-        f.id: (c, f) for c in collections for f in c.findings
+        f.id: (c, f) for c in collections for f in c.findings if f.origin == "model"
     }
     samples: dict[str, dict[str, Any]] = {}
     for fid, status in verdicts.items():
@@ -420,6 +434,8 @@ def score_missed(
     covered: set[tuple[str, str]] = set()
     for collection in collections:
         for finding in collection.findings:
+            if finding.origin != "model":
+                continue
             cluster = _sample_cluster(finding)
             models = set(finding.source_models)
             if not models and collection.model_id:

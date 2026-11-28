@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.7.8] — 2026-11-28
+
+补上上一轮留下的两个边界，均先在旧实现上验证测试失败：
+
+- **未闭环的静态错误现在会自己变成工单**：此前 `executor.py` 只把诊断挂到模型已报出的
+  finding 上（anchor ±3 行），tsc 报错但无人提及就只躺在 `static_diags.json`，门禁仍绿。
+  新增 `review/static_findings.py`：复用已落盘的 `all_diags`，按 hunk 的**新增行**过滤、
+  去掉已有 finding 覆盖的（同样 ±3）、去重，再合成 `origin="static"` 的 Finding
+  （P1 + `static_diag` hard + 可执行验收命令），进同一份工单与门禁，零额外模型调用。
+  `StaticDiag` 新增 `severity`（tsc / eslint 解析时填入），warning 映射 P2 不阻断；
+  ruff/mypy 一律建议项，避免 lint 噪音阻断合并。
+  `Finding.origin` 让 eval 把工具条目排除出模型 precision/recall，单独报
+  `static_findings`；漏报语料导出也只认模型条目。
+- **diff 空白处理改成分级开关**：`--whitespace keep|eol|change|all`，CLI / Web 表单 /
+  Web API / MCP schema 四处平权，并写进 `run_meta.json` 供续跑审计。
+  关键修正：`-b`（change）同样会吞掉**行首**缩进，所以缩进敏感文件
+  （Python/YAML/Ruby/Makefile 等）在所有模式下都降级为 `--ignore-space-at-eol`；
+  原先设想的「all 降级 change」会把 Python 的缩进错误从 diff 里抹掉。
+- 新增 15 条回归测试（6 条合成/门禁/eval 归属，9 条空白模式/三入口），
+  旧实现上分别以 `ModuleNotFoundError`、`TypeError`、`KeyError` 复现失败。
+  测试基线 **728 passed**，ruff check / format --check 全绿。
+
 ## [0.7.7] — 2026-11-28
 
 自查 0.7.6 未推送代码，修掉两个会让门禁/曲线给出错误结论的问题：
